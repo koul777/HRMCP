@@ -11,11 +11,14 @@ venv/
 logs/
 *.log
 
-data/raw/
-data/processed/*.db
+data/raw/*
+!data/raw/.gitkeep
+!data/raw/*.xlsx
+!data/raw/*.xls
+data/processed/*
+!data/processed/.gitkeep
+!data/processed/*.db
 data/processed/*.db-*
-*.xlsx
-*.xls
 reports/*.json
 reports/*.md
 reports/**/*.json
