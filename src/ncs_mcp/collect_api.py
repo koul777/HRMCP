@@ -101,7 +101,12 @@ def fetch_page(api_url: str, service_key: str, page_no: int, num_of_rows: int, t
         raise RuntimeError(
             f"API request failed: url={api_url}, page_no={page_no}, error={type(exc).__name__}"
         ) from None
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except requests.HTTPError:
+        raise RuntimeError(
+            f"API request failed: url={api_url}, page_no={page_no}, status={response.status_code}"
+        ) from None
     return response.json()
 
 
@@ -130,7 +135,13 @@ def fetch_standard_page(
         raise RuntimeError(
             f"API request failed: url={request_url}, params={safe_params}, error={type(exc).__name__}"
         ) from None
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except requests.HTTPError:
+        safe_params = {key: value for key, value in params.items() if key != "serviceKey"}
+        raise RuntimeError(
+            f"API request failed: url={request_url}, params={safe_params}, status={response.status_code}"
+        ) from None
     return response.json()
 
 
