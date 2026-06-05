@@ -1,0 +1,6 @@
+mcp
+openpyxl
+requests
+python-dotenv
+pytest
+
