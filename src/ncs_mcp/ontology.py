@@ -18,25 +18,103 @@ SCOPE_BUSINESS_02 = "business_accounting_office_02"
 
 ONTOLOGY_SCHEMA: dict[str, Any] = {
     "scope": "NCS-SQF ontology MCP",
+    "purpose": {
+        "policy_context": (
+            "NCS를 기반으로 KQF/SQF가 지향하는 직무능력 중심 사회, "
+            "교육훈련 품질 보장, 중복학습 완화, 평생경력개발경로 가시화를 지원한다."
+        ),
+        "service_goal": (
+            "사용자가 원하는 업무를 물었을 때 SQF 직무수준, NCS 능력단위, "
+            "수행준거, KSA, 교육훈련-학위-자격-현장경력 근거를 연결해 "
+            "교육 추천과 역량 갭분석을 제공한다."
+        ),
+    },
     "mvp": {
         "major_code": MVP_MAJOR_CODE,
         "sqf_field_name": MVP_SQF_FIELD_NAME,
         "job_name": MVP_JOB_NAME,
     },
+    "concepts": {
+        "KQF": {
+            "label": "한국형 국가역량체계",
+            "definition": (
+                "NCS 등을 바탕으로 학력, 자격, 현장경력, 교육훈련 이수 결과가 "
+                "상호 연계될 수 있도록 한 국가 수준의 수준체계."
+            ),
+        },
+        "SQF": {
+            "label": "산업별역량체계",
+            "definition": (
+                "산업별 현장에서 통용되는 직무를 도출하여 표준화하고, "
+                "직무수행에 필요한 능력을 구조화하여 교육훈련-학위-자격-현장경력을 "
+                "연계해 활용하는 체계."
+            ),
+        },
+        "Sector": {
+            "label": "산업",
+            "definition": "일반적인 근로자의 경력이동이 가능한 산업 활동분야 또는 영역.",
+        },
+        "Qualification": {
+            "label": "역량",
+            "definition": (
+                "직업이나 특정 업무 수행에 필요한 자질, 소질, 능력이며 "
+                "학위, 직업자격, 교육훈련 이수증 등 공식적으로 인정받은 역량을 포함한다."
+            ),
+        },
+        "Framework": {
+            "label": "체계",
+            "definition": (
+                "해당 산업과 관련된 학위, 자격, 교육훈련 등을 장착하기 위한 골격 또는 틀."
+            ),
+        },
+        "SQFJob": {
+            "label": "SQF 직무",
+            "definition": (
+                "업무수행에 필요한 지식과 기술이 유사하여 해당 노동시장에서 "
+                "근로자의 수직적 경력이동이 일반적으로 이루어지는 업무의 집합."
+            ),
+        },
+        "SQFLevel": {
+            "label": "SQF 수준",
+            "definition": (
+                "업무수행에 필요한 지식 및 기술의 난이도와 복잡성에 따라 "
+                "SQF 직무를 구분하는 기준."
+            ),
+        },
+        "SQFJobLevel": {
+            "label": "직무수준",
+            "definition": (
+                "SQF 직무를 SQF 수준에 따라 구분한 것으로, 직무에 요구되는 "
+                "직무역량이 타 직무수준과 객관적으로 구분되는 일의 단위."
+            ),
+        },
+        "JobCompetency": {
+            "label": "직무역량",
+            "definition": "특정 직무수준을 수행하기 위해 요구되는 지식, 기술, 자율성, 책임성 및 관련 능력.",
+        },
+    },
     "classes": [
+        "KQF",
+        "SQF",
         "NCSMajor",
         "NCSClassification",
         "NCSCompetencyUnit",
         "NCSCompetencyElement",
         "NCSPerformanceCriterion",
         "NCSKSA",
+        "SQFSector",
         "SQFField",
         "SQFJob",
-        "SQFDutyLevel",
+        "SQFLevel",
+        "SQFJobLevel",
+        "RecognitionEvidence",
+        "DocumentEvidence",
         "MappingEvidence",
         "Recommendation",
     ],
     "relations": [
+        "kqf:implementedBy",
+        "sqf:hasSector",
         "ncs:hasClassification",
         "ncs:hasUnit",
         "ncs:hasElement",
@@ -45,7 +123,10 @@ ONTOLOGY_SCHEMA: dict[str, Any] = {
         "ncs:requiresSkill",
         "ncs:requiresAttitude",
         "sqf:hasJob",
-        "sqf:hasDutyLevel",
+        "sqf:hasLevel",
+        "sqf:hasJobLevel",
+        "sqf:hasRecognitionEvidence",
+        "sqf:hasDocumentEvidence",
         "sqf:mappedToNCSMajor",
         "sqf:requiresNCSUnit",
         "sqf:partiallyCovers",

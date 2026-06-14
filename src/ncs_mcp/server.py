@@ -119,7 +119,10 @@ def management_support_mvp() -> str:
         {
             "mvp": ONTOLOGY_SCHEMA["mvp"],
             "sqf_duties": [sqf_summary(row) for row in duties],
-            "note": "경영지원 MVP는 SQF 02 > 경영관리 > 경영지원과 NCS 02를 먼저 연결한다.",
+            "note": (
+                "경영지원 MVP는 SQF 02 경영·회계·사무 > 경영관리 > 경영지원과 "
+                "NCS 02 경영·회계·사무를 먼저 연결한다."
+            ),
         },
         ensure_ascii=False,
         indent=2,
@@ -146,6 +149,7 @@ def sqf_gap_report_prompt(
 4. SQF 교육훈련, 자격, 경력 직접 근거
 5. SQF 직접 근거가 없을 때 NCS 능력단위/KSA를 학습목표로 전환한 보완 추천
 6. 매핑 confidence, review_status, evidence_text
+7. 문서/OCR/HWP 청크 근거가 있으면 보고서 제목과 페이지 범위
 
 주의: 이 결과는 공식 인정 판정이 아니라 근거 기반 추천/갭분석 보조 결과로 작성한다.
 """.strip()

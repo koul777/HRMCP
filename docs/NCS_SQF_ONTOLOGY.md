@@ -4,6 +4,8 @@
 
 NCS-SQF 온톨로지의 1차 목표는 공식 인정 판정이 아니라 역량 탐색, 교육 추천, 부족역량 설명이다. 사용자가 원하는 업무를 물으면 시스템은 관련 SQF 직무수준, NCS 능력단위, 능력단위요소, 수행준거, KSA, 교육훈련, 자격, 경력 조건을 근거와 함께 반환해야 한다.
 
+`미래 교육 품질, NCS에서 길을 찾다.pdf`의 관점도 이 목적을 뒷받침한다. NCS는 학벌·스펙 중심이 아니라 직무능력 중심의 능력사회를 만들기 위한 기준이고, KQF는 학력·자격·현장경력·교육훈련 이수 결과를 상호 연계하는 국가 수준 체계다. SQF는 KQF의 산업별 구현 단위로서 산업 현장의 직무를 도출·표준화하고, 교육훈련-학위-자격-현장경력을 직무수준에 연결하는 골격이다. 따라서 이 온톨로지는 교육 추천을 “강의명 나열”로 끝내지 않고 직무수준, 직무역량, 능력단위, KSA, 인정 근거, 보고서 근거를 함께 설명해야 한다.
+
 PDF 요약의 기준을 설계 원칙으로 둔다.
 
 - 값 나열보다 관계 그래프를 우선한다.
@@ -25,6 +27,12 @@ SQF `/openapi26` 실제 응답은 최상위 `data` 배열과 `dataInfo` 객체�
 - `duty_qualification` 보유 135건.
 - `duty_career` 보유 111건.
 - `duty_license` 보유 103건.
+- `sqf_job_levels_normalized` 2,397건.
+- SQF 자료실 문서 105건.
+- PDF/OCR/HWP 문서 자산 125개 모두 extracted.
+- 문서 청크 9,105건.
+- 문서 청크와 SQF 직무수준 근거 매칭 49,940건.
+- SQF-NCS 후보 매핑 22,642건.
 
 따라서 교육 추천은 SQF의 교육훈련 필드만으로 만들 수 없다. 교육훈련 필드가 비어 있는 SQF 직무는 NCS 능력단위, 능력단위요소, 수행준거, KSA를 학습 목표로 변환해 보완 추천해야 한다.
 
@@ -41,7 +49,7 @@ NCS: 02 경영·회계·사무
 
 ## 권장 기술 모델
 
-초기 구현은 SQLite에 materialized graph를 둔다. 운영 안정화 후 JSON-LD, RDF, SKOS, OWL, SHACL export를 추가한다.
+초기 구현은 SQLite에 materialized graph를 둔다. 현재는 JSON-LD export와 readiness validation을 제공한다. RDF/SKOS/OWL/SHACL은 JSON-LD 구조를 기반으로 다음 단계에서 확장한다.
 
 - SKOS: NCS 분류체계와 SQF 산업/직무 체계의 `broader`, `narrower`, `related`, `exactMatch`, `closeMatch`.
 - OWL: 직무, 능력단위, KSA, 교육훈련, 자격, 경력 조건의 클래스와 속성.
@@ -146,8 +154,8 @@ Mapping
 4. MCP 도구에서 SQF 검색, 매핑 조회, 갭분석, 다음 NCS 능력단위 추천 제공.
 5. 대시보드에서 매핑 후보 검토와 `review_status` 저장.
 6. `recommend_education_for_duty`가 매핑 근거를 사용하도록 개선.
-7. JSON-LD/SKOS export.
-8. SHACL 검증.
+7. JSON-LD export와 ontology validate.
+8. SKOS/OWL/SHACL export 및 검증 확장.
 
 ## 추천 KPI
 

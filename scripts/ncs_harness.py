@@ -26,6 +26,7 @@ from ncs_mcp.db import connect, initialize_database
 from ncs_mcp.evaluation import run_evaluation
 from ncs_mcp.handoff import export_handoff_package
 from ncs_mcp.ontology import build_sqf_mapping_candidates
+from ncs_mcp.ontology_export import export_ontology_jsonld, validate_ontology_readiness
 from ncs_mcp.preprocess_excel import preprocess_excel
 from ncs_mcp.preprocess_sqf_documents import preprocess_sqf_documents
 from ncs_mcp.quality import run_quality_checks
@@ -469,6 +470,16 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, Any]:
             )
         finally:
             conn.close()
+    if args.validate_ontology:
+        summary["stages"]["validate_ontology"] = validate_ontology_readiness(settings.db_path)
+    if args.export_ontology_jsonld:
+        summary["stages"]["export_ontology_jsonld"] = export_ontology_jsonld(
+            settings.db_path,
+            Path(args.ontology_jsonld_out),
+            include_excluded_mappings=args.ontology_include_excluded_mappings,
+            include_chunk_evidence=not args.ontology_no_chunk_evidence,
+            chunk_evidence_limit=args.ontology_chunk_evidence_limit,
+        )
     if args.refine:
         summary["stages"]["refine_generate"] = run_refinement_harness(
             settings.db_path,
@@ -586,6 +597,16 @@ def parse_args() -> argparse.Namespace:
     evaluate.add_argument("--scope-tag")
     evaluate.add_argument("--run-name", default="mvp")
 
+    ontology_export = subparsers.add_parser(
+        "ontology",
+        help="Validate or export the NCS-SQF ontology graph.",
+    )
+    ontology_export.add_argument("action", choices=["validate", "export-jsonld"])
+    ontology_export.add_argument("--out", type=Path, default=ROOT / "exports" / "ncs_sqf_ontology.jsonld")
+    ontology_export.add_argument("--include-excluded-mappings", action="store_true")
+    ontology_export.add_argument("--no-chunk-evidence", action="store_true")
+    ontology_export.add_argument("--chunk-evidence-limit", type=int, default=50000)
+
     refine = subparsers.add_parser(
         "refine",
         help="Generate/apply LLM-ready refinement jobs from quality issues.",
@@ -643,6 +664,12 @@ def parse_args() -> argparse.Namespace:
     pipeline.add_argument("--mapping-source-key")
     pipeline.add_argument("--mapping-limit-per-duty", type=int, default=10)
     pipeline.add_argument("--mapping-duty-limit", type=int, default=5000)
+    pipeline.add_argument("--validate-ontology", action="store_true")
+    pipeline.add_argument("--export-ontology-jsonld", action="store_true")
+    pipeline.add_argument("--ontology-jsonld-out", default=str(ROOT / "exports" / "ncs_sqf_ontology.jsonld"))
+    pipeline.add_argument("--ontology-include-excluded-mappings", action="store_true")
+    pipeline.add_argument("--ontology-no-chunk-evidence", action="store_true")
+    pipeline.add_argument("--ontology-chunk-evidence-limit", type=int, default=50000)
     pipeline.add_argument("--refine", action="store_true")
     pipeline.add_argument("--refine-issue-types")
     pipeline.add_argument("--refine-target-types")
@@ -753,6 +780,20 @@ def main() -> None:
     elif args.command == "evaluate":
         settings = load_settings()
         print_json(run_evaluation(settings.db_path, scope_tag=args.scope_tag, run_name=args.run_name))
+    elif args.command == "ontology":
+        settings = load_settings()
+        if args.action == "validate":
+            print_json(validate_ontology_readiness(settings.db_path))
+        else:
+            print_json(
+                export_ontology_jsonld(
+                    settings.db_path,
+                    args.out,
+                    include_excluded_mappings=args.include_excluded_mappings,
+                    include_chunk_evidence=not args.no_chunk_evidence,
+                    chunk_evidence_limit=args.chunk_evidence_limit,
+                )
+            )
     elif args.command == "refine":
         settings = load_settings()
         print_json(

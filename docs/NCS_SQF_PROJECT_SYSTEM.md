@@ -69,11 +69,17 @@ business_accounting_office_02
 현재 기준선:
 
 ```text
-management_support 매핑: 67건
-business_accounting_office_02 매핑: 983건
-management_support 저품질 누수 후보: 6건
-business_accounting_office_02 저품질 누수 후보: 314건
-SQF 직접 교육훈련 근거율: 0.0
+SQF API 원천 직무수준: 2,397건
+정규화 SQF 직무수준: 2,397건
+SQF 자료실 문서: 105건
+PDF/OCR/HWP 추출 자산: 125개 extracted
+문서 청크: 9,105건
+문서 청크-SQF 직무수준 근거 후보: 49,940건
+SQF-NCS 후보 매핑: 22,642건
+eligible closeMatch: 5,131건
+eligible partiallyCovers: 11,298건
+excluded related: 6,213건
+SQF 직접 교육훈련 근거는 일부 직무에만 존재하므로 NCS KSA 기반 보완 추천이 기본 정책이다.
 ```
 
 ## 주요 명령

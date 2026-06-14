@@ -8,9 +8,12 @@
 - `docs/HARNESS_ENGINEERING.md`: 실행 하네스와 검증 루프.
 - `docs/NCS_MCP_PRD.md`: 제품 요구사항과 배경.
 - `docs/NCS_SQF_PROJECT_SYSTEM.md`: PRD 기반 전체 프로젝트 체계와 최종 MCP 발전 로드맵.
+- `docs/NCS_SQF_PURPOSE_FROM_SOURCE.md`: `미래 교육 품질, NCS에서 길을 찾다.pdf`에서 추출한 NCS-SQF 연결 취지.
 - `docs/NCS_SQF_ONTOLOGY.md`: NCS-SQF 온톨로지, 매핑, 추천 설계.
 - `docs/NCS_SQF_HARNESS_ENGINEERING.md`: NCS-SQF 경영지원 MVP 하네스와 검증 루프.
 - `docs/NCS_SQF_HANDOFF.md`: SQLite DB, schema, data dictionary, sample query 전달 패키지.
+- `docs/SQF_SQLITE_ONTOLOGY_SYSTEM.md`: SQF API, 자료실 보고서, OCR/HWP 전처리, JSON-LD 산출 체계.
+- `docs/CHATGPT_PRO_PROGRAM_BRIEF.md`: ChatGPT Pro에게 프로젝트를 정확히 전달하기 위한 설명서.
 - `reports/*.md`: 최근 전처리, 품질진단, API 보강 결과.
 
 ## 주요 디렉터리
@@ -42,7 +45,13 @@ python scripts\ncs_harness.py pipeline --preprocess --reset --quality --smoke
 python scripts\ncs_harness.py pipeline --api-standards --api-subd --smoke
 python scripts\ncs_harness.py pipeline --api-elements-hr --smoke
 python scripts\ncs_harness.py pipeline --api-sqf --sqf-major-code 02
-python scripts\ncs_harness.py build-sqf-mappings
+python scripts\ncs_harness.py collect-sqf-library --download --timeout 60
+python scripts\ncs_harness.py build-sqf-sqlite-model
+python scripts\ncs_harness.py preprocess-sqf-documents --ocr-empty --ocr-lang kor+eng --ocr-dpi 160
+python scripts\ncs_harness.py build-sqf-precision-matches --min-score 9 --max-matches-per-chunk 8
+python scripts\ncs_harness.py build-sqf-mappings --all-sqf --duty-limit 5000 --limit-per-duty 10
+python scripts\ncs_harness.py ontology validate
+python scripts\ncs_harness.py ontology export-jsonld --out exports\ncs_sqf_ontology.jsonld
 python scripts\ncs_harness.py export-package
 ```
 
@@ -58,6 +67,8 @@ python scripts\ncs_harness.py export-package
 4. `ncs_lclas_cd = classifications.major_code`는 확정 연결로 사용한다.
 5. SQF 직무와 NCS 세분류/능력단위/요소/KSA 연결은 별도 매핑 객체에 관계, 점수, 방식, 근거, 버전을 저장한다.
 6. 추천 결과는 항상 `SQF 직무`, `NCS 능력단위`, `KSA/수행준거`, `교육훈련/자격/경력`, `매칭 근거`를 함께 반환해야 한다.
+
+KQF/SQF 취지는 다음처럼 해석한다. KQF는 NCS 등을 바탕으로 학력, 자격, 현장경력, 교육훈련 이수 결과를 상호 연계하는 국가 수준 체계다. SQF는 산업별 현장에서 통용되는 직무를 도출·표준화하고, 직무수행에 필요한 능력을 구조화하여 교육훈련-학위-자격-현장경력을 연결하는 산업별 골격이다. 따라서 이 저장소의 온톨로지는 PDF 텍스트 검색기가 아니라 직무수준, 직무역량, 능력단위, 학습결과, 경력이동 근거를 잇는 materialized graph여야 한다.
 
 SQF의 `dutyEduTrain`, `dutyQualf`, `dutyCarr`는 일부 산업에만 채워져 있으므로, 교육 추천은 이 필드만으로 만들지 않는다. 비어 있는 경우 NCS 능력단위와 KSA를 학습 목표로 변환해 보완 추천한다.
 
@@ -78,6 +89,22 @@ python scripts\ncs_harness.py smoke
 ```
 
 스키마, 전처리 중복 제거, API 파서, MCP 응답 구조를 바꾸면 관련 테스트를 추가한다.
+
+온톨로지 작업을 바꾸면 추가로 아래를 확인한다.
+
+```powershell
+python scripts\ncs_harness.py ontology validate
+python scripts\ncs_harness.py ontology export-jsonld --out exports\ncs_sqf_ontology.jsonld
+```
+
+온톨로지 완료 기준:
+
+- 모든 SQF 문서 자산이 `extracted` 상태다.
+- SQF API 원천 행과 `sqf_job_levels_normalized` 수가 일치한다.
+- `sqf_ncs_matches`에는 전체 SQF 범위 후보가 생성되어 있다.
+- `sqf_chunk_job_level_matches`에는 보고서/OCR/HWP 근거 후보가 생성되어 있다.
+- MCP의 `analyze_gap`, `recommend_next_ncs_units`, `recommend_education_for_duty`, `search_sqf_precision_matches`가 샘플 DB에서 응답한다.
+- JSON-LD export가 생성된다.
 
 ## 보안
 
