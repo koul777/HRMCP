@@ -29,6 +29,8 @@ JSONLD_CONTEXT: dict[str, Any] = {
     "hasJob": {"@id": "sqf:hasJob", "@type": "@id"},
     "hasJobLevel": {"@id": "sqf:hasJobLevel", "@type": "@id"},
     "hasRecognitionEvidence": {"@id": "sqf:hasRecognitionEvidence", "@type": "@id"},
+    "hasChunk": {"@id": "evidence:hasChunk", "@type": "@id"},
+    "fromDocument": {"@id": "evidence:fromDocument", "@type": "@id"},
 }
 
 
@@ -43,6 +45,8 @@ def export_ontology_jsonld(
     include_excluded_mappings: bool = False,
     include_chunk_evidence: bool = True,
     chunk_evidence_limit: int = 50000,
+    include_document_chunks: bool = True,
+    document_chunk_limit: int = 20000,
 ) -> dict[str, Any]:
     conn = connect(db_path)
     initialize_database(conn)
@@ -242,6 +246,58 @@ def export_ontology_jsonld(
                     }
                 )
 
+        if include_document_chunks:
+            for row in conn.execute(
+                """
+                SELECT document_id, title, ontology_role, local_path,
+                       content_hash, text_extraction_status
+                FROM sqf_document_sources
+                ORDER BY document_id
+                """
+            ):
+                graph.append(
+                    {
+                        "@id": node_id("evidence-document", str(row["document_id"])),
+                        "@type": "evidence:DocumentSource",
+                        "name": row["title"],
+                        "evidence:ontologyRole": row["ontology_role"],
+                        "evidence:localPath": row["local_path"],
+                        "evidence:contentHash": row["content_hash"],
+                        "evidence:extractionStatus": row["text_extraction_status"],
+                    }
+                )
+
+            for row in conn.execute(
+                """
+                SELECT dc.chunk_id, da.document_id, da.asset_name,
+                       dc.chunk_index, dc.page_start, dc.page_end,
+                       dc.text, dc.char_count, dc.keywords_json, dc.ontology_tags_json
+                FROM sqf_document_chunks dc
+                JOIN sqf_document_assets da ON da.asset_id = dc.asset_id
+                ORDER BY dc.chunk_id
+                LIMIT ?
+                """,
+                (document_chunk_limit,),
+            ):
+                text = row["text"] or ""
+                graph.append(
+                    {
+                        "@id": node_id("evidence-chunk", str(row["chunk_id"])),
+                        "@type": "evidence:DocumentChunk",
+                        "fromDocument": {
+                            "@id": node_id("evidence-document", str(row["document_id"]))
+                        },
+                        "evidence:assetName": row["asset_name"],
+                        "evidence:chunkIndex": row["chunk_index"],
+                        "evidence:pageStart": row["page_start"],
+                        "evidence:pageEnd": row["page_end"],
+                        "evidence:charCount": row["char_count"],
+                        "evidence:keywords": row["keywords_json"],
+                        "evidence:ontologyTags": row["ontology_tags_json"],
+                        "evidence:snippet": text[:700],
+                    }
+                )
+
         payload = {
             "@context": JSONLD_CONTEXT,
             "@id": "urn:ncs-sqf-ontology",
@@ -258,6 +314,8 @@ def export_ontology_jsonld(
             "include_excluded_mappings": include_excluded_mappings,
             "include_chunk_evidence": include_chunk_evidence,
             "chunk_evidence_limit": chunk_evidence_limit if include_chunk_evidence else 0,
+            "include_document_chunks": include_document_chunks,
+            "document_chunk_limit": document_chunk_limit if include_document_chunks else 0,
         }
     finally:
         conn.close()
@@ -276,6 +334,7 @@ def validate_ontology_readiness(db_path: Path) -> dict[str, Any]:
                 "ksa_items",
                 "sqf_duties",
                 "sqf_job_levels_normalized",
+                "sqf_document_sources",
                 "sqf_document_assets",
                 "sqf_document_chunks",
                 "sqf_chunk_job_level_matches",
@@ -379,6 +438,25 @@ def validate_ontology_readiness(db_path: Path) -> dict[str, Any]:
                 }
             )
 
+        framework_reference_documents = int(
+            conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM sqf_document_sources
+                WHERE ontology_role IN ('framework_reference', 'development_manual')
+                  AND text_extraction_status = 'extracted'
+                """
+            ).fetchone()[0]
+        )
+        if framework_reference_documents == 0:
+            issues.append(
+                {
+                    "severity": "warning",
+                    "check": "framework_reference_documents",
+                    "detail": "No extracted KQF/SQF framework reference document is registered.",
+                }
+            )
+
         return {
             "ok": not any(issue["severity"] == "error" for issue in issues),
             "counts": counts,
@@ -388,6 +466,7 @@ def validate_ontology_readiness(db_path: Path) -> dict[str, Any]:
                 "mapping_coverage": mapping_coverage,
                 "chunk_matched_job_levels": chunk_matched_job_levels,
                 "chunk_evidence_coverage": chunk_evidence_coverage,
+                "framework_reference_documents": framework_reference_documents,
             },
             "issues": issues,
             "note": "This validates readiness for evidence-based recommendation, not official SQF recognition.",
@@ -404,6 +483,8 @@ def main() -> None:
     parser.add_argument("--include-excluded-mappings", action="store_true")
     parser.add_argument("--no-chunk-evidence", action="store_true")
     parser.add_argument("--chunk-evidence-limit", type=int, default=50000)
+    parser.add_argument("--no-document-chunks", action="store_true")
+    parser.add_argument("--document-chunk-limit", type=int, default=20000)
     args = parser.parse_args()
     if args.action == "validate":
         result = validate_ontology_readiness(args.db)
@@ -414,6 +495,8 @@ def main() -> None:
             include_excluded_mappings=args.include_excluded_mappings,
             include_chunk_evidence=not args.no_chunk_evidence,
             chunk_evidence_limit=args.chunk_evidence_limit,
+            include_document_chunks=not args.no_document_chunks,
+            document_chunk_limit=args.document_chunk_limit,
         )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

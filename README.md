@@ -60,9 +60,9 @@ NCS-SQF 연결
 - KSA: 574,279건
 - SQF API 직무/직무수준 원천: 2,397건
 - 정규화 SQF 직무수준: 2,397건
-- SQF 자료실 문서: 105건
-- 추출 문서 자산: 125개, 모두 extracted
-- PDF/OCR/HWP 기반 문서 청크: 9,105건
+- SQF/온톨로지 원천 문서: 106건
+- 추출 문서 자산: 126개, 모두 extracted
+- PDF/OCR/HWP 기반 문서 청크: 9,108건
 - 문서 청크와 SQF 직무수준 후보 근거: 49,940건
 - SQF-NCS 후보 매핑: 22,642건
 
@@ -142,6 +142,17 @@ JSON-LD export:
 ```powershell
 python scripts\ncs_harness.py ontology export-jsonld --out exports\ncs_sqf_ontology.jsonld
 ```
+
+Local ontology source import:
+
+```powershell
+$env:PDF_PATH=(Get-Item 'C:\Users\dd\Desktop\미래+교육+품질,+NCS에서+길을+찾다.pdf').FullName
+python scripts\ncs_harness.py import-ontology-source --input "$env:PDF_PATH" --title "미래 교육 품질, NCS에서 길을 찾다" --role framework_reference
+python scripts\ncs_harness.py preprocess-sqf-documents --only-unprocessed --ocr-empty --ocr-lang kor+eng --ocr-dpi 160
+python scripts\ncs_harness.py ontology validate
+```
+
+This path is for policy or conceptual sources such as KQF/SQF purpose PDFs. The importer copies the file into `data/raw/ontology_sources`, registers it in `sqf_library_posts`, `sqf_library_files`, and `sqf_document_sources`, then the normal PDF/OCR/chunk pipeline can extract it as graph evidence.
 
 대시보드:
 

@@ -28,9 +28,9 @@ SQF `/openapi26` 실제 응답은 최상위 `data` 배열과 `dataInfo` 객체�
 - `duty_career` 보유 111건.
 - `duty_license` 보유 103건.
 - `sqf_job_levels_normalized` 2,397건.
-- SQF 자료실 문서 105건.
-- PDF/OCR/HWP 문서 자산 125개 모두 extracted.
-- 문서 청크 9,105건.
+- SQF/온톨로지 원천 문서 106건.
+- PDF/OCR/HWP 문서 자산 126개 모두 extracted.
+- 문서 청크 9,108건.
 - 문서 청크와 SQF 직무수준 근거 매칭 49,940건.
 - SQF-NCS 후보 매핑 22,642건.
 

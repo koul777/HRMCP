@@ -25,6 +25,7 @@ from ncs_mcp.config import load_settings
 from ncs_mcp.db import connect, initialize_database
 from ncs_mcp.evaluation import run_evaluation
 from ncs_mcp.handoff import export_handoff_package
+from ncs_mcp.import_ontology_sources import register_local_ontology_source
 from ncs_mcp.ontology import build_sqf_mapping_candidates
 from ncs_mcp.ontology_export import export_ontology_jsonld, validate_ontology_readiness
 from ncs_mcp.preprocess_excel import preprocess_excel
@@ -454,6 +455,7 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, Any]:
             min_score=args.sqf_precision_min_score,
             max_matches_per_chunk=args.sqf_precision_max_matches_per_chunk,
             asset_id=args.sqf_precision_asset_id,
+            include_framework_references=args.sqf_precision_include_framework_references,
         )
     if args.build_sqf_mappings:
         conn = connect(settings.db_path)
@@ -479,6 +481,8 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, Any]:
             include_excluded_mappings=args.ontology_include_excluded_mappings,
             include_chunk_evidence=not args.ontology_no_chunk_evidence,
             chunk_evidence_limit=args.ontology_chunk_evidence_limit,
+            include_document_chunks=not args.ontology_no_document_chunks,
+            document_chunk_limit=args.ontology_document_chunk_limit,
         )
     if args.refine:
         summary["stages"]["refine_generate"] = run_refinement_harness(
@@ -560,6 +564,17 @@ def parse_args() -> argparse.Namespace:
     sqf_library.add_argument("--timeout", type=int, default=30)
     sqf_library.add_argument("--delay", type=float, default=0.2)
 
+    local_source = subparsers.add_parser(
+        "import-ontology-source",
+        help="Register a local PDF/HWP/ZIP as an ontology source document.",
+    )
+    local_source.add_argument("--input", type=Path, required=True)
+    local_source.add_argument("--raw-dir", type=Path, default=ROOT / "data" / "raw" / "ontology_sources")
+    local_source.add_argument("--title")
+    local_source.add_argument("--role", default="framework_reference")
+    local_source.add_argument("--source-url")
+    local_source.add_argument("--notes")
+
     sqf_model = subparsers.add_parser(
         "build-sqf-sqlite-model",
         help="Build normalized SQF ontology tables from SQF API and document metadata.",
@@ -589,6 +604,7 @@ def parse_args() -> argparse.Namespace:
     sqf_precision.add_argument("--limit-chunks", type=int)
     sqf_precision.add_argument("--asset-id", type=int)
     sqf_precision.add_argument("--no-reset", action="store_true")
+    sqf_precision.add_argument("--include-framework-references", action="store_true")
 
     evaluate = subparsers.add_parser(
         "evaluate",
@@ -606,6 +622,8 @@ def parse_args() -> argparse.Namespace:
     ontology_export.add_argument("--include-excluded-mappings", action="store_true")
     ontology_export.add_argument("--no-chunk-evidence", action="store_true")
     ontology_export.add_argument("--chunk-evidence-limit", type=int, default=50000)
+    ontology_export.add_argument("--no-document-chunks", action="store_true")
+    ontology_export.add_argument("--document-chunk-limit", type=int, default=20000)
 
     refine = subparsers.add_parser(
         "refine",
@@ -657,6 +675,7 @@ def parse_args() -> argparse.Namespace:
     pipeline.add_argument("--sqf-precision-min-score", type=float, default=9.0)
     pipeline.add_argument("--sqf-precision-max-matches-per-chunk", type=int, default=8)
     pipeline.add_argument("--sqf-precision-asset-id", type=int)
+    pipeline.add_argument("--sqf-precision-include-framework-references", action="store_true")
     pipeline.add_argument("--build-sqf-mappings", action="store_true")
     pipeline.add_argument("--all-sqf-mappings", action="store_true")
     pipeline.add_argument("--mapping-major-code")
@@ -670,6 +689,8 @@ def parse_args() -> argparse.Namespace:
     pipeline.add_argument("--ontology-include-excluded-mappings", action="store_true")
     pipeline.add_argument("--ontology-no-chunk-evidence", action="store_true")
     pipeline.add_argument("--ontology-chunk-evidence-limit", type=int, default=50000)
+    pipeline.add_argument("--ontology-no-document-chunks", action="store_true")
+    pipeline.add_argument("--ontology-document-chunk-limit", type=int, default=20000)
     pipeline.add_argument("--refine", action="store_true")
     pipeline.add_argument("--refine-issue-types")
     pipeline.add_argument("--refine-target-types")
@@ -746,6 +767,19 @@ def main() -> None:
                 delay=args.delay,
             )
         )
+    elif args.command == "import-ontology-source":
+        settings = load_settings()
+        print_json(
+            register_local_ontology_source(
+                settings.db_path,
+                args.input,
+                raw_dir=args.raw_dir,
+                title=args.title,
+                ontology_role=args.role,
+                source_url=args.source_url,
+                notes=args.notes,
+            )
+        )
     elif args.command == "build-sqf-sqlite-model":
         settings = load_settings()
         print_json(sqf_model_summary(settings.db_path) if args.summary else build_sqf_sqlite_model(settings.db_path))
@@ -775,6 +809,7 @@ def main() -> None:
                 limit_chunks=args.limit_chunks,
                 asset_id=args.asset_id,
                 reset=not args.no_reset,
+                include_framework_references=args.include_framework_references,
             )
         )
     elif args.command == "evaluate":
@@ -792,6 +827,8 @@ def main() -> None:
                     include_excluded_mappings=args.include_excluded_mappings,
                     include_chunk_evidence=not args.no_chunk_evidence,
                     chunk_evidence_limit=args.chunk_evidence_limit,
+                    include_document_chunks=not args.no_document_chunks,
+                    document_chunk_limit=args.document_chunk_limit,
                 )
             )
     elif args.command == "refine":

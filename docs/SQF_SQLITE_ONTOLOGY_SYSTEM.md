@@ -81,6 +81,16 @@ python scripts\ncs_harness.py build-sqf-sqlite-model --summary
 
 Use `--only-unprocessed` for incremental document extraction and `build-sqf-precision-matches --asset-id <id>` for incremental chunk evidence matching.
 
+Local conceptual source import:
+
+```powershell
+python scripts\ncs_harness.py import-ontology-source --input "<local-pdf>" --title "<title>" --role framework_reference
+python scripts\ncs_harness.py preprocess-sqf-documents --only-unprocessed --ocr-empty
+python scripts\ncs_harness.py ontology export-jsonld --out exports\ncs_sqf_ontology.jsonld
+```
+
+`framework_reference` sources are used to preserve KQF/SQF purpose, recognition pathway, and terminology evidence even when a chunk does not directly match a specific SQF job level.
+
 ## MCP Tools
 
 - `get_sqf_ontology_summary`

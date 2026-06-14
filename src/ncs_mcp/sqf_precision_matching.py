@@ -241,16 +241,21 @@ def fetch_chunks(
     conn: sqlite3.Connection,
     limit_chunks: int | None = None,
     asset_id: int | None = None,
+    include_framework_references: bool = False,
 ) -> list[sqlite3.Row]:
     sql = """
-        SELECT chunk_id, text
-        FROM sqf_document_chunks
-        WHERE text IS NOT NULL AND TRIM(text) != ''
+        SELECT dc.chunk_id, dc.text, ds.ontology_role
+        FROM sqf_document_chunks dc
+        JOIN sqf_document_assets da ON da.asset_id = dc.asset_id
+        JOIN sqf_document_sources ds ON ds.document_id = da.document_id
+        WHERE dc.text IS NOT NULL AND TRIM(dc.text) != ''
     """
     params: list[Any] = []
     if asset_id is not None:
-        sql += " AND asset_id = ?"
+        sql += " AND dc.asset_id = ?"
         params.append(asset_id)
+    if not include_framework_references:
+        sql += " AND COALESCE(ds.ontology_role, '') != 'framework_reference'"
     sql += " ORDER BY chunk_id"
     if limit_chunks is not None:
         sql += " LIMIT ?"
@@ -266,6 +271,7 @@ def build_sqf_chunk_job_level_matches(
     limit_chunks: int | None = None,
     asset_id: int | None = None,
     reset: bool = True,
+    include_framework_references: bool = False,
 ) -> dict[str, Any]:
     conn = connect(db_path)
     initialize_database(conn)
@@ -289,7 +295,12 @@ def build_sqf_chunk_job_level_matches(
                 (asset_id,),
             )
         job_levels = load_job_levels(conn)
-        chunks = fetch_chunks(conn, limit_chunks, asset_id)
+        chunks = fetch_chunks(
+            conn,
+            limit_chunks,
+            asset_id,
+            include_framework_references=include_framework_references,
+        )
         token_index = build_token_index(job_levels)
         for chunk in chunks:
             ranked: list[tuple[float, sqlite3.Row, dict[str, Any]]] = []
@@ -350,6 +361,7 @@ def build_sqf_chunk_job_level_matches(
             "min_score": min_score,
             "max_matches_per_chunk": max_matches_per_chunk,
             "asset_id": asset_id,
+            "include_framework_references": include_framework_references,
             "relation_counts": relation_counts,
             "note": "Matches are candidate document evidence, not official recognition decisions.",
         }
@@ -365,6 +377,7 @@ def main() -> None:
     parser.add_argument("--limit-chunks", type=int)
     parser.add_argument("--asset-id", type=int)
     parser.add_argument("--no-reset", action="store_true")
+    parser.add_argument("--include-framework-references", action="store_true")
     args = parser.parse_args()
     result = build_sqf_chunk_job_level_matches(
         args.db,
@@ -373,6 +386,7 @@ def main() -> None:
         limit_chunks=args.limit_chunks,
         asset_id=args.asset_id,
         reset=not args.no_reset,
+        include_framework_references=args.include_framework_references,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

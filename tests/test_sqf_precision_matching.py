@@ -15,6 +15,7 @@ from ncs_mcp.collect_api import upsert_sqf_items
 from ncs_mcp.db import connect, initialize_database, now_utc
 from ncs_mcp.sqf_precision_matching import (
     build_sqf_chunk_job_level_matches,
+    fetch_chunks,
     score_chunk_for_job_level,
 )
 from ncs_mcp.sqf_sqlite import build_sqf_sqlite_model
@@ -133,6 +134,65 @@ class SqfPrecisionMatchingTests(unittest.TestCase):
             count = conn.execute("SELECT COUNT(*) FROM sqf_chunk_job_level_matches").fetchone()[0]
             conn.close()
             self.assertGreaterEqual(count, 1)
+
+    def test_framework_reference_chunks_are_skipped_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "ncs.db"
+            conn = connect(db_path)
+            initialize_database(conn)
+            ts = now_utc()
+            conn.execute(
+                """
+                INSERT INTO sqf_library_posts(
+                    lib_seq, title, source_url, collected_at, ontology_role
+                ) VALUES ('1', 'KQF SQF purpose', 'local:test.pdf', ?, 'framework_reference')
+                """,
+                (ts,),
+            )
+            conn.execute(
+                """
+                INSERT INTO sqf_library_files(
+                    lib_seq, sys_dstin_cd, file_mstky, file_detl_seq,
+                    local_path, download_status
+                ) VALUES ('1', 'LOCAL', 'f', '1', 'test.pdf', 'downloaded')
+                """
+            )
+            file_id = conn.execute("SELECT file_id FROM sqf_library_files").fetchone()["file_id"]
+            conn.execute(
+                """
+                INSERT INTO sqf_document_sources(
+                    lib_seq, file_id, title, ontology_role, text_extraction_status, created_at
+                ) VALUES ('1', ?, 'KQF SQF purpose', 'framework_reference', 'extracted', ?)
+                """,
+                (file_id, ts),
+            )
+            document_id = conn.execute("SELECT document_id FROM sqf_document_sources").fetchone()[
+                "document_id"
+            ]
+            conn.execute(
+                """
+                INSERT INTO sqf_document_assets(
+                    document_id, asset_path, asset_name, asset_type,
+                    extraction_status, created_at
+                ) VALUES (?, 'test.pdf', 'test.pdf', 'pdf', 'extracted', ?)
+                """,
+                (document_id, ts),
+            )
+            asset_id = conn.execute("SELECT asset_id FROM sqf_document_assets").fetchone()["asset_id"]
+            conn.execute(
+                """
+                INSERT INTO sqf_document_chunks(
+                    asset_id, chunk_index, page_start, page_end, text,
+                    char_count, token_estimate, created_at
+                ) VALUES (?, 0, 1, 1, 'SQF and KQF connect training degree qualification career.', 80, 20, ?)
+                """,
+                (asset_id, ts),
+            )
+            conn.commit()
+
+            self.assertEqual(len(fetch_chunks(conn)), 0)
+            self.assertEqual(len(fetch_chunks(conn, include_framework_references=True)), 1)
+            conn.close()
 
 
 if __name__ == "__main__":

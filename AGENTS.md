@@ -55,6 +55,13 @@ python scripts\ncs_harness.py ontology export-jsonld --out exports\ncs_sqf_ontol
 python scripts\ncs_harness.py export-package
 ```
 
+로컬 정책/개념 PDF는 다음처럼 온톨로지 원천으로 먼저 등록한다.
+
+```powershell
+python scripts\ncs_harness.py import-ontology-source --input "<local-pdf>" --title "<title>" --role framework_reference
+python scripts\ncs_harness.py preprocess-sqf-documents --only-unprocessed --ocr-empty --ocr-lang kor+eng --ocr-dpi 160
+```
+
 ## NCS-SQF 온톨로지 작업 원칙
 
 이 프로젝트의 다음 핵심 목표는 NCS 상세 역량 그래프와 SQF 산업별 직무 그래프를 연결해, 사용자가 원하는 업무를 물었을 때 근거가 추적되는 교육 추천을 제공하는 것이다. PDF 요약의 원칙처럼 값 나열보다 관계 중심 그래프를 우선한다. 1차 MVP 범위는 SQF `02 > 경영관리 > 경영지원`과 NCS `02 경영·회계·사무`다.

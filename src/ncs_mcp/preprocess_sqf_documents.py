@@ -610,18 +610,19 @@ def iter_document_file_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 
 
 def has_unprocessed_assets(conn: sqlite3.Connection, document_id: int) -> bool:
-    count = int(
-        conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM sqf_document_assets
-            WHERE document_id = ?
-              AND extraction_status != 'extracted'
-            """,
-            (document_id,),
-        ).fetchone()[0]
-    )
-    return count > 0
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS total_assets,
+            SUM(CASE WHEN extraction_status != 'extracted' THEN 1 ELSE 0 END) AS pending_assets
+        FROM sqf_document_assets
+        WHERE document_id = ?
+        """,
+        (document_id,),
+    ).fetchone()
+    total_assets = int(row["total_assets"] or 0)
+    pending_assets = int(row["pending_assets"] or 0)
+    return total_assets == 0 or pending_assets > 0
 
 
 def update_document_status(conn: sqlite3.Connection, document_id: int) -> None:

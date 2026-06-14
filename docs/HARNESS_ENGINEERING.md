@@ -187,3 +187,13 @@ python scripts\ncs_harness.py build-sqf-sqlite-model --summary
 ```
 
 The downloader posts to `/common/file/downloadFile.do` with `sysDstinCd`, `fileMstky`, `filedetlSeq`, and `downlDstinCd`.
+
+Local policy or framework PDFs can be registered as ontology source evidence without adding a new scraper:
+
+```powershell
+$env:PDF_PATH=(Get-Item 'C:\Users\dd\Desktop\미래+교육+품질,+NCS에서+길을+찾다.pdf').FullName
+python scripts\ncs_harness.py import-ontology-source --input "$env:PDF_PATH" --title "미래 교육 품질, NCS에서 길을 찾다" --role framework_reference
+python scripts\ncs_harness.py preprocess-sqf-documents --only-unprocessed --ocr-empty --ocr-lang kor+eng --ocr-dpi 160
+```
+
+Use this for KQF/SQF purpose documents, development manuals, and other conceptual references. The file is copied under `data/raw/ontology_sources` and then processed by the same PDF/OCR/chunk pipeline as downloaded SQF reports.

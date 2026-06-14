@@ -71,9 +71,9 @@ business_accounting_office_02
 ```text
 SQF API 원천 직무수준: 2,397건
 정규화 SQF 직무수준: 2,397건
-SQF 자료실 문서: 105건
-PDF/OCR/HWP 추출 자산: 125개 extracted
-문서 청크: 9,105건
+SQF/온톨로지 원천 문서: 106건
+PDF/OCR/HWP 추출 자산: 126개 extracted
+문서 청크: 9,108건
 문서 청크-SQF 직무수준 근거 후보: 49,940건
 SQF-NCS 후보 매핑: 22,642건
 eligible closeMatch: 5,131건
