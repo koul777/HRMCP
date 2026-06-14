@@ -21,6 +21,8 @@ data/processed/*
 data/processed/*.db-*
 reports/*.json
 reports/*.md
+reports/pdf_pages/
 reports/**/*.json
 reports/**/*.md
 !docs/*.md
+exports/

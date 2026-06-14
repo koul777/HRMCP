@@ -13,7 +13,9 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from ncs_mcp.db import connect, initialize_database
+from ncs_mcp.db import connect, initialize_database, now_utc
+from ncs_mcp.ontology import analyze_sqf_gap, build_sqf_mapping_candidates
+from ncs_mcp.collect_api import extract_sqf_items, upsert_sqf_items
 from ncs_mcp.preprocess_excel import preprocess_excel
 
 
@@ -101,6 +103,156 @@ class NcsMcpTests(unittest.TestCase):
             }
             self.assertIn("competency_units", tables)
             self.assertIn("quality_issues", tables)
+            self.assertIn("sqf_duties", tables)
+            self.assertIn("sqf_ncs_matches", tables)
+            self.assertIn("sqf_library_posts", tables)
+            self.assertIn("sqf_library_files", tables)
+            self.assertIn("sqf_document_sources", tables)
+            self.assertIn("sqf_framework_concepts", tables)
+            self.assertIn("sqf_industry_sectors", tables)
+            self.assertIn("sqf_jobs_normalized", tables)
+            self.assertIn("sqf_job_levels_normalized", tables)
+            self.assertIn("sqf_recognition_evidence", tables)
+            self.assertIn("sqf_document_assets", tables)
+            self.assertIn("sqf_document_pages", tables)
+            self.assertIn("sqf_document_chunks", tables)
+            self.assertIn("sqf_chunk_job_level_matches", tables)
+            self.assertIn("sqf_document_evidence_links", tables)
+            self.assertIn("review_audit_log", tables)
+            self.assertIn("evaluation_runs", tables)
+            conn.close()
+
+    def test_sqf_payload_upserts_duties(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "ncs.db"
+            conn = connect(db_path)
+            initialize_database(conn)
+            payload = {
+                "data": {
+                    "row": {
+                        "ncsLclasCd": "02",
+                        "ncsLclasCdnm": "management",
+                        "sqfFldCdnm": "HR",
+                        "jobCdnm": "HR specialist",
+                        "dutyNm": "HR planning",
+                        "dutyLevel": "5",
+                        "dutyLevelNm": "manager",
+                        "dutyDef": "Plan workforce strategy.",
+                        "autoResp": "Works with autonomy.",
+                        "dutyEduTrain": "HR analytics training",
+                        "dutyQualf": "HR certificate",
+                        "dutyCarr": "3 years",
+                    }
+                },
+                "dataInfo": {
+                    "totCnt": "1",
+                    "code": "00",
+                    "message": "OK",
+                    "totalPage": "1",
+                    "pageNo": "1",
+                    "numOfRows": "10",
+                },
+            }
+
+            items = extract_sqf_items(payload)
+            self.assertEqual(len(items), 1)
+            self.assertEqual(upsert_sqf_items(conn, items), 1)
+            row = conn.execute("SELECT * FROM sqf_duties").fetchone()
+            self.assertEqual(row["ncs_lclas_cd"], "02")
+            self.assertEqual(row["duty_name"], "HR planning")
+            self.assertEqual(row["duty_education_training"], "HR analytics training")
+            conn.close()
+
+    def test_sqf_ncs_mapping_candidates_support_gap_analysis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "ncs.db"
+            conn = connect(db_path)
+            initialize_database(conn)
+            conn.execute(
+                """
+                INSERT INTO classifications(
+                    major_code, major_name, middle_code, middle_name,
+                    small_code, small_name, sub_code, sub_name
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "02",
+                    "경영·회계·사무",
+                    "02",
+                    "총무·인사",
+                    "03",
+                    "일반사무",
+                    "02",
+                    "사무행정",
+                ),
+            )
+            classification_id = conn.execute(
+                "SELECT classification_id FROM classifications"
+            ).fetchone()["classification_id"]
+            timestamp = now_utc()
+            conn.execute(
+                """
+                INSERT INTO competency_units(
+                    unit_code, base_unit_code, unit_version, unit_name_raw,
+                    unit_level_raw, classification_id, api_definition,
+                    api_match_status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "0202030201_22v3",
+                    "0202030201",
+                    "22v3",
+                    "문서 작성",
+                    "2",
+                    classification_id,
+                    "문서 작성은 자료를 조사·정리하여 목적에 맞는 문서를 완성하는 능력이다.",
+                    "matched",
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            payload = {
+                "data": [
+                    {
+                        "ncsLclasCd": "02",
+                        "ncsLclasCdnm": "경영·회계·사무",
+                        "sqfFldCdnm": "경영관리",
+                        "jobCdnm": "경영지원",
+                        "dutyNm": "사무행정(2)",
+                        "dutyLevel": "2",
+                        "dutyLevelNm": "초급 사무행정",
+                        "dutyDef": "구성원들의 업무 보조를 위한 기안 문서를 작성하고 관리하는 일",
+                        "dutyLevelDef": "기안 문서 작성과 사무환경 관리를 수행하는 수준",
+                    }
+                ],
+                "dataInfo": {"code": "000", "message": "OK"},
+            }
+            upsert_sqf_items(conn, extract_sqf_items(payload))
+            source_key = conn.execute("SELECT source_key FROM sqf_duties").fetchone()[
+                "source_key"
+            ]
+
+            summary = build_sqf_mapping_candidates(conn, limit_per_duty=5)
+            self.assertGreaterEqual(summary["candidates_upserted"], 1)
+            match = conn.execute("SELECT * FROM sqf_ncs_matches").fetchone()
+            self.assertEqual(match["source_id"], source_key)
+            self.assertEqual(match["target_id"], "0202030201_22v3")
+            self.assertEqual(match["review_status"], "candidate")
+
+            gap = analyze_sqf_gap(
+                conn,
+                current_ncs_unit_codes=[],
+                target_source_key=source_key,
+            )
+            self.assertEqual(gap["missing_unit_count"], 1)
+            self.assertEqual(gap["coverage_ratio"], 0.0)
+            covered = analyze_sqf_gap(
+                conn,
+                current_ncs_unit_codes=["0202030201_22v3"],
+                target_source_key=source_key,
+            )
+            self.assertEqual(covered["covered_unit_count"], 1)
+            self.assertEqual(covered["coverage_ratio"], 1.0)
             conn.close()
 
     def test_preprocess_deduplicates_hierarchy(self) -> None:
@@ -150,4 +302,3 @@ class NcsMcpTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

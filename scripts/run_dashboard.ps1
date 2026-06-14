@@ -10,6 +10,7 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $PythonPath = Join-Path $Root "src"
 $Dashboard = Join-Path $Root "scripts\ncs_dashboard.py"
+$DbPath = Join-Path $Root "data\processed\ncs.db"
 $Logs = Join-Path $Root "logs"
 $OutLog = Join-Path $Logs "dashboard.out.log"
 $ErrLog = Join-Path $Logs "dashboard.err.log"
@@ -17,6 +18,7 @@ $Url = "http://$HostAddress`:$Port"
 
 New-Item -ItemType Directory -Force -Path $Logs | Out-Null
 $env:PYTHONPATH = $PythonPath
+$env:NCS_DB_PATH = $DbPath
 
 $existing = Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue |
     Where-Object { $_.State -eq "Listen" } |
@@ -30,7 +32,7 @@ if ($Restart -and $existing) {
 
 if (-not $existing) {
     $python = (Get-Command python -ErrorAction Stop).Source
-    $ArgsLine = "-u `"$Dashboard`" --host `"$HostAddress`" --port $Port"
+    $ArgsLine = "-u `"$Dashboard`" --host `"$HostAddress`" --port $Port --db-path `"$DbPath`""
     Start-Process `
         -FilePath $python `
         -ArgumentList $ArgsLine `

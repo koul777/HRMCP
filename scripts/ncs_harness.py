@@ -14,12 +14,25 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from ncs_mcp.collect_api import collect_elements_api, collect_standard_api, collect_subd_api
+from ncs_mcp.collect_api import (
+    collect_elements_api,
+    collect_sqf_api,
+    collect_standard_api,
+    collect_subd_api,
+)
+from ncs_mcp.collect_sqf_library import collect_sqf_library
 from ncs_mcp.config import load_settings
 from ncs_mcp.db import connect, initialize_database
+from ncs_mcp.evaluation import run_evaluation
+from ncs_mcp.handoff import export_handoff_package
+from ncs_mcp.ontology import build_sqf_mapping_candidates
 from ncs_mcp.preprocess_excel import preprocess_excel
+from ncs_mcp.preprocess_sqf_documents import preprocess_sqf_documents
 from ncs_mcp.quality import run_quality_checks
+from ncs_mcp.refinement import parse_csv, run_refinement_harness
 from ncs_mcp.server import get_competency_units, get_unit_structure
+from ncs_mcp.sqf_precision_matching import build_sqf_chunk_job_level_matches
+from ncs_mcp.sqf_sqlite import build_sqf_sqlite_model, sqf_model_summary
 
 
 CORE_TABLES = [
@@ -32,7 +45,24 @@ CORE_TABLES = [
     "element_criteria_ksa_links",
     "api_raw_responses",
     "api_competency_units",
+    "sqf_duties",
+    "sqf_ncs_matches",
+    "sqf_library_posts",
+    "sqf_library_files",
+    "sqf_document_sources",
+    "sqf_framework_concepts",
+    "sqf_industry_sectors",
+    "sqf_jobs_normalized",
+    "sqf_levels",
+    "sqf_job_levels_normalized",
+    "sqf_recognition_evidence",
+    "sqf_document_assets",
+    "sqf_document_pages",
+    "sqf_document_chunks",
+    "sqf_chunk_job_level_matches",
+    "sqf_document_evidence_links",
     "quality_issues",
+    "refinement_jobs",
 ]
 
 
@@ -64,6 +94,7 @@ def inspect_project() -> dict[str, Any]:
         "db_exists": settings.db_path.exists(),
         "reports_dir": str(settings.reports_dir),
         "service_key_present": bool(settings.service_key),
+        "sqf_service_key_present": bool(settings.sqf_service_key),
         "counts": db_counts,
     }
     if settings.db_path.exists():
@@ -98,6 +129,52 @@ def inspect_project() -> dict[str, Any]:
                 """
             ).fetchone()[0]
         )
+        payload["ontology_status"] = {
+            "sqf_ncs_matches": int(
+                conn.execute("SELECT COUNT(*) FROM sqf_ncs_matches").fetchone()[0]
+            ),
+            "sqf_ncs_reviewed_matches": int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM sqf_ncs_matches
+                    WHERE review_status IN ('human_reviewed', 'reviewed', 'accepted')
+                    """
+                ).fetchone()[0]
+            ),
+            "management_support_sqf_duties": int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM sqf_duties
+                    WHERE ncs_lclas_cd = '02'
+                      AND sqf_field_name = '경영관리'
+                      AND job_name = '경영지원'
+                    """
+                ).fetchone()[0]
+            ),
+        }
+        payload["refinement_status"] = {
+            "jobs": int(conn.execute("SELECT COUNT(*) FROM refinement_jobs").fetchone()[0]),
+            "pending_jobs": int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM refinement_jobs
+                    WHERE review_status = 'review_required'
+                    """
+                ).fetchone()[0]
+            ),
+            "applied_jobs": int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM refinement_jobs
+                    WHERE review_status = 'applied'
+                    """
+                ).fetchone()[0]
+            ),
+        }
         conn.close()
     return payload
 
@@ -243,9 +320,10 @@ def lint_repo(strict: bool = False) -> dict[str, Any]:
                     f"{rel_path} must not depend on {token}",
                 )
 
-    if settings.service_key:
+    secret_values = {value for value in [settings.service_key, settings.sqf_service_key] if value}
+    for secret_value in secret_values:
         for path in scan_text_files():
-            if settings.service_key in path.read_text(encoding="utf-8", errors="ignore"):
+            if secret_value in path.read_text(encoding="utf-8", errors="ignore"):
                 add_issue(
                     issues,
                     "error",
@@ -335,6 +413,77 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, Any]:
             small_code="02",
             sub_code="01",
         )
+    if args.api_sqf:
+        summary["stages"]["api_sqf"] = collect_sqf_api(
+            settings.db_path,
+            settings.reports_dir,
+            settings.sqf_service_key or "",
+            timeout=args.timeout,
+            major_code=args.sqf_major_code,
+            major_limit=args.sqf_major_limit,
+        )
+    if args.collect_sqf_library:
+        summary["stages"]["collect_sqf_library"] = collect_sqf_library(
+            settings.db_path,
+            raw_dir=ROOT / "data" / "raw" / "sqf_docs",
+            start_page=args.sqf_library_start_page,
+            end_page=args.sqf_library_end_page,
+            download=args.download_sqf_library,
+            timeout=args.timeout,
+            overwrite=args.overwrite_sqf_library,
+            delay=args.sqf_library_delay,
+        )
+    if args.build_sqf_sqlite_model:
+        summary["stages"]["build_sqf_sqlite_model"] = build_sqf_sqlite_model(settings.db_path)
+    if args.preprocess_sqf_documents:
+        summary["stages"]["preprocess_sqf_documents"] = preprocess_sqf_documents(
+            settings.db_path,
+            extracted_dir=ROOT / "data" / "raw" / "sqf_docs_extracted",
+            chunk_chars=args.sqf_chunk_chars,
+            overlap_chars=args.sqf_overlap_chars,
+            ocr_empty=args.sqf_ocr_empty,
+            ocr_lang=args.sqf_ocr_lang,
+            ocr_dpi=args.sqf_ocr_dpi,
+            ocr_max_pages=args.sqf_ocr_max_pages,
+            only_unprocessed=args.sqf_only_unprocessed,
+        )
+    if args.build_sqf_precision_matches:
+        summary["stages"]["build_sqf_precision_matches"] = build_sqf_chunk_job_level_matches(
+            settings.db_path,
+            min_score=args.sqf_precision_min_score,
+            max_matches_per_chunk=args.sqf_precision_max_matches_per_chunk,
+            asset_id=args.sqf_precision_asset_id,
+        )
+    if args.build_sqf_mappings:
+        conn = connect(settings.db_path)
+        initialize_database(conn)
+        try:
+            summary["stages"]["build_sqf_mappings"] = build_sqf_mapping_candidates(
+                conn,
+                mvp_only=not args.all_sqf_mappings,
+                major_code=args.mapping_major_code,
+                keyword=args.mapping_keyword,
+                source_key=args.mapping_source_key,
+                limit_per_duty=args.mapping_limit_per_duty,
+                duty_limit=args.mapping_duty_limit,
+            )
+        finally:
+            conn.close()
+    if args.refine:
+        summary["stages"]["refine_generate"] = run_refinement_harness(
+            settings.db_path,
+            action="generate",
+            issue_types=parse_csv(args.refine_issue_types),
+            target_types=parse_csv(args.refine_target_types),
+            limit=args.refine_limit,
+        )
+    if args.apply_refinements:
+        summary["stages"]["refine_apply"] = run_refinement_harness(
+            settings.db_path,
+            action="apply",
+            target_types=parse_csv(args.refine_target_types),
+            limit=args.refine_limit,
+        )
     if args.smoke:
         os.environ["NCS_DB_PATH"] = str(settings.db_path)
         summary["stages"]["smoke"] = run_smoke_check()
@@ -364,6 +513,94 @@ def parse_args() -> argparse.Namespace:
     dashboard.add_argument("--host", default="127.0.0.1")
     dashboard.add_argument("--port", type=int, default=8765)
 
+    mappings = subparsers.add_parser(
+        "build-sqf-mappings",
+        help="Build NCS-SQF ontology mapping candidates for dashboard review.",
+    )
+    mappings.add_argument("--all-sqf", action="store_true")
+    mappings.add_argument("--major-code")
+    mappings.add_argument("--keyword")
+    mappings.add_argument("--source-key")
+    mappings.add_argument("--limit-per-duty", type=int, default=10)
+    mappings.add_argument("--duty-limit", type=int, default=5000)
+
+    export_package = subparsers.add_parser(
+        "export-package",
+        help="Create a handoff package with schema, dictionary, sample queries, and optional DB.",
+    )
+    export_package.add_argument("--out", default=str(ROOT / "exports" / "ncs_sqf_output"))
+    export_package.add_argument(
+        "--db-mode",
+        choices=["none", "copy", "hardlink"],
+        default="none",
+        help="none writes docs only; hardlink creates data/db/ncs_sqf.sqlite without full copy; copy makes an independent DB file.",
+    )
+    export_package.add_argument("--zip", action="store_true")
+
+    sqf_library = subparsers.add_parser(
+        "collect-sqf-library",
+        help="Collect SQF library report metadata and optional attachment files.",
+    )
+    sqf_library.add_argument("--start-page", type=int, default=0)
+    sqf_library.add_argument("--end-page", type=int, default=10)
+    sqf_library.add_argument("--download", action="store_true")
+    sqf_library.add_argument("--raw-dir", type=Path, default=ROOT / "data" / "raw" / "sqf_docs")
+    sqf_library.add_argument("--overwrite", action="store_true")
+    sqf_library.add_argument("--timeout", type=int, default=30)
+    sqf_library.add_argument("--delay", type=float, default=0.2)
+
+    sqf_model = subparsers.add_parser(
+        "build-sqf-sqlite-model",
+        help="Build normalized SQF ontology tables from SQF API and document metadata.",
+    )
+    sqf_model.add_argument("--summary", action="store_true")
+
+    sqf_docs = subparsers.add_parser(
+        "preprocess-sqf-documents",
+        help="Extract SQF PDF/ZIP report text into SQLite pages and chunks.",
+    )
+    sqf_docs.add_argument("--extracted-dir", type=Path, default=ROOT / "data" / "raw" / "sqf_docs_extracted")
+    sqf_docs.add_argument("--chunk-chars", type=int, default=2400)
+    sqf_docs.add_argument("--overlap-chars", type=int, default=250)
+    sqf_docs.add_argument("--limit", type=int)
+    sqf_docs.add_argument("--ocr-empty", action="store_true")
+    sqf_docs.add_argument("--ocr-lang", default="kor+eng")
+    sqf_docs.add_argument("--ocr-dpi", type=int, default=180)
+    sqf_docs.add_argument("--ocr-max-pages", type=int)
+    sqf_docs.add_argument("--only-unprocessed", action="store_true")
+
+    sqf_precision = subparsers.add_parser(
+        "build-sqf-precision-matches",
+        help="Build precision evidence matches from SQF PDF chunks to SQF job levels.",
+    )
+    sqf_precision.add_argument("--min-score", type=float, default=9.0)
+    sqf_precision.add_argument("--max-matches-per-chunk", type=int, default=8)
+    sqf_precision.add_argument("--limit-chunks", type=int)
+    sqf_precision.add_argument("--asset-id", type=int)
+    sqf_precision.add_argument("--no-reset", action="store_true")
+
+    evaluate = subparsers.add_parser(
+        "evaluate",
+        help="Write evaluation metrics for NCS-SQF mapping/recommendation quality.",
+    )
+    evaluate.add_argument("--scope-tag")
+    evaluate.add_argument("--run-name", default="mvp")
+
+    refine = subparsers.add_parser(
+        "refine",
+        help="Generate/apply LLM-ready refinement jobs from quality issues.",
+    )
+    refine.add_argument("action", choices=["generate", "apply", "stats", "export-jsonl", "import-jsonl"])
+    refine.add_argument("--issue-types", help="Comma separated issue types.")
+    refine.add_argument("--target-types", help="Comma separated target types.")
+    refine.add_argument("--severity")
+    refine.add_argument("--provider", default="local-rule")
+    refine.add_argument("--limit", type=int, default=50)
+    refine.add_argument("--min-confidence", type=float, default=0.95)
+    refine.add_argument("--dry-run", action="store_true")
+    refine.add_argument("--out", type=Path)
+    refine.add_argument("--input", type=Path)
+
     lint = subparsers.add_parser("lint", help="Check docs, boundaries, secrets, and DB invariants.")
     lint.add_argument("--strict", action="store_true")
 
@@ -377,6 +614,40 @@ def parse_args() -> argparse.Namespace:
     pipeline.add_argument("--api-standards", action="store_true")
     pipeline.add_argument("--api-subd", action="store_true")
     pipeline.add_argument("--api-elements-hr", action="store_true")
+    pipeline.add_argument("--api-sqf", action="store_true")
+    pipeline.add_argument("--sqf-major-code")
+    pipeline.add_argument("--sqf-major-limit", type=int)
+    pipeline.add_argument("--collect-sqf-library", action="store_true")
+    pipeline.add_argument("--download-sqf-library", action="store_true")
+    pipeline.add_argument("--overwrite-sqf-library", action="store_true")
+    pipeline.add_argument("--sqf-library-start-page", type=int, default=0)
+    pipeline.add_argument("--sqf-library-end-page", type=int, default=10)
+    pipeline.add_argument("--sqf-library-delay", type=float, default=0.2)
+    pipeline.add_argument("--build-sqf-sqlite-model", action="store_true")
+    pipeline.add_argument("--preprocess-sqf-documents", action="store_true")
+    pipeline.add_argument("--sqf-chunk-chars", type=int, default=2400)
+    pipeline.add_argument("--sqf-overlap-chars", type=int, default=250)
+    pipeline.add_argument("--sqf-ocr-empty", action="store_true")
+    pipeline.add_argument("--sqf-ocr-lang", default="kor+eng")
+    pipeline.add_argument("--sqf-ocr-dpi", type=int, default=180)
+    pipeline.add_argument("--sqf-ocr-max-pages", type=int)
+    pipeline.add_argument("--sqf-only-unprocessed", action="store_true")
+    pipeline.add_argument("--build-sqf-precision-matches", action="store_true")
+    pipeline.add_argument("--sqf-precision-min-score", type=float, default=9.0)
+    pipeline.add_argument("--sqf-precision-max-matches-per-chunk", type=int, default=8)
+    pipeline.add_argument("--sqf-precision-asset-id", type=int)
+    pipeline.add_argument("--build-sqf-mappings", action="store_true")
+    pipeline.add_argument("--all-sqf-mappings", action="store_true")
+    pipeline.add_argument("--mapping-major-code")
+    pipeline.add_argument("--mapping-keyword")
+    pipeline.add_argument("--mapping-source-key")
+    pipeline.add_argument("--mapping-limit-per-duty", type=int, default=10)
+    pipeline.add_argument("--mapping-duty-limit", type=int, default=5000)
+    pipeline.add_argument("--refine", action="store_true")
+    pipeline.add_argument("--refine-issue-types")
+    pipeline.add_argument("--refine-target-types")
+    pipeline.add_argument("--refine-limit", type=int, default=50)
+    pipeline.add_argument("--apply-refinements", action="store_true")
     pipeline.add_argument("--smoke", action="store_true")
     pipeline.add_argument("--lint", action="store_true")
     pipeline.add_argument("--strict-lint", action="store_true")
@@ -405,6 +676,99 @@ def main() -> None:
                 "command": f"python scripts\\ncs_dashboard.py --host {args.host} --port {args.port}",
                 "url": f"http://{args.host}:{args.port}",
             }
+        )
+    elif args.command == "build-sqf-mappings":
+        settings = load_settings()
+        conn = connect(settings.db_path)
+        initialize_database(conn)
+        try:
+            print_json(
+                build_sqf_mapping_candidates(
+                    conn,
+                    mvp_only=not args.all_sqf,
+                    major_code=args.major_code,
+                    keyword=args.keyword,
+                    source_key=args.source_key,
+                    limit_per_duty=args.limit_per_duty,
+                    duty_limit=args.duty_limit,
+                )
+            )
+        finally:
+            conn.close()
+    elif args.command == "export-package":
+        settings = load_settings()
+        print_json(
+            export_handoff_package(
+                settings.db_path,
+                Path(args.out),
+                db_mode=args.db_mode,
+                zip_output=args.zip,
+            )
+        )
+    elif args.command == "collect-sqf-library":
+        settings = load_settings()
+        print_json(
+            collect_sqf_library(
+                settings.db_path,
+                raw_dir=args.raw_dir,
+                start_page=args.start_page,
+                end_page=args.end_page,
+                download=args.download,
+                timeout=args.timeout,
+                overwrite=args.overwrite,
+                delay=args.delay,
+            )
+        )
+    elif args.command == "build-sqf-sqlite-model":
+        settings = load_settings()
+        print_json(sqf_model_summary(settings.db_path) if args.summary else build_sqf_sqlite_model(settings.db_path))
+    elif args.command == "preprocess-sqf-documents":
+        settings = load_settings()
+        print_json(
+            preprocess_sqf_documents(
+                settings.db_path,
+                extracted_dir=args.extracted_dir,
+                chunk_chars=args.chunk_chars,
+                overlap_chars=args.overlap_chars,
+                limit=args.limit,
+                ocr_empty=args.ocr_empty,
+                ocr_lang=args.ocr_lang,
+                ocr_dpi=args.ocr_dpi,
+                ocr_max_pages=args.ocr_max_pages,
+                only_unprocessed=args.only_unprocessed,
+            )
+        )
+    elif args.command == "build-sqf-precision-matches":
+        settings = load_settings()
+        print_json(
+            build_sqf_chunk_job_level_matches(
+                settings.db_path,
+                min_score=args.min_score,
+                max_matches_per_chunk=args.max_matches_per_chunk,
+                limit_chunks=args.limit_chunks,
+                asset_id=args.asset_id,
+                reset=not args.no_reset,
+            )
+        )
+    elif args.command == "evaluate":
+        settings = load_settings()
+        print_json(run_evaluation(settings.db_path, scope_tag=args.scope_tag, run_name=args.run_name))
+    elif args.command == "refine":
+        settings = load_settings()
+        print_json(
+            run_refinement_harness(
+                settings.db_path,
+                action=args.action,
+                issue_types=parse_csv(args.issue_types),
+                target_types=parse_csv(args.target_types),
+                severity=args.severity,
+                provider=args.provider,
+                limit=args.limit,
+                min_confidence=args.min_confidence,
+                dry_run=args.dry_run,
+                out_path=args.out,
+                input_path=args.input,
+            )
         )
     elif args.command == "lint":
         result = lint_repo(strict=args.strict)

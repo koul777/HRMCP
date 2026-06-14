@@ -12,8 +12,12 @@ dependencies = [
   "openpyxl",
   "requests",
   "python-dotenv",
+  "Pillow",
+  "PyMuPDF",
+  "pypdf",
+  "pytesseract",
+  "olefile",
 ]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-

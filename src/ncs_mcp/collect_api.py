@@ -7,6 +7,7 @@ if __package__ in {None, ""}:  # pragma: no cover - direct script support
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 import argparse
+import hashlib
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -30,6 +31,7 @@ from ncs_mcp.db import (
 
 DEFAULT_API_URL = "https://c.q-net.or.kr/openapi/Ncs1info/ncsinfo.do"
 DEFAULT_STANDARDS_API_BASE = "https://apis.data.go.kr/B490007/hrdkapi"
+DEFAULT_SQF_API_BASE = "https://apis.data.go.kr/B490007/ncsSqfDuty"
 API_ISSUE_TYPES = [
     "api_unmatched",
     "api_value_mismatch",
@@ -76,8 +78,32 @@ def extract_standard_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+def extract_sqf_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    items = data.get("row") if isinstance(data, dict) else find_value(payload, "row")
+    if items is None:
+        return []
+    if isinstance(items, dict):
+        return [items]
+    if isinstance(items, list):
+        return [item for item in items if isinstance(item, dict)]
+    return []
+
+
+def extract_sqf_data_info(payload: dict[str, Any]) -> dict[str, Any]:
+    data_info = payload.get("dataInfo") if isinstance(payload, dict) else None
+    return data_info if isinstance(data_info, dict) else {}
+
+
 def as_text(value: Any) -> str:
     return "" if value is None else str(value).strip()
+
+
+def as_int(value: Any, default: int = 0) -> int:
+    text = as_text(value).replace(",", "")
+    return int(text) if text.isdigit() else default
 
 
 def prefer_latest_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -152,9 +178,9 @@ def save_raw_response(
     num_of_rows: int,
     payload: dict[str, Any],
 ) -> tuple[int, str | None, str | None]:
-    total_count = find_value(payload, "totalCount")
-    result_code = as_text(find_value(payload, "resultCode")) or None
-    result_msg = as_text(find_value(payload, "resultMsg")) or None
+    total_count = find_value(payload, "totalCount") or find_value(payload, "totCnt")
+    result_code = as_text(find_value(payload, "resultCode") or find_value(payload, "code")) or None
+    result_msg = as_text(find_value(payload, "resultMsg") or find_value(payload, "message")) or None
     parsed_total = int(total_count) if str(total_count or "").isdigit() else None
     conn.execute(
         """
@@ -364,6 +390,122 @@ def upsert_standard_element_items(conn, items: list[dict[str, Any]]) -> dict[str
         "orphan": orphan,
         "mismatches": mismatches,
     }
+
+
+def field_text(item: dict[str, Any], *names: str) -> str:
+    for name in names:
+        value = as_text(item.get(name))
+        if value:
+            return value
+    return ""
+
+
+def sqf_source_key(row: dict[str, str]) -> str:
+    parts = [
+        row["ncs_lclas_cd"],
+        row["sqf_field_name"],
+        row["sqf_sub_field_name"],
+        row["job_name"],
+        row["duty_name"],
+        row["duty_level"],
+        row["duty_level_name"],
+    ]
+    digest = hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
+    return f"sqf:{digest}"
+
+
+def normalize_sqf_item(item: dict[str, Any]) -> dict[str, str]:
+    return {
+        "ncs_lclas_cd": field_text(item, "ncsLclasCd"),
+        "ncs_lclas_name": field_text(item, "ncsLclasCdnm"),
+        "sqf_field_name": field_text(item, "sqfFldCdnm"),
+        "sqf_sub_field_name": field_text(
+            item,
+            "sqfSubFldCdnm",
+            "sqfFldSubCdnm",
+            "subSqfFldCdnm",
+            "sqfSclasCdnm",
+        ),
+        "job_name": field_text(item, "jobCdnm"),
+        "duty_name": field_text(item, "dutyNm"),
+        "duty_level": field_text(item, "dutyLevel"),
+        "duty_level_name": field_text(item, "dutyLevelNm"),
+        "duty_level_definition": field_text(item, "dutyLevelDef", "dutyLevelDefinition"),
+        "duty_definition": field_text(item, "dutyDef"),
+        "autonomy_responsibility": field_text(item, "autoResp"),
+        "duty_acarr": field_text(item, "dutyAcarr"),
+        "duty_education_training": field_text(item, "dutyEduTrain"),
+        "duty_qualification": field_text(item, "dutyQualf"),
+        "duty_career": field_text(item, "dutyCarr"),
+        "duty_license": field_text(item, "dutyLice"),
+        "duty_remark": field_text(item, "dutyRemk"),
+    }
+
+
+def upsert_sqf_items(conn, items: list[dict[str, Any]]) -> int:
+    count = 0
+    fetched_at = now_utc()
+    for item in items:
+        row = normalize_sqf_item(item)
+        if not row["ncs_lclas_cd"] or not row["duty_name"]:
+            continue
+        source_key = sqf_source_key(row)
+        conn.execute(
+            """
+            INSERT INTO sqf_duties(
+                source_key, ncs_lclas_cd, ncs_lclas_name,
+                sqf_field_name, sqf_sub_field_name, job_name,
+                duty_name, duty_level, duty_level_name, duty_level_definition,
+                duty_definition, autonomy_responsibility, duty_acarr,
+                duty_education_training, duty_qualification, duty_career,
+                duty_license, duty_remark, source_payload, api_fetched_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source_key) DO UPDATE SET
+                ncs_lclas_name = excluded.ncs_lclas_name,
+                sqf_field_name = excluded.sqf_field_name,
+                sqf_sub_field_name = excluded.sqf_sub_field_name,
+                job_name = excluded.job_name,
+                duty_name = excluded.duty_name,
+                duty_level = excluded.duty_level,
+                duty_level_name = excluded.duty_level_name,
+                duty_level_definition = excluded.duty_level_definition,
+                duty_definition = excluded.duty_definition,
+                autonomy_responsibility = excluded.autonomy_responsibility,
+                duty_acarr = excluded.duty_acarr,
+                duty_education_training = excluded.duty_education_training,
+                duty_qualification = excluded.duty_qualification,
+                duty_career = excluded.duty_career,
+                duty_license = excluded.duty_license,
+                duty_remark = excluded.duty_remark,
+                source_payload = excluded.source_payload,
+                api_fetched_at = excluded.api_fetched_at
+            """,
+            (
+                source_key,
+                row["ncs_lclas_cd"],
+                row["ncs_lclas_name"],
+                row["sqf_field_name"],
+                row["sqf_sub_field_name"],
+                row["job_name"],
+                row["duty_name"],
+                row["duty_level"],
+                row["duty_level_name"],
+                row["duty_level_definition"],
+                row["duty_definition"],
+                row["autonomy_responsibility"],
+                row["duty_acarr"],
+                row["duty_education_training"],
+                row["duty_qualification"],
+                row["duty_career"],
+                row["duty_license"],
+                row["duty_remark"],
+                json.dumps(item, ensure_ascii=False),
+                fetched_at,
+            ),
+        )
+        count += 1
+    return count
 
 
 def apply_api_join(conn) -> dict[str, int]:
@@ -739,6 +881,102 @@ def collect_subd_api(
     return summary
 
 
+def collect_sqf_api(
+    db_path: Path,
+    reports_dir: Path,
+    service_key: str,
+    api_base_url: str = DEFAULT_SQF_API_BASE,
+    num_of_rows: int = 100,
+    timeout: int = 30,
+    major_code: str | None = None,
+    major_limit: int | None = None,
+) -> dict[str, int]:
+    """Collect SQF duty profiles from /openapi26 by NCS major code."""
+    conn = connect(db_path)
+    initialize_database(conn)
+    if major_code:
+        major_codes = [major_code]
+    else:
+        rows = conn.execute(
+            """
+            SELECT major_code
+            FROM classifications
+            GROUP BY major_code
+            ORDER BY major_code
+            """
+        ).fetchall()
+        major_codes = [row["major_code"] for row in rows]
+    if major_limit is not None:
+        major_codes = major_codes[:major_limit]
+
+    endpoint = "openapi26"
+    requested_majors = len(major_codes)
+    successful_majors = 0
+    empty_majors = 0
+    failed_majors = 0
+    total_items = 0
+    total_count_seen = 0
+
+    for code in major_codes:
+        params = {"ncsLclasCd": code}
+        source_url = source_url_for_standard(api_base_url, endpoint, params)
+        page_no = 1
+        pages = 1
+        major_success = False
+        reported_total = 0
+        while page_no <= pages:
+            payload = fetch_standard_page(
+                api_base_url=api_base_url,
+                endpoint=endpoint,
+                service_key=service_key,
+                page_no=page_no,
+                num_of_rows=num_of_rows,
+                timeout=timeout,
+                extra_params=params,
+            )
+            total_count, result_code, result_msg = save_raw_response(
+                conn, source_url, page_no, num_of_rows, payload
+            )
+            data_info = extract_sqf_data_info(payload)
+            result_code = as_text(data_info.get("code")) or result_code
+            result_msg = as_text(data_info.get("message")) or result_msg
+            result_code_upper = result_code.upper() if result_code else ""
+            if result_code_upper == "002":
+                empty_majors += 1
+                conn.commit()
+                break
+            if result_code and result_code_upper not in {"000", "00", "0", "200", "INFO-000"}:
+                failed_majors += 1
+                conn.commit()
+                break
+            items = extract_sqf_items(payload)
+            total_items += upsert_sqf_items(conn, items)
+            if page_no == 1:
+                reported_total = total_count or as_int(data_info.get("totCnt"))
+            total_page = as_int(data_info.get("totalPage"))
+            pages = total_page or (max(1, ceil(total_count / num_of_rows)) if total_count else 1)
+            page_no += 1
+            major_success = True
+            conn.commit()
+        if major_success:
+            successful_majors += 1
+            total_count_seen += reported_total
+
+    duties_total = conn.execute("SELECT COUNT(*) FROM sqf_duties").fetchone()[0]
+    summary = {
+        "sqf_major_codes_requested": requested_majors,
+        "sqf_major_codes_successful": successful_majors,
+        "sqf_major_codes_empty": empty_majors,
+        "sqf_major_codes_failed": failed_majors,
+        "sqf_items_upserted": total_items,
+        "sqf_total_count_seen": total_count_seen,
+        "sqf_duties_total": int(duties_total),
+    }
+    write_report(summary, reports_dir, filename="api_sqf_report.md")
+    conn.close()
+    return summary
+
+
 def collect_elements_api(
     db_path: Path,
     reports_dir: Path,
@@ -802,6 +1040,7 @@ def collect_elements_api(
     requested_elements = len(rows)
     successful_elements = 0
     failed_elements = 0
+    rate_limited_elements = 0
     skipped_elements = 0
     total_items = 0
     matched_items = 0
@@ -852,12 +1091,16 @@ def collect_elements_api(
 
     def process_result(result: dict[str, Any]) -> None:
         nonlocal failed_elements
+        nonlocal rate_limited_elements
         nonlocal successful_elements
         nonlocal total_items
         nonlocal matched_items
         nonlocal orphan_items
         nonlocal mismatches
         if result["error"]:
+            if "status=429" in result["error"]:
+                rate_limited_elements += 1
+                return
             failed_elements += 1
             conn.execute(
                 "UPDATE competency_elements SET api_match_status = ? WHERE element_id = ?",
@@ -917,6 +1160,7 @@ def collect_elements_api(
         "elements_requested": requested_elements,
         "elements_successful": successful_elements,
         "elements_failed": failed_elements,
+        "elements_rate_limited": rate_limited_elements,
         "elements_skipped": skipped_elements,
         "element_concurrency": workers,
         "element_items_upserted": total_items,
@@ -936,22 +1180,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db-path", type=Path, default=settings.db_path)
     parser.add_argument("--reports-dir", type=Path, default=settings.reports_dir)
     parser.add_argument("--service-key", default=settings.service_key)
+    parser.add_argument("--sqf-service-key", default=settings.sqf_service_key)
     parser.add_argument(
         "--mode",
-        choices=["standards", "subd", "elements", "ncs1info"],
+        choices=["standards", "subd", "elements", "sqf", "ncs1info"],
         default="standards",
         help=(
             "standards uses approved hrdkapi /NCS005. "
             "subd uses approved hrdkapi /NCS004. "
             "elements uses approved hrdkapi /NCS006. "
+            "sqf uses SQF duty /openapi26. "
             "ncs1info uses legacy c.q-net endpoint."
         ),
     )
     parser.add_argument("--api-url", default=DEFAULT_API_URL)
     parser.add_argument("--api-base-url", default=DEFAULT_STANDARDS_API_BASE)
+    parser.add_argument("--sqf-api-base-url", default=DEFAULT_SQF_API_BASE)
     parser.add_argument("--num-of-rows", type=int, default=100)
     parser.add_argument("--timeout", type=int, default=30)
     parser.add_argument("--classification-limit", type=int)
+    parser.add_argument("--ncs-lclas-cd")
+    parser.add_argument("--sqf-major-limit", type=int)
     parser.add_argument("--element-limit", type=int)
     parser.add_argument("--element-offset", type=int, default=0)
     parser.add_argument("--concurrency", type=int, default=1)
@@ -967,6 +1216,23 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.mode == "sqf":
+        if not args.sqf_service_key:
+            raise SystemExit(
+                "NCS_SQF_SERVICE_KEY is required. Set it in .env or pass --sqf-service-key."
+            )
+        summary = collect_sqf_api(
+            db_path=args.db_path,
+            reports_dir=args.reports_dir,
+            service_key=args.sqf_service_key,
+            api_base_url=args.sqf_api_base_url,
+            num_of_rows=args.num_of_rows,
+            timeout=args.timeout,
+            major_code=args.ncs_lclas_cd,
+            major_limit=args.sqf_major_limit,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return
     if not args.service_key:
         raise SystemExit("NCS_SERVICE_KEY is required. Set it in .env or pass --service-key.")
     if args.mode == "ncs1info":

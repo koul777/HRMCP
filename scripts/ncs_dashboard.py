@@ -15,6 +15,7 @@ if str(SRC) not in sys.path:
 
 from ncs_mcp.config import load_settings
 from ncs_mcp.db import connect, initialize_database, now_utc
+from ncs_mcp.refinement import apply_refinement_to_target
 
 
 HTML = """<!doctype html>
@@ -22,7 +23,7 @@ HTML = """<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>NCS MCP Preprocessing Workbench</title>
+  <title>NCS-SQF Ontology Workbench</title>
   <style>
     :root {
       --bg:#f5f7fb; --panel:#fff; --ink:#172033; --muted:#667085;
@@ -66,7 +67,7 @@ HTML = """<!doctype html>
     textarea.small { min-height:84px; }
     .field { margin-top:12px; }
     .field label { display:block; font-size:13px; color:var(--muted); margin-bottom:5px; }
-    .summary { display:grid; gap:12px; grid-template-columns:repeat(4, minmax(0,1fr)); }
+    .summary { display:grid; gap:12px; grid-template-columns:repeat(6, minmax(150px,1fr)); }
     .summary .panel { min-height:88px; }
     .summary strong { display:block; font-size:24px; margin-top:4px; }
     @media (max-width:1180px) {
@@ -81,22 +82,25 @@ HTML = """<!doctype html>
 </head>
 <body>
   <header>
-    <h1>NCS MCP 전처리 워크벤치</h1>
+    <h1>NCS-SQF 온톨로지 워크벤치</h1>
     <div id="stamp" class="muted"></div>
   </header>
   <main>
     <section class="panel">
       <div class="toolbar">
         <strong>범위</strong>
-        <input id="majorCode" class="code" value="02" title="대분류코드">
-        <input id="middleCode" class="code" value="02" title="중분류코드">
-        <input id="smallCode" class="code" value="02" title="소분류코드">
-        <input id="subCode" class="code" value="01" title="세분류코드">
+        <input id="majorCode" class="code" value="" placeholder="대" title="대분류코드">
+        <input id="middleCode" class="code" value="" placeholder="중" title="중분류코드">
+        <input id="smallCode" class="code" value="" placeholder="소" title="소분류코드">
+        <input id="subCode" class="code" value="" placeholder="세" title="세분류코드">
         <input id="keyword" class="keyword" placeholder="능력단위/요소/문장 검색">
         <button onclick="refreshAll()">조회</button>
         <button class="secondary" onclick="clearScope()">전체 NCS</button>
+        <button class="secondary" onclick="setHrScope()">인사 직무</button>
+        <button class="secondary" onclick="setManagementSupportMvp()">경영지원 MVP</button>
+        <span id="liveStatus" class="muted"></span>
       </div>
-      <div class="muted">기본값은 인사 직무 `02-02-02-01`입니다. 카드를 클릭하면 해당 상태의 상세 리스트가 열립니다.</div>
+      <div class="muted">기본값은 전체 NCS입니다. 경영지원 MVP는 SQF `02 > 경영관리 > 경영지원`을 우선 범위로 보고, NCS `02 경영·회계·사무`와 연결합니다.</div>
     </section>
 
     <section class="summary" id="summary"></section>
@@ -199,6 +203,7 @@ HTML = """<!doctype html>
     const q = (id) => document.getElementById(id);
     let currentCard = {kind:'classification', state:'processed', title:'분류 전처리 완료'};
     let currentDetail = null;
+    let overviewTimer = null;
 
     async function api(path, options={}) {
       const res = await fetch(path, options);
@@ -223,10 +228,25 @@ HTML = """<!doctype html>
       for (const id of ['majorCode', 'middleCode', 'smallCode', 'subCode']) q(id).value = '';
       refreshAll();
     }
+    function setHrScope() {
+      q('majorCode').value = '02';
+      q('middleCode').value = '02';
+      q('smallCode').value = '02';
+      q('subCode').value = '01';
+      refreshAll();
+    }
+    function setManagementSupportMvp() {
+      q('majorCode').value = '02';
+      q('middleCode').value = '';
+      q('smallCode').value = '';
+      q('subCode').value = '';
+      q('keyword').value = '경영지원';
+      refreshAll();
+    }
     function statusClass(status) {
-      if (['matched','human_reviewed','processed'].includes(status)) return 'ok';
+      if (['matched','human_reviewed','processed','mapped_source','training'].includes(status)) return 'ok';
       if (['api_failed','error'].includes(status)) return 'bad';
-      if (['not_collected','no_data','raw','warning'].includes(status)) return 'warn';
+      if (['not_collected','no_data','raw','warning','needs_review','no_training'].includes(status)) return 'warn';
       return '';
     }
     function statusPill(status) {
@@ -241,15 +261,37 @@ HTML = """<!doctype html>
       await loadIssues();
     }
 
+    async function refreshOverview() {
+      await loadStatus();
+      await loadProgress();
+      await loadWorkbench();
+      await loadIssues();
+    }
+
+    function scheduleAutoRefresh() {
+      if (overviewTimer) clearInterval(overviewTimer);
+      overviewTimer = setInterval(() => {
+        refreshOverview().catch(err => {
+          q('liveStatus').textContent = `자동갱신 오류: ${err.message}`;
+        });
+      }, 30000);
+    }
+
     async function loadStatus() {
       const data = await api('/api/status');
-      q('stamp').textContent = data.generated_at;
+      const loadedAt = new Date().toLocaleTimeString('ko-KR');
+      q('stamp').textContent = `DB ${data.generated_at} / 화면 ${loadedAt}`;
+      q('liveStatus').textContent = `자동갱신 30초 / 마지막 ${loadedAt}`;
       const cp = data.counts;
       const ep = data.element_progress;
+      const sqf = data.sqf;
+      const onto = data.ontology;
       q('summary').innerHTML = [
         `<div class="panel"><span class="muted">능력단위</span><strong>${fmt.format(cp.competency_units)}</strong><span class="ok">API matched ${fmt.format(data.unit_api_status.matched || 0)}</span></div>`,
         `<div class="panel"><span class="muted">능력단위요소 API 검증</span><strong>${ep.percent.toFixed(1)}%</strong><span class="muted">${fmt.format(ep.matched)} / ${fmt.format(ep.total)}</span></div>`,
-        `<div class="panel"><span class="muted">미수집/실패 요소</span><strong>${fmt.format(ep.not_collected + ep.api_failed)}</strong><span class="warn">not_collected ${fmt.format(ep.not_collected)}, failed ${fmt.format(ep.api_failed)}</span></div>`,
+        `<div class="panel"><span class="muted">SQF 직무수준</span><strong>${fmt.format(cp.sqf_duties || 0)}</strong><span class="muted">제공 대분류 ${fmt.format(sqf.major_codes_with_data || 0)}개</span></div>`,
+        `<div class="panel"><span class="muted">경영지원 MVP</span><strong>${fmt.format(sqf.management_support_duties || 0)}</strong><span class="${sqf.management_support_duties ? 'ok' : 'warn'}">SQF 경영지원 직무</span></div>`,
+        `<div class="panel"><span class="muted">NCS-SQF 매핑</span><strong>${fmt.format(onto.matches || 0)}</strong><span class="${onto.match_table_present ? 'warn' : 'bad'}">${onto.match_table_present ? '후보 검토 필요' : '테이블 생성 필요'}</span></div>`,
         `<div class="panel"><span class="muted">열린 품질 이슈</span><strong>${fmt.format(data.quality.open_issues)}</strong><span class="muted">resolved ${fmt.format(data.quality.resolved_issues)}</span></div>`
       ].join('');
       const issueTypes = [''].concat(data.issue_types);
@@ -323,6 +365,10 @@ HTML = """<!doctype html>
 
     async function saveCurrentDetail() {
       if (!currentDetail) return;
+      if (!currentDetail.can_refine_title && !currentDetail.can_refine_body) {
+        alert('이 항목은 읽기 전용 근거입니다.');
+        return;
+      }
       await api('/api/preprocess', {
         method: 'POST',
         headers: {'Content-Type':'application/json'},
@@ -367,7 +413,7 @@ HTML = """<!doctype html>
       await loadWorkbench();
     }
 
-    refreshAll().catch(err => alert(err.message));
+    refreshAll().then(scheduleAutoRefresh).catch(err => alert(err.message));
   </script>
 </body>
 </html>
@@ -436,6 +482,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.json_response(save_refined(self.server.db_path, payload))
             elif parsed.path == "/api/resolve":
                 self.json_response(resolve_issue(self.server.db_path, payload))
+            elif parsed.path == "/api/review-mapping":
+                self.json_response(review_mapping_candidate(self.server.db_path, payload))
+            elif parsed.path == "/api/review-refinement":
+                self.json_response(review_refinement_job(self.server.db_path, payload))
             else:
                 self.json_response({"error": "not_found"}, status=404)
         except Exception as exc:
@@ -453,6 +503,14 @@ def connect_db(db_path: Path):
 
 def scalar(conn, sql: str, params: list | tuple = ()) -> int:
     return int(conn.execute(sql, params).fetchone()[0])
+
+
+def table_exists(conn, table: str) -> bool:
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
 
 
 def first(params: dict[str, list[str]], key: str, default: str = "") -> str:
@@ -497,9 +555,48 @@ def get_status(db_path: Path) -> dict:
             "ksa_items",
             "api_raw_responses",
             "api_competency_units",
+            "sqf_duties",
             "quality_issues",
         ]
     }
+    match_table_present = table_exists(conn, "sqf_ncs_matches")
+    match_count = scalar(conn, "SELECT COUNT(*) FROM sqf_ncs_matches") if match_table_present else 0
+    reviewed_match_count = (
+        scalar(
+            conn,
+            """
+            SELECT COUNT(*)
+            FROM sqf_ncs_matches
+            WHERE review_status IN ('reviewed', 'human_reviewed', 'accepted')
+            """,
+        )
+        if match_table_present
+        else 0
+    )
+    sqf_major_codes = scalar(
+        conn,
+        "SELECT COUNT(DISTINCT ncs_lclas_cd) FROM sqf_duties",
+    )
+    sqf_management_support = scalar(
+        conn,
+        """
+        SELECT COUNT(*)
+        FROM sqf_duties
+        WHERE ncs_lclas_cd = '02'
+          AND sqf_field_name = '경영관리'
+          AND job_name = '경영지원'
+        """,
+    )
+    sqf_with_education = scalar(
+        conn,
+        """
+        SELECT COUNT(*)
+        FROM sqf_duties
+        WHERE duty_education_training IS NOT NULL
+          AND TRIM(duty_education_training) <> ''
+          AND TRIM(duty_education_training) <> '-'
+        """,
+    )
     element_status = {
         row["api_match_status"]: row["count"]
         for row in conn.execute(
@@ -542,6 +639,16 @@ def get_status(db_path: Path) -> dict:
         "quality": {
             "open_issues": scalar(conn, "SELECT COUNT(*) FROM quality_issues WHERE resolved_at IS NULL"),
             "resolved_issues": scalar(conn, "SELECT COUNT(*) FROM quality_issues WHERE resolved_at IS NOT NULL"),
+        },
+        "sqf": {
+            "major_codes_with_data": sqf_major_codes,
+            "management_support_duties": sqf_management_support,
+            "duties_with_training": sqf_with_education,
+        },
+        "ontology": {
+            "match_table_present": match_table_present,
+            "matches": match_count,
+            "reviewed_matches": reviewed_match_count,
         },
         "issue_types": issue_types,
         "missing_duty_definitions": scalar(
@@ -725,6 +832,47 @@ def get_progress(db_path: Path, params: dict[str, list[str]]) -> dict:
     open_issues = count_query(conn, "SELECT COUNT(*) FROM quality_issues WHERE resolved_at IS NULL", [])
     resolved_issues = count_query(conn, "SELECT COUNT(*) FROM quality_issues WHERE resolved_at IS NOT NULL", [])
     all_issues = open_issues + resolved_issues
+    sqf_total = count_query(conn, "SELECT COUNT(*) FROM sqf_duties", [])
+    sqf_major_codes = count_query(conn, "SELECT COUNT(DISTINCT ncs_lclas_cd) FROM sqf_duties", [])
+    sqf_mvp = count_query(
+        conn,
+        """
+        SELECT COUNT(*)
+        FROM sqf_duties
+        WHERE ncs_lclas_cd = '02'
+          AND sqf_field_name = '경영관리'
+          AND job_name = '경영지원'
+        """,
+        [],
+    )
+    sqf_mvp_with_definition = count_query(
+        conn,
+        """
+        SELECT COUNT(*)
+        FROM sqf_duties
+        WHERE ncs_lclas_cd = '02'
+          AND sqf_field_name = '경영관리'
+          AND job_name = '경영지원'
+          AND duty_definition IS NOT NULL
+          AND TRIM(duty_definition) <> ''
+        """,
+        [],
+    )
+    match_table_present = table_exists(conn, "sqf_ncs_matches")
+    sqf_matches = count_query(conn, "SELECT COUNT(*) FROM sqf_ncs_matches", []) if match_table_present else 0
+    sqf_reviewed_matches = (
+        count_query(
+            conn,
+            """
+            SELECT COUNT(*)
+            FROM sqf_ncs_matches
+            WHERE review_status IN ('reviewed', 'human_reviewed', 'accepted')
+            """,
+            [],
+        )
+        if match_table_present
+        else 0
+    )
 
     phases = [
         phase(
@@ -774,6 +922,46 @@ def get_progress(db_path: Path, params: dict[str, list[str]]) -> dict:
             kind="element",
             state="api_not_collected" if elements_not_collected else "api_problem",
             title="요소 API 미수집" if elements_not_collected else "요소 API 실패/없음",
+        ),
+        phase(
+            name="SQF 직무수준 수집",
+            meaning="SQF openapi26 산업별 직무와 직무수준을 NCS 대분류 코드로 적재",
+            completed=sqf_major_codes,
+            total=24,
+            remaining=max(24 - sqf_major_codes, 0),
+            remaining_detail=f"제공 대분류 {sqf_major_codes:,}개, SQF 직무수준 {sqf_total:,}건",
+            method="NCS_SQF_SERVICE_KEY + /openapi26, code 000 정상, 002 빈 데이터",
+            kind="sqf",
+            state="all",
+            title="SQF 직무수준 전체",
+        ),
+        phase(
+            name="경영지원 MVP 범위",
+            meaning="1차 MVP를 SQF 02 > 경영관리 > 경영지원 직무로 제한",
+            completed=sqf_mvp_with_definition,
+            total=sqf_mvp,
+            remaining=max(sqf_mvp - sqf_mvp_with_definition, 0),
+            remaining_detail=f"경영지원 SQF 직무수준 {sqf_mvp:,}건",
+            method="SQF job_name='경영지원'을 NCS 02 경영·회계·사무와 연결",
+            kind="sqf",
+            state="mvp",
+            title="경영지원 MVP SQF 직무",
+        ),
+        phase(
+            name="NCS-SQF 매핑 객체",
+            meaning="SQF 직무수준과 NCS 능력단위/KSA 사이의 관계, 점수, 근거, 버전 저장",
+            completed=sqf_reviewed_matches,
+            total=max(sqf_matches, 1),
+            remaining=(max(sqf_matches - sqf_reviewed_matches, 0) if match_table_present else 1),
+            remaining_detail=(
+                f"후보 {sqf_matches:,}건, 검토 {sqf_reviewed_matches:,}건"
+                if match_table_present
+                else "sqf_ncs_matches 테이블 생성 필요"
+            ),
+            method="sameAs 금지, requires/closeMatch/partiallyCovers + evidence/confidence 저장",
+            kind="sqf",
+            state="mvp",
+            title="경영지원 MVP SQF 직무",
         ),
         phase(
             name="사람 수작업 정제",
@@ -959,6 +1147,50 @@ def get_workbench(db_path: Path, params: dict[str, list[str]]) -> dict:
                 vals_c,
             ),
             "description": "사람이 원문 확인하거나 재수집 후보로 볼 요소",
+        },
+        {
+            "group": "NCS-SQF 온톨로지",
+            "title": "SQF 직무수준 전체",
+            "kind": "sqf",
+            "state": "all",
+            "count": count_query(conn, "SELECT COUNT(*) FROM sqf_duties", []),
+            "description": "openapi26에서 수집한 SQF 산업별 직무수준",
+        },
+        {
+            "group": "NCS-SQF 온톨로지",
+            "title": "경영지원 MVP SQF 직무",
+            "kind": "sqf",
+            "state": "mvp",
+            "count": count_query(
+                conn,
+                """
+                SELECT COUNT(*)
+                FROM sqf_duties
+                WHERE ncs_lclas_cd = '02'
+                  AND sqf_field_name = '경영관리'
+                  AND job_name = '경영지원'
+                """,
+                [],
+            ),
+            "description": "1차 MVP 범위: 02 경영관리 > 경영지원",
+        },
+        {
+            "group": "NCS-SQF 온톨로지",
+            "title": "직접 교육훈련 근거 있음",
+            "kind": "sqf",
+            "state": "training",
+            "count": count_query(
+                conn,
+                """
+                SELECT COUNT(*)
+                FROM sqf_duties
+                WHERE duty_education_training IS NOT NULL
+                  AND TRIM(duty_education_training) <> ''
+                  AND TRIM(duty_education_training) <> '-'
+                """,
+                [],
+            ),
+            "description": "SQF dutyEduTrain이 직접 채워진 직무수준",
         },
         {
             "group": "품질 검토",
@@ -1171,6 +1403,71 @@ def get_items(db_path: Path, params: dict[str, list[str]]) -> dict:
             """,
             values,
         )
+    elif kind == "sqf":
+        clauses: list[str] = []
+        values: list[str] = []
+        major_code = first(params, "major_code")
+        if major_code:
+            clauses.append("sd.ncs_lclas_cd = ?")
+            values.append(major_code)
+        if state == "mvp":
+            clauses.extend(
+                [
+                    "sd.ncs_lclas_cd = '02'",
+                    "sd.sqf_field_name = '경영관리'",
+                    "sd.job_name = '경영지원'",
+                ]
+            )
+        elif state == "training":
+            clauses.append(
+                """
+                sd.duty_education_training IS NOT NULL
+                AND TRIM(sd.duty_education_training) <> ''
+                AND TRIM(sd.duty_education_training) <> '-'
+                """
+            )
+        kw, kw_vals = keyword_clause(
+            params,
+            [
+                "sd.ncs_lclas_name",
+                "sd.sqf_field_name",
+                "sd.job_name",
+                "sd.duty_name",
+                "sd.duty_definition",
+                "sd.duty_qualification",
+                "sd.duty_career",
+            ],
+        )
+        if kw:
+            clauses.append(kw)
+            values.extend(kw_vals)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = conn.execute(
+            f"""
+            SELECT 'sqf' AS kind, sd.source_key AS id,
+                   sd.ncs_lclas_cd || ' ' || sd.ncs_lclas_name AS code,
+                   sd.sqf_field_name || ' > ' || sd.job_name AS context,
+                   sd.duty_name || CASE WHEN sd.duty_level <> '' THEN ' / Level ' || sd.duty_level ELSE '' END AS title,
+                   COALESCE(sd.duty_definition, sd.duty_level_name, '') AS body,
+                   CASE
+                     WHEN sd.duty_definition IS NOT NULL AND TRIM(sd.duty_definition) <> '' THEN 'mapped_source'
+                     ELSE 'needs_review'
+                   END AS status,
+                   CASE
+                     WHEN sd.duty_education_training IS NOT NULL
+                       AND TRIM(sd.duty_education_training) <> ''
+                       AND TRIM(sd.duty_education_training) <> '-'
+                     THEN 'training'
+                     ELSE 'no_training'
+                   END AS api_status
+            FROM sqf_duties sd
+            {where}
+            ORDER BY sd.ncs_lclas_cd, sd.sqf_field_name, sd.job_name, CAST(sd.duty_level AS INTEGER), sd.duty_name
+            LIMIT ?
+            """,
+            [*values, limit],
+        ).fetchall()
+        total = count_query(conn, f"SELECT COUNT(*) FROM sqf_duties sd {where}", values)
     elif kind == "quality":
         rows = conn.execute(
             """
@@ -1331,6 +1628,44 @@ def get_item_detail(db_path: Path, params: dict[str, list[str]]) -> dict:
             }
         else:
             item = {}
+    elif kind == "sqf":
+        row = conn.execute(
+            """
+            SELECT *
+            FROM sqf_duties
+            WHERE source_key = ?
+            """,
+            (item_id,),
+        ).fetchone()
+        if row:
+            evidence = [
+                f"직무정의: {row['duty_definition'] or ''}",
+                f"직무수준 정의: {row['duty_level_name'] or ''}",
+                f"자율성과 책임성: {row['autonomy_responsibility'] or ''}",
+                f"교육훈련: {row['duty_education_training'] or ''}",
+                f"자격: {row['duty_qualification'] or ''}",
+                f"경력: {row['duty_career'] or ''}",
+                f"면허: {row['duty_license'] or ''}",
+                f"비고: {row['duty_remark'] or ''}",
+            ]
+            item = {
+                "kind": kind,
+                "id": item_id,
+                "context": (
+                    f"{row['ncs_lclas_cd']} {row['ncs_lclas_name']}\n"
+                    f"{row['sqf_field_name']} > {row['job_name']}"
+                ),
+                "title_raw": f"{row['duty_name']} / Level {row['duty_level']}",
+                "title_refined": f"{row['duty_name']} / Level {row['duty_level']}",
+                "body_raw": "\n".join(evidence),
+                "body_refined": "",
+                "can_refine_title": False,
+                "can_refine_body": False,
+                "status": "mapped_source" if row["duty_definition"] else "needs_review",
+                "api_status": "training" if row["duty_education_training"] else "no_training",
+            }
+        else:
+            item = {}
     elif kind == "quality":
         row = conn.execute("SELECT * FROM quality_issues WHERE issue_id = ?", (item_id,)).fetchone()
         if row:
@@ -1417,6 +1752,141 @@ def save_manual_preprocess(db_path: Path, payload: dict) -> dict:
     conn.commit()
     conn.close()
     return {"ok": True, "kind": kind, "id": item_id}
+
+
+def insert_review_audit(
+    conn,
+    *,
+    entity_type: str,
+    entity_id: str,
+    action: str,
+    previous_status: str | None,
+    new_status: str | None,
+    reviewer_id: str | None,
+    notes: str | None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO review_audit_log(
+            entity_type, entity_id, action, previous_status,
+            new_status, reviewer_id, notes, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            entity_type,
+            entity_id,
+            action,
+            previous_status,
+            new_status,
+            reviewer_id,
+            notes,
+            now_utc(),
+        ),
+    )
+
+
+def review_mapping_candidate(db_path: Path, payload: dict) -> dict:
+    match_id = str(payload["match_id"])
+    action = str(payload["action"])
+    reviewer_id = str(payload.get("reviewer_id", "dashboard")).strip() or "dashboard"
+    notes = str(payload.get("notes", "")).strip()
+    relation = str(payload.get("relation", "")).strip()
+    allowed = {
+        "accept": "accepted",
+        "reject": "rejected",
+        "mark_low_confidence": "low_confidence",
+        "revise_relation": "revised",
+    }
+    if action not in allowed:
+        raise ValueError(f"unsupported mapping review action: {action}")
+    conn = connect_db(db_path)
+    row = conn.execute("SELECT * FROM sqf_ncs_matches WHERE match_id = ?", (match_id,)).fetchone()
+    if row is None:
+        conn.close()
+        return {"error": "not_found", "match_id": match_id}
+    previous = row["review_status"]
+    new_status = allowed[action]
+    updates = [
+        "review_status = ?",
+        "reviewer_id = ?",
+        "reviewed_at = ?",
+        "reviewer_notes = ?",
+        "updated_at = ?",
+    ]
+    values = [new_status, reviewer_id, now_utc(), notes, now_utc()]
+    if action == "revise_relation":
+        if not relation:
+            conn.close()
+            raise ValueError("relation is required for revise_relation")
+        updates.append("relation = ?")
+        values.append(relation)
+    values.append(match_id)
+    conn.execute(f"UPDATE sqf_ncs_matches SET {', '.join(updates)} WHERE match_id = ?", values)
+    insert_review_audit(
+        conn,
+        entity_type="sqf_ncs_match",
+        entity_id=match_id,
+        action=action,
+        previous_status=previous,
+        new_status=new_status,
+        reviewer_id=reviewer_id,
+        notes=notes,
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True, "match_id": match_id, "previous_status": previous, "new_status": new_status}
+
+
+def review_refinement_job(db_path: Path, payload: dict) -> dict:
+    job_id = str(payload["job_id"])
+    action = str(payload["action"])
+    reviewer_id = str(payload.get("reviewer_id", "dashboard")).strip() or "dashboard"
+    notes = str(payload.get("notes", "")).strip()
+    if action not in {"approve_refined", "reject_refined", "edit_refined"}:
+        raise ValueError(f"unsupported refinement review action: {action}")
+    conn = connect_db(db_path)
+    row = conn.execute("SELECT * FROM refinement_jobs WHERE job_id = ?", (job_id,)).fetchone()
+    if row is None:
+        conn.close()
+        return {"error": "not_found", "job_id": job_id}
+    previous = row["review_status"]
+    if action == "reject_refined":
+        new_status = "rejected"
+        conn.execute("UPDATE refinement_jobs SET review_status = ? WHERE job_id = ?", (new_status, job_id))
+    else:
+        refined_text = str(payload.get("refined_text") or row["refined_text"] or "").strip()
+        if not refined_text:
+            conn.close()
+            raise ValueError("refined_text is required")
+        apply_refinement_to_target(
+            conn,
+            target_type=row["target_type"],
+            target_id=row["target_id"],
+            refined_text=refined_text,
+            review_status="human_reviewed",
+        )
+        new_status = "applied"
+        conn.execute(
+            """
+            UPDATE refinement_jobs
+            SET refined_text = ?, rationale = ?, review_status = ?, applied_at = ?
+            WHERE job_id = ?
+            """,
+            (refined_text, notes or row["rationale"], new_status, now_utc(), job_id),
+        )
+    insert_review_audit(
+        conn,
+        entity_type="refinement_job",
+        entity_id=job_id,
+        action=action,
+        previous_status=previous,
+        new_status=new_status,
+        reviewer_id=reviewer_id,
+        notes=notes,
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True, "job_id": job_id, "previous_status": previous, "new_status": new_status}
 
 
 def get_classifications(db_path: Path, params: dict[str, list[str]]) -> dict:
