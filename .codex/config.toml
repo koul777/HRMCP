@@ -1,0 +1,8 @@
+[mcp_servers.ncs-sqf-education]
+command = "python"
+args = ["-m", "ncs_mcp.server"]
+
+[mcp_servers.ncs-sqf-education.env]
+NCS_DB_PATH = "C:/Workplace/NCS_MCP/data/processed/ncs.db"
+PYTHONPATH = "C:/Workplace/NCS_MCP/src"
+PYTHONUTF8 = "1"

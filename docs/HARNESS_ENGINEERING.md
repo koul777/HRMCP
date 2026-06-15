@@ -168,12 +168,52 @@ python scripts\ncs_harness.py refine export-jsonl --issue-types short_ksa,duplic
 python scripts\ncs_harness.py refine import-jsonl --input data/refinement/results.jsonl
 ```
 
+## 학습모듈/API/보고서 보강 루프
+
+교육 추천용 학습모듈은 API 수집을 먼저 시도하고, API가 비어 있거나 특정 능력단위의 모듈을 반환하지 않으면 공식 PDF와 보고서 근거로 보강한다. 학습모듈 API의 저장 기준 필드는 `결과코드`, `결과메시지`, `대분류코드`, `대분류코드명`, `중분류코드`, `중분류코드명`, `소분류코드`, `소분류코드명`, `세분류코드`, `세분류코드명`, `학습모듈번호`, `학습모듈명`, `학습모듈내용`이다.
+
+API 확인과 수집:
+
+```powershell
+python scripts\ncs_harness.py query-study-modules --major-code 02 --module-name "인사기획"
+python scripts\ncs_harness.py collect-study-modules --major-code 02 --num-of-rows 200
+python scripts\ncs_harness.py collect-study-modules --major-code 02 --module-name "교육훈련" --num-of-rows 50
+```
+
+판단 기준:
+
+- API에서 정확한 `학습모듈번호`와 `학습모듈명`이 오면 `ncs_learning_modules`에 API 원천 행으로 저장한다.
+- API가 `002 empty data`를 반환하거나 정확 모듈이 없으면 공식 NCS 학습모듈 PDF를 보강 원천으로 등록한다.
+- `LM0202020101_19v2_인사기획.pdf` 같은 파일은 `role = ncs_learning_module`이며, `학습모듈의 개요`에서 목표, 선수학습, 내용체계, 핵심 용어를 우선 추출한다.
+- `report.pdf` 형태의 NCS 활용패키지는 `role = ncs_learning_package`이며, 수행준거, KSA, 자가진단, 직무기술서 근거로 사용한다.
+- SQF 보고서와 개발 매뉴얼은 `role = sqf_report` 또는 `framework_reference`이며, SQF 직무수준과 NCS 능력단위의 필수/선택 관계 근거로 사용한다.
+
+자료가 방대하면 전체 파일을 한 번에 밀어 넣지 않고 대상 범위, API 공백, 추천 실패 케이스 순으로 처리한다. 운영형 v1 기준에서는 대상 SQF/NCS 범위의 공식 보고서와 학습모듈 PDF가 모두 `extracted` 상태여야 하므로, 우선순위 큐를 만들어 자산 단위로 끝까지 등록한다.
+
+로컬 PDF 등록:
+
+```powershell
+python scripts\ncs_harness.py import-ontology-source --input "<LM...pdf>" --title "NCS 학습모듈 - <능력단위명>" --role ncs_learning_module
+python scripts\ncs_harness.py import-ontology-source --input "<NCS-package.pdf>" --title "NCS 활용패키지 - <직무명>" --role ncs_learning_package
+python scripts\ncs_harness.py import-ontology-source --input "<SQF-report.pdf>" --title "SQF 보고서 - <분야명>" --role sqf_report
+python scripts\ncs_harness.py preprocess-sqf-documents --only-unprocessed --chunk-chars 2400 --overlap-chars 250 --ocr-empty --ocr-lang kor+eng --ocr-dpi 160
+```
+
+DB 반영 기준:
+
+- 공식 학습모듈 PDF는 `ncs_learning_modules.source_payload`에 `source_type = local_pdf_learning_module`, 문서 ID, 파일 해시, 원본 경로, 원본 학습모듈번호를 남긴다.
+- PDF의 `LM0202020101_19v2`와 현재 DB의 `0202020101_23v3`처럼 버전이 다르면 기본 능력단위 코드로 연결하고, 원래 버전은 evidence에 보존한다.
+- `learning_module_unit_links`에는 `link_method = local_pdf_unit_code`, 높은 `confidence_score`, 추출 근거 문장을 저장한다.
+- 중복 다운로드 파일은 내용 해시로 같은 원천인지 확인하고 중복 삽입하지 않는다.
+- 추천기는 `major_code`만 맞는 학습모듈을 추천하지 않는다. 능력단위 링크, 개념 링크, 모듈명/본문의 강한 근거가 없으면 NCS-derived 학습목표로 fallback한다.
+
 ## 운영 원칙
 
 - 셸 명령에서는 한글명 필터보다 코드 필터를 우선한다. 예: `major_code=02`, `middle_code=02`, `small_code=02`, `sub_code=01`.
 - `/NCS006` 전체 수집은 트래픽 제한 때문에 배치로 실행한다.
 - 같은 실패가 반복되면 더 큰 프롬프트를 던지지 말고 하네스, 문서, 불변조건 검사를 개선한다.
-# SQF Library Collection
+
+## SQF Library Collection
 
 SQF library reports are collected as ontology source evidence. Metadata is stored in `sqf_library_posts`, `sqf_library_files`, and `sqf_document_sources`; attachments are downloaded into `data/raw/sqf_docs`.
 

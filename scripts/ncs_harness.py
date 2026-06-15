@@ -26,6 +26,7 @@ from ncs_mcp.db import connect, initialize_database
 from ncs_mcp.evaluation import run_evaluation
 from ncs_mcp.handoff import export_handoff_package
 from ncs_mcp.import_ontology_sources import register_local_ontology_source
+from ncs_mcp.mvp_workflow import run_mvp_bootstrap
 from ncs_mcp.ontology import build_sqf_mapping_candidates
 from ncs_mcp.ontology_export import export_ontology_jsonld, validate_ontology_readiness
 from ncs_mcp.preprocess_excel import preprocess_excel
@@ -35,6 +36,7 @@ from ncs_mcp.refinement import parse_csv, run_refinement_harness
 from ncs_mcp.server import get_competency_units, get_unit_structure
 from ncs_mcp.sqf_precision_matching import build_sqf_chunk_job_level_matches
 from ncs_mcp.sqf_sqlite import build_sqf_sqlite_model, sqf_model_summary
+from ncs_mcp.study_module_api import collect_study_modules, fetch_study_modules
 
 
 CORE_TABLES = [
@@ -47,6 +49,9 @@ CORE_TABLES = [
     "element_criteria_ksa_links",
     "api_raw_responses",
     "api_competency_units",
+    "ncs_learning_modules",
+    "learning_module_unit_links",
+    "learning_module_concept_links",
     "sqf_duties",
     "sqf_ncs_matches",
     "sqf_library_posts",
@@ -65,6 +70,9 @@ CORE_TABLES = [
     "sqf_document_evidence_links",
     "quality_issues",
     "refinement_jobs",
+    "education_recommendation_runs",
+    "education_recommendation_items",
+    "education_recommendation_evidence",
 ]
 
 
@@ -97,6 +105,7 @@ def inspect_project() -> dict[str, Any]:
         "reports_dir": str(settings.reports_dir),
         "service_key_present": bool(settings.service_key),
         "sqf_service_key_present": bool(settings.sqf_service_key),
+        "study_module_service_key_present": bool(settings.study_module_service_key),
         "counts": db_counts,
     }
     if settings.db_path.exists():
@@ -322,7 +331,15 @@ def lint_repo(strict: bool = False) -> dict[str, Any]:
                     f"{rel_path} must not depend on {token}",
                 )
 
-    secret_values = {value for value in [settings.service_key, settings.sqf_service_key] if value}
+    secret_values = {
+        value
+        for value in [
+            settings.service_key,
+            settings.sqf_service_key,
+            settings.study_module_service_key,
+        ]
+        if value
+    }
     for secret_value in secret_values:
         for path in scan_text_files():
             if secret_value in path.read_text(encoding="utf-8", errors="ignore"):
@@ -424,6 +441,18 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, Any]:
             major_code=args.sqf_major_code,
             major_limit=args.sqf_major_limit,
         )
+    if args.collect_study_modules:
+        if not settings.study_module_service_key:
+            raise SystemExit("NCS_STUDY_MODULE_SERVICE_KEY is required for --collect-study-modules.")
+        summary["stages"]["collect_study_modules"] = collect_study_modules(
+            settings.db_path,
+            settings.study_module_service_key,
+            major_code=args.study_module_major_code,
+            module_name=args.study_module_name,
+            num_of_rows=args.study_module_num_of_rows,
+            timeout=args.timeout,
+            max_pages=args.study_module_max_pages,
+        )
     if args.collect_sqf_library:
         summary["stages"]["collect_sqf_library"] = collect_sqf_library(
             settings.db_path,
@@ -472,6 +501,14 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, Any]:
             )
         finally:
             conn.close()
+    if args.mvp_bootstrap:
+        summary["stages"]["mvp_bootstrap"] = run_mvp_bootstrap(
+            settings.db_path,
+            limit_per_duty=args.mvp_limit_per_duty,
+            accept_top_n=args.mvp_accept_top_n,
+            min_accept_score=args.mvp_min_accept_score,
+            dry_run=args.mvp_dry_run,
+        )
     if args.validate_ontology:
         summary["stages"]["validate_ontology"] = validate_ontology_readiness(settings.db_path)
     if args.export_ontology_jsonld:
@@ -524,6 +561,27 @@ def parse_args() -> argparse.Namespace:
     plan.add_argument("--batch-size", type=int, default=8000)
     plan.add_argument("--concurrency", type=int, default=8)
 
+    study_modules = subparsers.add_parser(
+        "query-study-modules",
+        help="Query the NCS study module openapi21 endpoint without storing rows.",
+    )
+    study_modules.add_argument("--major-code", default="02")
+    study_modules.add_argument("--module-name")
+    study_modules.add_argument("--page-no", type=int, default=1)
+    study_modules.add_argument("--num-of-rows", type=int, default=10)
+    study_modules.add_argument("--timeout", type=int, default=30)
+
+    collect_study = subparsers.add_parser(
+        "collect-study-modules",
+        help="Collect and store NCS study modules from openapi21.",
+    )
+    collect_study.add_argument("--major-code", default="02")
+    collect_study.add_argument("--module-name")
+    collect_study.add_argument("--page-no", type=int, default=1)
+    collect_study.add_argument("--num-of-rows", type=int, default=200)
+    collect_study.add_argument("--timeout", type=int, default=30)
+    collect_study.add_argument("--max-pages", type=int)
+
     dashboard = subparsers.add_parser("dashboard", help="Print the dashboard command.")
     dashboard.add_argument("--host", default="127.0.0.1")
     dashboard.add_argument("--port", type=int, default=8765)
@@ -538,6 +596,17 @@ def parse_args() -> argparse.Namespace:
     mappings.add_argument("--source-key")
     mappings.add_argument("--limit-per-duty", type=int, default=10)
     mappings.add_argument("--duty-limit", type=int, default=5000)
+
+    mvp_bootstrap = subparsers.add_parser(
+        "mvp-bootstrap",
+        help="Prepare the 02 경영관리 > 경영지원/인사 MVP review and recommendation baseline.",
+    )
+    mvp_bootstrap.add_argument("--refresh-sqf", action="store_true")
+    mvp_bootstrap.add_argument("--timeout", type=int, default=90)
+    mvp_bootstrap.add_argument("--limit-per-duty", type=int, default=10)
+    mvp_bootstrap.add_argument("--accept-top-n", type=int, default=3)
+    mvp_bootstrap.add_argument("--min-accept-score", type=float, default=7.0)
+    mvp_bootstrap.add_argument("--dry-run", action="store_true")
 
     export_package = subparsers.add_parser(
         "export-package",
@@ -654,6 +723,11 @@ def parse_args() -> argparse.Namespace:
     pipeline.add_argument("--api-subd", action="store_true")
     pipeline.add_argument("--api-elements-hr", action="store_true")
     pipeline.add_argument("--api-sqf", action="store_true")
+    pipeline.add_argument("--collect-study-modules", action="store_true")
+    pipeline.add_argument("--study-module-major-code", default="02")
+    pipeline.add_argument("--study-module-name")
+    pipeline.add_argument("--study-module-num-of-rows", type=int, default=200)
+    pipeline.add_argument("--study-module-max-pages", type=int)
     pipeline.add_argument("--sqf-major-code")
     pipeline.add_argument("--sqf-major-limit", type=int)
     pipeline.add_argument("--collect-sqf-library", action="store_true")
@@ -683,6 +757,11 @@ def parse_args() -> argparse.Namespace:
     pipeline.add_argument("--mapping-source-key")
     pipeline.add_argument("--mapping-limit-per-duty", type=int, default=10)
     pipeline.add_argument("--mapping-duty-limit", type=int, default=5000)
+    pipeline.add_argument("--mvp-bootstrap", action="store_true")
+    pipeline.add_argument("--mvp-limit-per-duty", type=int, default=10)
+    pipeline.add_argument("--mvp-accept-top-n", type=int, default=3)
+    pipeline.add_argument("--mvp-min-accept-score", type=float, default=7.0)
+    pipeline.add_argument("--mvp-dry-run", action="store_true")
     pipeline.add_argument("--validate-ontology", action="store_true")
     pipeline.add_argument("--export-ontology-jsonld", action="store_true")
     pipeline.add_argument("--ontology-jsonld-out", default=str(ROOT / "exports" / "ncs_sqf_ontology.jsonld"))
@@ -743,6 +822,63 @@ def main() -> None:
             )
         finally:
             conn.close()
+    elif args.command == "mvp-bootstrap":
+        settings = load_settings()
+        summary: dict[str, Any] = {"stages": {}}
+        if args.refresh_sqf:
+            if not settings.sqf_service_key:
+                raise SystemExit("NCS_SQF_SERVICE_KEY is required for --refresh-sqf.")
+            summary["stages"]["api_sqf"] = collect_sqf_api(
+                settings.db_path,
+                settings.reports_dir,
+                settings.sqf_service_key,
+                timeout=args.timeout,
+                major_code="02",
+            )
+            summary["stages"]["build_sqf_sqlite_model"] = build_sqf_sqlite_model(settings.db_path)
+        summary["stages"]["mvp_bootstrap"] = run_mvp_bootstrap(
+            settings.db_path,
+            limit_per_duty=args.limit_per_duty,
+            accept_top_n=args.accept_top_n,
+            min_accept_score=args.min_accept_score,
+            dry_run=args.dry_run,
+        )
+        summary["snapshot"] = inspect_project()
+        print_json(summary)
+    elif args.command == "query-study-modules":
+        settings = load_settings()
+        if not settings.study_module_service_key:
+            raise SystemExit(
+                "NCS_STUDY_MODULE_SERVICE_KEY is required. Set it in .env before querying openapi21."
+            )
+        print_json(
+            fetch_study_modules(
+                settings.study_module_service_key,
+                major_code=args.major_code,
+                module_name=args.module_name,
+                page_no=args.page_no,
+                num_of_rows=args.num_of_rows,
+                timeout=args.timeout,
+            )
+        )
+    elif args.command == "collect-study-modules":
+        settings = load_settings()
+        if not settings.study_module_service_key:
+            raise SystemExit(
+                "NCS_STUDY_MODULE_SERVICE_KEY is required. Set it in .env before collecting openapi21."
+            )
+        print_json(
+            collect_study_modules(
+                settings.db_path,
+                settings.study_module_service_key,
+                major_code=args.major_code,
+                module_name=args.module_name,
+                page_no=args.page_no,
+                num_of_rows=args.num_of_rows,
+                timeout=args.timeout,
+                max_pages=args.max_pages,
+            )
+        )
     elif args.command == "export-package":
         settings = load_settings()
         print_json(

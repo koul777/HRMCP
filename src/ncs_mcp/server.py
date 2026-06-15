@@ -14,12 +14,21 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from ncs_mcp.config import load_settings
-from ncs_mcp.db import clamp_limit, connect, initialize_database, row_to_dict, rows_to_dicts
+from ncs_mcp.db import (
+    clamp_limit,
+    connect,
+    initialize_database,
+    normalize_concept_key,
+    now_utc,
+    row_to_dict,
+    rows_to_dicts,
+)
 from ncs_mcp.ontology import (
     MVP_JOB_NAME,
     MVP_MAJOR_CODE,
     MVP_SQF_FIELD_NAME,
     ONTOLOGY_SCHEMA,
+    TRUSTED_MAPPING_FILTER,
     analyze_sqf_gap as ontology_analyze_sqf_gap,
     build_learning_objectives_for_units,
     build_sqf_mapping_candidates as ontology_build_sqf_mapping_candidates,
@@ -34,7 +43,14 @@ from ncs_mcp.ontology import (
     search_sqf_jobs_summary,
     sqf_summary,
 )
-from ncs_mcp.mapping_policy import apply_mapping_filter
+from ncs_mcp.mapping_policy import REVIEWED_STATUSES, apply_mapping_filter
+from ncs_mcp.recommendation import (
+    explain_education_recommendation as recommendation_explain_education,
+    get_learning_path_for_sqf_job as recommendation_get_learning_path,
+    get_learning_module as recommendation_get_learning_module,
+    recommend_education_for_duty as recommendation_recommend_education,
+    search_learning_modules as recommendation_search_learning_modules,
+)
 from ncs_mcp.sqf_sqlite import sqf_model_summary
 
 
@@ -74,6 +90,54 @@ def exact_filter(clauses: list[str], params: list[Any], column: str, value: str 
     if value:
         clauses.append(f"{column} = ?")
         params.append(value)
+
+
+def tool_response(
+    payload: dict[str, Any],
+    *,
+    data: Any | None = None,
+    audit: dict[str, Any] | None = None,
+    ok: bool | None = None,
+) -> dict[str, Any]:
+    """Add the v1 MCP ok/data/error/audit envelope without removing legacy keys."""
+    result = dict(payload)
+    raw_error = result.get("error")
+    if isinstance(raw_error, str):
+        result["error"] = {"code": raw_error}
+    elif raw_error is None:
+        result["error"] = None
+    if ok is None:
+        ok = raw_error is None and result.get("ok", True) is not False
+    result["ok"] = bool(ok)
+    if not result["ok"] and result["error"] is None:
+        result["error"] = {"code": "TOOL_ERROR"}
+    if data is None:
+        data = result.get(
+            "data",
+            {
+                key: value
+                for key, value in result.items()
+                if key not in {"ok", "data", "error", "audit"}
+            },
+        )
+    result["data"] = data
+    result["audit"] = audit or result.get(
+        "audit",
+        {
+            "data_sources": ["SQLite NCS/SQF knowledge base"],
+            "generated_at": now_utc(),
+        },
+    )
+    return result
+
+
+def error_response(code: str, **fields: Any) -> dict[str, Any]:
+    return tool_response(
+        {"error": {"code": code, **fields}},
+        data={},
+        audit={"data_sources": ["SQLite NCS/SQF knowledge base"], "generated_at": now_utc()},
+        ok=False,
+    )
 
 
 def quality_for(conn, target_type: str, target_id: str | int) -> list[dict[str, Any]]:
@@ -832,12 +896,12 @@ def search_sqf_jobs(
             mvp_only=mvp_only,
             limit=limit,
         )
-    return {
+    return tool_response({
         "query": keyword,
         "major_code": major_code,
         "mvp_only": mvp_only,
         "sqf_jobs": jobs,
-    }
+    })
 
 
 @mcp.tool()
@@ -875,7 +939,7 @@ def get_sqf_job_level(
                 item["mapping_status"] = mapping_status
                 item["ncs_matches"] = matches
             result.append(item)
-    return {
+    return tool_response({
         "target": {
             "source_key": source_key,
             "job_name": job_name,
@@ -883,7 +947,7 @@ def get_sqf_job_level(
             "duty_level": duty_level,
         },
         "sqf_job_levels": result,
-    }
+    })
 
 
 @mcp.tool()
@@ -916,7 +980,7 @@ def map_sqf_to_ncs(
     with open_db() as conn:
         duty = get_sqf_duty(conn, source_key)
         if duty is None:
-            return {"error": "sqf_target_not_found", "source_key": source_key}
+            return error_response("sqf_target_not_found", source_key=source_key)
         if persist:
             summary = ontology_build_sqf_mapping_candidates(
                 conn,
@@ -925,7 +989,7 @@ def map_sqf_to_ncs(
                 limit_per_duty=limit,
             )
             mapping_status, matches, metadata = get_filtered_matches(conn, duty, limit=limit)
-            return {
+            return tool_response({
                 "sqf_duty": sqf_summary(duty),
                 "mapping_status": mapping_status,
                 "build_summary": summary,
@@ -936,10 +1000,10 @@ def map_sqf_to_ncs(
                     "used_refined_policy": "refined_if_approved",
                     **metadata,
                 },
-            }
+            })
         candidates = generate_mapping_candidates(conn, duty, limit=max(limit, 50))
         filtered = apply_mapping_filter(candidates)
-    return {
+    return tool_response({
         "sqf_duty": sqf_summary(duty),
         "mapping_status": "generated_candidate",
         "ncs_matches": filtered["matches"][: clamp_limit(limit, default=10, maximum=100)],
@@ -950,7 +1014,7 @@ def map_sqf_to_ncs(
             **filtered["metadata"],
         },
         "note": "Set persist=true to save candidates into sqf_ncs_matches for dashboard review.",
-    }
+    })
 
 
 @mcp.tool()
@@ -964,7 +1028,7 @@ def analyze_gap(
 ) -> dict[str, Any]:
     """Analyze missing NCS units for a target SQF duty level."""
     with open_db() as conn:
-        return ontology_analyze_sqf_gap(
+        result = ontology_analyze_sqf_gap(
             conn,
             current_ncs_unit_codes=current_ncs_unit_codes,
             target_source_key=target_source_key,
@@ -974,6 +1038,7 @@ def analyze_gap(
             mvp_only=target_job_name == MVP_JOB_NAME and target_source_key is None,
             limit=limit,
         )
+    return tool_response(result)
 
 
 @mcp.tool()
@@ -987,7 +1052,7 @@ def recommend_next_ncs_units(
 ) -> dict[str, Any]:
     """Recommend next NCS units to close the gap toward an SQF duty level."""
     with open_db() as conn:
-        return ontology_recommend_next_ncs_units(
+        result = ontology_recommend_next_ncs_units(
             conn,
             current_ncs_unit_codes=current_ncs_unit_codes,
             target_source_key=target_source_key,
@@ -996,6 +1061,7 @@ def recommend_next_ncs_units(
             target_level=target_level,
             limit=limit,
         )
+    return tool_response(result)
 
 
 @mcp.tool()
@@ -1005,11 +1071,12 @@ def explain_mapping(
 ) -> dict[str, Any]:
     """Explain why one SQF duty level maps to one NCS competency unit."""
     with open_db() as conn:
-        return ontology_explain_mapping(
+        result = ontology_explain_mapping(
             conn,
             sqf_source_key=sqf_source_key,
             ncs_unit_code=ncs_unit_code,
         )
+    return tool_response(result)
 
 
 def related_units_for_sqf(conn, sqf_row, query: str, limit: int = 5) -> list[dict[str, Any]]:
@@ -1068,114 +1135,594 @@ def related_units_for_sqf(conn, sqf_row, query: str, limit: int = 5) -> list[dic
 
 
 @mcp.tool()
+def search_learning_modules(
+    query: str | None = None,
+    major_code: str | None = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Search cached NCS learning modules collected from openapi21."""
+    with open_db() as conn:
+        modules = recommendation_search_learning_modules(
+            conn,
+            query=query,
+            major_code=major_code,
+            limit=limit,
+        )
+    return tool_response({
+        "ok": True,
+        "query": query,
+        "major_code": major_code,
+        "modules": modules,
+        "audit": {
+            "data_sources": ["ncs_learning_modules"],
+            "returned": len(modules),
+        },
+    })
+
+
+@mcp.tool()
+def get_learning_module(learn_module_seq: str) -> dict[str, Any]:
+    """Return one cached NCS learning module with unit and ontology concept links."""
+    with open_db() as conn:
+        result = recommendation_get_learning_module(conn, learn_module_seq)
+    if "error" in result:
+        return tool_response({"ok": False, **result})
+    return tool_response({"ok": True, **result})
+
+
+@mcp.tool()
+def get_learning_path_for_sqf_job(
+    query: str,
+    major_code: str | None = None,
+    target_source_key: str | None = None,
+    target_level: str | None = None,
+    current_concepts: list[str] | None = None,
+    limit: int = 5,
+) -> dict[str, Any]:
+    """Build a staged learning path for SQF job levels using trusted mappings and modules."""
+    with open_db() as conn:
+        result = recommendation_get_learning_path(
+            conn,
+            query=query,
+            major_code=major_code,
+            target_source_key=target_source_key,
+            target_level=target_level,
+            current_concepts=current_concepts,
+            limit=limit,
+        )
+    return tool_response(result)
+
+
+@mcp.tool()
 def recommend_education_for_duty(
     query: str,
     major_code: str | None = None,
+    target_source_key: str | None = None,
+    target_level: str | None = None,
+    current_concepts: list[str] | None = None,
     limit: int = 5,
+    save: bool = True,
 ) -> dict[str, Any]:
-    """Recommend education evidence for a desired duty using SQF duty profiles and NCS units."""
+    """Recommend education with SQF, trusted NCS mappings, KSA concepts, and learning modules."""
+    with open_db() as conn:
+        result = recommendation_recommend_education(
+            conn,
+            query=query,
+            major_code=major_code,
+            target_source_key=target_source_key,
+            target_level=target_level,
+            current_concepts=current_concepts,
+            limit=limit,
+            save=save,
+        )
+    return tool_response(result)
+
+
+@mcp.tool()
+def explain_education_recommendation(
+    recommendation_item_id: int | None = None,
+    recommendation_run_id: int | None = None,
+    rank: int | None = None,
+) -> dict[str, Any]:
+    """Explain a saved education recommendation item from its audit evidence chain."""
+    with open_db() as conn:
+        result = recommendation_explain_education(
+            conn,
+            recommendation_item_id=recommendation_item_id,
+            recommendation_run_id=recommendation_run_id,
+            rank=rank,
+        )
+    return tool_response(result)
+
+
+def insert_review_audit(
+    conn,
+    *,
+    entity_type: str,
+    entity_id: str,
+    action: str,
+    previous_status: str | None,
+    new_status: str | None,
+    reviewer_id: str | None,
+    notes: str | None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO review_audit_log(
+            entity_type, entity_id, action, previous_status,
+            new_status, reviewer_id, notes, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            entity_type,
+            entity_id,
+            action,
+            previous_status,
+            new_status,
+            reviewer_id,
+            notes,
+            now_utc(),
+        ),
+    )
+
+
+def concept_with_aliases(conn, concept_id: int) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT *
+        FROM ontology_concepts
+        WHERE concept_id = ?
+        """,
+        (concept_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    aliases = conn.execute(
+        """
+        SELECT alias_id, alias_text, normalized_alias_key, alias_source, created_at
+        FROM ontology_concept_aliases
+        WHERE concept_id = ?
+        ORDER BY alias_text
+        """,
+        (concept_id,),
+    ).fetchall()
+    return {**row_to_dict(row), "aliases": rows_to_dicts(aliases)}
+
+
+@mcp.tool()
+def search_ontology_concepts(
+    query: str | None = None,
+    concept_type: str | None = None,
+    definition_status: str | None = None,
+    review_status: str | None = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Search ontology concept nodes with alias and evidence counts."""
     clauses: list[str] = []
     params: list[Any] = []
-    exact_filter(clauses, params, "sd.ncs_lclas_cd", major_code)
-    pattern = f"%{query}%"
-    clauses.append(
-        """
-        (
-            sd.sqf_field_name LIKE ?
-            OR sd.job_name LIKE ?
-            OR sd.duty_name LIKE ?
-            OR sd.duty_definition LIKE ?
-            OR sd.autonomy_responsibility LIKE ?
-            OR sd.duty_education_training LIKE ?
-            OR sd.duty_qualification LIKE ?
+    if concept_type:
+        clauses.append("oc.concept_type = ?")
+        params.append(concept_type)
+    if definition_status:
+        clauses.append("oc.definition_status = ?")
+        params.append(definition_status)
+    if review_status:
+        clauses.append("oc.review_status = ?")
+        params.append(review_status)
+    if query:
+        like = f"%{query}%"
+        clauses.append(
+            """
+            (
+                oc.concept_name LIKE ?
+                OR oc.definition LIKE ?
+                OR EXISTS (
+                    SELECT 1
+                    FROM ontology_concept_aliases alias
+                    WHERE alias.concept_id = oc.concept_id
+                      AND alias.alias_text LIKE ?
+                )
+            )
+            """
         )
-        """
-    )
-    params.extend([pattern] * 7)
-    where = f"WHERE {' AND '.join(clauses)}"
-    max_rows = clamp_limit(limit, default=5, maximum=20)
+        params.extend([like, like, like])
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     with open_db() as conn:
         rows = conn.execute(
             f"""
-            SELECT *
-            FROM sqf_duties sd
+            SELECT
+                oc.concept_id, oc.concept_name, oc.normalized_key,
+                oc.concept_type, oc.definition, oc.definition_status,
+                oc.relation_status, oc.review_status,
+                COUNT(DISTINCT alias.alias_id) AS alias_count,
+                COUNT(DISTINCT rel.relation_id) AS relation_count,
+                COUNT(DISTINCT kcl.ksa_id) AS ksa_link_count,
+                COUNT(DISTINCT ccl.criteria_id) AS criteria_link_count,
+                COUNT(DISTINCT lmcl.learn_module_seq) AS learning_module_count
+            FROM ontology_concepts oc
+            LEFT JOIN ontology_concept_aliases alias ON alias.concept_id = oc.concept_id
+            LEFT JOIN ontology_concept_relations rel ON rel.source_concept_id = oc.concept_id
+            LEFT JOIN ksa_concept_links kcl ON kcl.concept_id = oc.concept_id
+            LEFT JOIN criteria_concept_links ccl ON ccl.concept_id = oc.concept_id
+            LEFT JOIN learning_module_concept_links lmcl ON lmcl.concept_id = oc.concept_id
             {where}
-            ORDER BY
-                CASE WHEN sd.duty_name LIKE ? THEN 0 ELSE 1 END,
-                CASE WHEN sd.job_name LIKE ? THEN 0 ELSE 1 END,
-                sd.ncs_lclas_cd, sd.duty_level, sd.duty_name
+            GROUP BY oc.concept_id
+            ORDER BY oc.review_status, oc.concept_type, oc.concept_name
             LIMIT ?
             """,
-            params + [pattern, pattern, max_rows],
+            params + [clamp_limit(limit, default=20, maximum=100)],
         ).fetchall()
-        recommendations = []
-        for row in rows:
-            mapping_status, matches, mapping_metadata = get_filtered_matches(conn, row, limit=5)
-            direct_conditions = direct_sqf_conditions(row)
-            unit_codes = [
-                match["target"]["unit_code"]
-                for match in matches
-                if match.get("target", {}).get("unit_code")
-            ]
-            learning_objectives = build_learning_objectives_for_units(
-                conn,
-                unit_codes,
-                limit_per_unit=3,
-            )
-            if direct_conditions and learning_objectives:
-                recommendation_type = "mixed"
-            elif direct_conditions:
-                recommendation_type = "sqf_direct"
-            else:
-                recommendation_type = "ncs_derived"
-            recommendations.append(
-                {
-                    "sqf_duty": {
-                        "source_key": row["source_key"],
-                        "ncs_lclas_cd": row["ncs_lclas_cd"],
-                        "ncs_lclas_name": row["ncs_lclas_name"],
-                        "sqf_field_name": row["sqf_field_name"],
-                        "job_name": row["job_name"],
-                        "duty_name": row["duty_name"],
-                        "duty_level": row["duty_level"],
-                        "duty_level_name": row["duty_level_name"],
-                        "duty_definition": row["duty_definition"],
-                    },
-                    "recommendation_type": recommendation_type,
-                    "source_sqf_fields": direct_conditions,
-                    "education": row["duty_education_training"],
-                    "qualification": row["duty_qualification"],
-                    "career": row["duty_career"],
-                    "license": row["duty_license"],
-                    "mapping_status": mapping_status,
-                    "related_ncs_units": [
-                        {**match["target"], "mapping": match["mapping"]}
-                        for match in matches
-                    ],
-                    "learning_objectives": learning_objectives,
-                    "metadata": {
-                        "data_source": "SQLite NCS/SQF knowledge base",
-                        "query_scope": major_code or "all_sqf",
-                        "used_refined_policy": "refined_if_approved",
-                        **mapping_metadata,
-                    },
-                }
-            )
-    return {
-        "query": query,
-        "recommendations": recommendations,
-        "note": (
-            "SQF duty education fields are direct API evidence. "
-            "When direct fields are sparse, NCS unit elements, performance criteria, and KSA "
-            "are converted into learning objectives. This is not an official recognition decision."
-        ),
+    return tool_response(
+        {
+            "query": query,
+            "concept_type": concept_type,
+            "concepts": rows_to_dicts(rows),
+        },
+        audit={
+            "data_sources": [
+                "ontology_concepts",
+                "ontology_concept_aliases",
+                "ksa_concept_links",
+                "criteria_concept_links",
+                "learning_module_concept_links",
+            ],
+            "generated_at": now_utc(),
+        },
+    )
+
+
+@mcp.tool()
+def get_concept_evidence(concept_id: int, limit: int = 20) -> dict[str, Any]:
+    """Return source KSA, criteria, learning-module, relation, and recommendation evidence for a concept."""
+    max_rows = clamp_limit(limit, default=20, maximum=100)
+    with open_db() as conn:
+        concept = concept_with_aliases(conn, concept_id)
+        if concept is None:
+            return error_response("concept_not_found", concept_id=concept_id)
+        outgoing = conn.execute(
+            """
+            SELECT
+                rel.relation_id, rel.relation_type, rel.relation_label,
+                rel.review_status, target.concept_id AS target_concept_id,
+                target.concept_name AS target_concept_name,
+                target.concept_type AS target_concept_type
+            FROM ontology_concept_relations rel
+            JOIN ontology_concepts target ON target.concept_id = rel.target_concept_id
+            WHERE rel.source_concept_id = ?
+            ORDER BY rel.relation_type, target.concept_name
+            LIMIT ?
+            """,
+            (concept_id, max_rows),
+        ).fetchall()
+        incoming = conn.execute(
+            """
+            SELECT
+                rel.relation_id, rel.relation_type, rel.relation_label,
+                rel.review_status, source.concept_id AS source_concept_id,
+                source.concept_name AS source_concept_name,
+                source.concept_type AS source_concept_type
+            FROM ontology_concept_relations rel
+            JOIN ontology_concepts source ON source.concept_id = rel.source_concept_id
+            WHERE rel.target_concept_id = ?
+            ORDER BY rel.relation_type, source.concept_name
+            LIMIT ?
+            """,
+            (concept_id, max_rows),
+        ).fetchall()
+        ksa_rows = conn.execute(
+            """
+            SELECT
+                kcl.link_id, kcl.link_status, ki.ksa_id, ki.ksa_type_name,
+                ki.ksa_no, ki.ksa_text_raw, ki.ksa_text_refined,
+                ce.element_id, ce.element_name_raw, ce.unit_code,
+                cu.unit_name_raw, c.major_code, c.major_name,
+                c.middle_code, c.middle_name, c.small_code, c.small_name,
+                c.sub_code, c.sub_name
+            FROM ksa_concept_links kcl
+            JOIN ksa_items ki ON ki.ksa_id = kcl.ksa_id
+            JOIN competency_elements ce ON ce.element_id = ki.element_id
+            JOIN competency_units cu ON cu.unit_code = ce.unit_code
+            JOIN classifications c ON c.classification_id = cu.classification_id
+            WHERE kcl.concept_id = ?
+            ORDER BY ce.unit_code, ce.element_id, ki.ksa_type_code, ki.ksa_id
+            LIMIT ?
+            """,
+            (concept_id, max_rows),
+        ).fetchall()
+        criteria_rows = conn.execute(
+            """
+            SELECT
+                ccl.link_id, ccl.relation_type, ccl.link_status,
+                pc.criteria_id, pc.criteria_no, pc.criteria_text_raw,
+                pc.criteria_text_refined, ce.element_id, ce.element_name_raw,
+                ce.unit_code, cu.unit_name_raw
+            FROM criteria_concept_links ccl
+            JOIN performance_criteria pc ON pc.criteria_id = ccl.criteria_id
+            JOIN competency_elements ce ON ce.element_id = pc.element_id
+            JOIN competency_units cu ON cu.unit_code = ce.unit_code
+            WHERE ccl.concept_id = ?
+            ORDER BY ce.unit_code, ce.element_id, pc.criteria_id
+            LIMIT ?
+            """,
+            (concept_id, max_rows),
+        ).fetchall()
+        module_rows = conn.execute(
+            """
+            SELECT
+                lmcl.link_id, lmcl.link_method, lmcl.confidence_score,
+                lm.learn_module_seq, lm.learn_module_name,
+                lm.ncs_lclas_cd, lm.ncs_lclas_name,
+                lm.ncs_mclas_cd, lm.ncs_mclas_name,
+                lm.ncs_sclas_cd, lm.ncs_sclas_name,
+                lm.ncs_subd_cd, lm.ncs_subd_name
+            FROM learning_module_concept_links lmcl
+            JOIN ncs_learning_modules lm ON lm.learn_module_seq = lmcl.learn_module_seq
+            WHERE lmcl.concept_id = ?
+            ORDER BY lmcl.confidence_score DESC, lm.learn_module_seq
+            LIMIT ?
+            """,
+            (concept_id, max_rows),
+        ).fetchall()
+        recommendation_rows = conn.execute(
+            """
+            SELECT
+                e.evidence_id, e.run_id, e.item_id, e.evidence_type,
+                e.source_table, e.source_id, e.evidence_summary,
+                e.confidence_score, i.rank, i.learn_module_seq,
+                i.learn_module_name, r.query, r.created_at AS run_created_at
+            FROM education_recommendation_evidence e
+            JOIN education_recommendation_items i ON i.item_id = e.item_id
+            JOIN education_recommendation_runs r ON r.run_id = e.run_id
+            WHERE e.concept_id = ?
+            ORDER BY e.run_id DESC, i.rank, e.evidence_id
+            LIMIT ?
+            """,
+            (concept_id, max_rows),
+        ).fetchall()
+    return tool_response(
+        {
+            "concept": concept,
+            "relations": {
+                "outgoing": rows_to_dicts(outgoing),
+                "incoming": rows_to_dicts(incoming),
+            },
+            "source_ksa": rows_to_dicts(ksa_rows),
+            "source_criteria": rows_to_dicts(criteria_rows),
+            "learning_modules": rows_to_dicts(module_rows),
+            "recommendation_evidence": rows_to_dicts(recommendation_rows),
+        },
+        audit={
+            "data_sources": [
+                "ontology_concepts",
+                "ontology_concept_relations",
+                "ksa_items",
+                "performance_criteria",
+                "ncs_learning_modules",
+                "education_recommendation_evidence",
+            ],
+            "generated_at": now_utc(),
+        },
+    )
+
+
+@mcp.tool()
+def review_sqf_ncs_match(
+    match_id: int,
+    new_status: str,
+    reviewer_id: str = "mcp",
+    notes: str = "",
+    relation: str | None = None,
+) -> dict[str, Any]:
+    """Human-review one SQF-NCS mapping and record recommendation eligibility audit."""
+    status = new_status.strip()
+    allowed_statuses = {
+        "accepted",
+        "reviewed",
+        "human_reviewed",
+        "rejected",
+        "low_confidence",
+        "low_score",
+        "related-only",
+        "candidate",
     }
+    if status not in allowed_statuses:
+        return error_response(
+            "unsupported_review_status",
+            new_status=new_status,
+            allowed=sorted(allowed_statuses),
+        )
+    with open_db() as conn:
+        row = conn.execute("SELECT * FROM sqf_ncs_matches WHERE match_id = ?", (match_id,)).fetchone()
+        if row is None:
+            return error_response("sqf_ncs_match_not_found", match_id=match_id)
+        final_relation = relation.strip() if relation else row["relation"]
+        if status == "related-only":
+            final_relation = "related"
+        eligible = status in REVIEWED_STATUSES and final_relation != "related"
+        if eligible:
+            filter_status = "eligible"
+            exclusion_reason = None
+        elif status == "rejected":
+            filter_status = "excluded"
+            exclusion_reason = "rejected"
+        elif status in {"low_confidence", "low_score"}:
+            filter_status = "excluded"
+            exclusion_reason = status
+        elif final_relation == "related":
+            filter_status = "excluded"
+            exclusion_reason = "relation:related"
+        else:
+            filter_status = "review_required"
+            exclusion_reason = None
+        timestamp = now_utc()
+        conn.execute(
+            """
+            UPDATE sqf_ncs_matches
+            SET review_status = ?,
+                relation = ?,
+                filter_status = ?,
+                exclusion_reason = ?,
+                reviewer_id = ?,
+                reviewed_at = ?,
+                reviewer_notes = ?,
+                updated_at = ?
+            WHERE match_id = ?
+            """,
+            (
+                status,
+                final_relation,
+                filter_status,
+                exclusion_reason,
+                reviewer_id,
+                timestamp,
+                notes,
+                timestamp,
+                match_id,
+            ),
+        )
+        insert_review_audit(
+            conn,
+            entity_type="sqf_ncs_match",
+            entity_id=str(match_id),
+            action="review_sqf_ncs_match",
+            previous_status=row["review_status"],
+            new_status=status,
+            reviewer_id=reviewer_id,
+            notes=notes,
+        )
+        updated = conn.execute("SELECT * FROM sqf_ncs_matches WHERE match_id = ?", (match_id,)).fetchone()
+        conn.commit()
+    return tool_response(
+        {
+            "match_id": match_id,
+            "previous_status": row["review_status"],
+            "new_status": status,
+            "recommendation_eligible": eligible,
+            "mapping": row_to_dict(updated),
+        },
+        audit={
+            "data_sources": ["sqf_ncs_matches", "review_audit_log"],
+            "generated_at": now_utc(),
+            "reviewer_id": reviewer_id,
+        },
+    )
+
+
+@mcp.tool()
+def review_ontology_concept(
+    concept_id: int,
+    concept_name: str | None = None,
+    concept_type: str | None = None,
+    definition: str | None = None,
+    definition_status: str | None = None,
+    relation_status: str | None = None,
+    review_status: str = "human_reviewed",
+    aliases: list[str] | None = None,
+    reviewer_id: str = "mcp",
+    notes: str = "",
+) -> dict[str, Any]:
+    """Human-review an ontology concept without mutating raw KSA source text."""
+    with open_db() as conn:
+        row = conn.execute("SELECT * FROM ontology_concepts WHERE concept_id = ?", (concept_id,)).fetchone()
+        if row is None:
+            return error_response("concept_not_found", concept_id=concept_id)
+        target_type = (concept_type or row["concept_type"]).strip()
+        if target_type not in {"knowledge", "skill", "attitude"}:
+            return error_response("unsupported_concept_type", concept_type=target_type)
+        target_name = (concept_name if concept_name is not None else row["concept_name"]).strip()
+        if not target_name:
+            return error_response("concept_name_required", concept_id=concept_id)
+        normalized_key = normalize_concept_key(target_name)
+        duplicate = conn.execute(
+            """
+            SELECT concept_id
+            FROM ontology_concepts
+            WHERE concept_type = ?
+              AND normalized_key = ?
+              AND concept_id <> ?
+            """,
+            (target_type, normalized_key, concept_id),
+        ).fetchone()
+        if duplicate is not None:
+            return error_response(
+                "duplicate_concept",
+                concept_id=concept_id,
+                duplicate_concept_id=duplicate["concept_id"],
+            )
+        definition_value = definition.strip() if definition is not None else row["definition"]
+        if definition_status is None and definition is not None:
+            definition_status = "defined" if definition_value else "missing"
+        timestamp = now_utc()
+        conn.execute(
+            """
+            UPDATE ontology_concepts
+            SET concept_name = ?,
+                normalized_key = ?,
+                concept_type = ?,
+                definition = ?,
+                definition_source = ?,
+                definition_status = ?,
+                relation_status = ?,
+                review_status = ?,
+                updated_at = ?
+            WHERE concept_id = ?
+            """,
+            (
+                target_name,
+                normalized_key,
+                target_type,
+                definition_value or None,
+                "manual" if definition is not None else row["definition_source"],
+                definition_status or row["definition_status"],
+                relation_status or row["relation_status"],
+                review_status or row["review_status"],
+                timestamp,
+                concept_id,
+            ),
+        )
+        for alias in aliases or []:
+            alias_text = " ".join(str(alias).strip().split())
+            if not alias_text:
+                continue
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO ontology_concept_aliases(
+                    concept_id, alias_text, normalized_alias_key, alias_source, created_at
+                ) VALUES (?, ?, ?, 'manual', ?)
+                """,
+                (concept_id, alias_text, normalize_concept_key(alias_text), timestamp),
+            )
+        insert_review_audit(
+            conn,
+            entity_type="ontology_concept",
+            entity_id=str(concept_id),
+            action="review_ontology_concept",
+            previous_status=row["review_status"],
+            new_status=review_status,
+            reviewer_id=reviewer_id,
+            notes=notes,
+        )
+        updated = concept_with_aliases(conn, concept_id)
+        conn.commit()
+    return tool_response(
+        {
+            "concept_id": concept_id,
+            "previous_status": row["review_status"],
+            "new_status": review_status,
+            "concept": updated,
+        },
+        audit={
+            "data_sources": ["ontology_concepts", "ontology_concept_aliases", "review_audit_log"],
+            "generated_at": now_utc(),
+            "reviewer_id": reviewer_id,
+        },
+    )
 
 
 @mcp.tool()
 def get_sqf_ontology_summary() -> dict[str, Any]:
     """Return counts for the normalized SQF ontology and preprocessed document layer."""
-    return sqf_model_summary(load_settings().db_path)
+    return tool_response(sqf_model_summary(load_settings().db_path))
 
 
 @mcp.tool()
@@ -1209,12 +1756,24 @@ def search_sqf_document_chunks(
             """,
             params + [clamp_limit(limit, default=10, maximum=50)],
         ).fetchall()
-    return {
+    return tool_response({
         "query": query,
         "ontology_tag": ontology_tag,
-        "chunks": rows_to_dicts(rows),
+        "chunks": [
+            {
+                **dict(row),
+                "document_title": row["title"],
+                "asset_filename": row["asset_name"],
+                "chunk_text_summary": row["snippet"],
+                "evidence_relation": "document_candidate",
+            }
+            for row in rows
+        ],
         "note": "Chunks are extracted evidence from SQF library files, not official recognition decisions.",
-    }
+    }, audit={
+        "data_sources": ["sqf_document_chunks", "sqf_document_assets", "sqf_document_sources"],
+        "generated_at": now_utc(),
+    })
 
 
 @mcp.tool()
@@ -1269,13 +1828,20 @@ def search_sqf_precision_matches(
             """,
             params + [clamp_limit(limit, default=20, maximum=100)],
         ).fetchall()
-    return {
+    return tool_response({
         "query": query,
         "source_key": source_key,
         "min_score": min_score,
         "matches": rows_to_dicts(rows),
         "note": "These are candidate evidence links from report OCR/text chunks, not official recognition decisions.",
-    }
+    }, audit={
+        "data_sources": [
+            "sqf_chunk_job_level_matches",
+            "sqf_document_chunks",
+            "sqf_job_levels_normalized",
+        ],
+        "generated_at": now_utc(),
+    })
 
 
 @mcp.tool()
@@ -1296,7 +1862,7 @@ def get_sqf_ontology_job_level(source_key: str) -> dict[str, Any]:
             (source_key,),
         ).fetchone()
         if job_level is None:
-            return {"error": "sqf_job_level_not_found", "source_key": source_key}
+            return error_response("sqf_job_level_not_found", source_key=source_key)
         evidence = conn.execute(
             """
             SELECT evidence_type, evidence_text, source_field, source, review_status
@@ -1337,12 +1903,12 @@ def get_sqf_ontology_job_level(source_key: str) -> dict[str, Any]:
             """,
             (job_level["sqf_job_level_id"],),
         ).fetchall()
-    return {
+    return tool_response({
         "job_level": row_to_dict(job_level),
         "recognition_evidence": rows_to_dicts(evidence),
         "document_links": rows_to_dicts(document_links),
         "document_chunk_matches": rows_to_dicts(chunk_matches),
-    }
+    })
 
 
 def main() -> None:

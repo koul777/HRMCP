@@ -151,6 +151,48 @@ CREATE TABLE IF NOT EXISTS api_competency_units (
     api_fetched_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS ncs_learning_modules (
+    learn_module_seq TEXT PRIMARY KEY,
+    learn_module_name TEXT NOT NULL,
+    learn_module_text TEXT,
+    ncs_lclas_cd TEXT,
+    ncs_lclas_name TEXT,
+    ncs_mclas_cd TEXT,
+    ncs_mclas_name TEXT,
+    ncs_sclas_cd TEXT,
+    ncs_sclas_name TEXT,
+    ncs_subd_cd TEXT,
+    ncs_subd_name TEXT,
+    source_payload TEXT NOT NULL,
+    api_fetched_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS learning_module_unit_links (
+    link_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    learn_module_seq TEXT NOT NULL REFERENCES ncs_learning_modules(learn_module_seq),
+    unit_code TEXT NOT NULL REFERENCES competency_units(unit_code),
+    link_method TEXT NOT NULL,
+    confidence_score REAL NOT NULL DEFAULT 0,
+    evidence_text TEXT,
+    review_status TEXT NOT NULL DEFAULT 'auto_linked',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (learn_module_seq, unit_code, link_method)
+);
+
+CREATE TABLE IF NOT EXISTS learning_module_concept_links (
+    link_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    learn_module_seq TEXT NOT NULL REFERENCES ncs_learning_modules(learn_module_seq),
+    concept_id INTEGER NOT NULL REFERENCES ontology_concepts(concept_id),
+    link_method TEXT NOT NULL,
+    confidence_score REAL NOT NULL DEFAULT 0,
+    evidence_text TEXT,
+    review_status TEXT NOT NULL DEFAULT 'auto_linked',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (learn_module_seq, concept_id, link_method)
+);
+
 CREATE TABLE IF NOT EXISTS sqf_duties (
     source_key TEXT PRIMARY KEY,
     ncs_lclas_cd TEXT NOT NULL,
@@ -440,6 +482,103 @@ CREATE TABLE IF NOT EXISTS refinement_jobs (
     created_at TEXT NOT NULL,
     applied_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS ontology_concepts (
+    concept_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    concept_name TEXT NOT NULL,
+    normalized_key TEXT NOT NULL,
+    concept_type TEXT NOT NULL,
+    definition TEXT,
+    definition_source TEXT,
+    definition_status TEXT NOT NULL DEFAULT 'missing',
+    relation_status TEXT NOT NULL DEFAULT 'unlinked',
+    review_status TEXT NOT NULL DEFAULT 'raw',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (concept_type, normalized_key)
+);
+
+CREATE TABLE IF NOT EXISTS ontology_concept_aliases (
+    alias_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    concept_id INTEGER NOT NULL REFERENCES ontology_concepts(concept_id),
+    alias_text TEXT NOT NULL,
+    normalized_alias_key TEXT NOT NULL,
+    alias_source TEXT NOT NULL DEFAULT 'raw_ksa',
+    created_at TEXT NOT NULL,
+    UNIQUE (concept_id, normalized_alias_key)
+);
+
+CREATE TABLE IF NOT EXISTS ontology_concept_relations (
+    relation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_concept_id INTEGER NOT NULL REFERENCES ontology_concepts(concept_id),
+    relation_type TEXT NOT NULL,
+    target_concept_id INTEGER NOT NULL REFERENCES ontology_concepts(concept_id),
+    relation_label TEXT,
+    review_status TEXT NOT NULL DEFAULT 'raw',
+    created_at TEXT NOT NULL,
+    UNIQUE (source_concept_id, relation_type, target_concept_id)
+);
+
+CREATE TABLE IF NOT EXISTS ksa_concept_links (
+    link_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ksa_id INTEGER NOT NULL REFERENCES ksa_items(ksa_id),
+    concept_id INTEGER NOT NULL REFERENCES ontology_concepts(concept_id),
+    link_status TEXT NOT NULL DEFAULT 'raw',
+    created_at TEXT NOT NULL,
+    UNIQUE (ksa_id)
+);
+
+CREATE TABLE IF NOT EXISTS criteria_concept_links (
+    link_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    criteria_id INTEGER NOT NULL REFERENCES performance_criteria(criteria_id),
+    concept_id INTEGER NOT NULL REFERENCES ontology_concepts(concept_id),
+    relation_type TEXT NOT NULL DEFAULT 'related',
+    link_status TEXT NOT NULL DEFAULT 'raw',
+    created_at TEXT NOT NULL,
+    UNIQUE (criteria_id, concept_id, relation_type)
+);
+
+CREATE TABLE IF NOT EXISTS education_recommendation_runs (
+    run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    query TEXT NOT NULL,
+    target_source_key TEXT,
+    request_payload TEXT NOT NULL,
+    target_payload TEXT NOT NULL,
+    summary_payload TEXT NOT NULL,
+    audit_payload TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS education_recommendation_items (
+    item_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES education_recommendation_runs(run_id),
+    rank INTEGER NOT NULL,
+    learn_module_seq TEXT,
+    learn_module_name TEXT,
+    recommendation_payload TEXT NOT NULL,
+    confidence_score REAL NOT NULL DEFAULT 0,
+    confidence_grade TEXT NOT NULL DEFAULT 'insufficient',
+    created_at TEXT NOT NULL,
+    UNIQUE (run_id, rank)
+);
+
+CREATE TABLE IF NOT EXISTS education_recommendation_evidence (
+    evidence_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES education_recommendation_runs(run_id),
+    item_id INTEGER NOT NULL REFERENCES education_recommendation_items(item_id),
+    evidence_type TEXT NOT NULL,
+    source_table TEXT,
+    source_id TEXT,
+    chunk_id INTEGER,
+    match_id INTEGER,
+    unit_code TEXT,
+    concept_id INTEGER,
+    learn_module_seq TEXT,
+    evidence_text TEXT,
+    evidence_summary TEXT,
+    confidence_score REAL,
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -459,6 +598,21 @@ CREATE INDEX IF NOT EXISTS idx_links_criteria ON element_criteria_ksa_links(crit
 CREATE INDEX IF NOT EXISTS idx_links_ksa ON element_criteria_ksa_links(ksa_id);
 CREATE INDEX IF NOT EXISTS idx_quality_target ON quality_issues(target_type, target_id);
 CREATE INDEX IF NOT EXISTS idx_quality_type ON quality_issues(issue_type);
+CREATE INDEX IF NOT EXISTS idx_learning_modules_major ON ncs_learning_modules(ncs_lclas_cd);
+CREATE INDEX IF NOT EXISTS idx_learning_modules_name ON ncs_learning_modules(learn_module_name);
+CREATE INDEX IF NOT EXISTS idx_learning_unit_module ON learning_module_unit_links(learn_module_seq);
+CREATE INDEX IF NOT EXISTS idx_learning_unit_unit ON learning_module_unit_links(unit_code);
+CREATE INDEX IF NOT EXISTS idx_learning_concept_module ON learning_module_concept_links(learn_module_seq);
+CREATE INDEX IF NOT EXISTS idx_learning_concept_concept ON learning_module_concept_links(concept_id);
+CREATE INDEX IF NOT EXISTS idx_concepts_type ON ontology_concepts(concept_type);
+CREATE INDEX IF NOT EXISTS idx_concepts_key ON ontology_concepts(normalized_key);
+CREATE INDEX IF NOT EXISTS idx_aliases_key ON ontology_concept_aliases(normalized_alias_key);
+CREATE INDEX IF NOT EXISTS idx_relations_source ON ontology_concept_relations(source_concept_id);
+CREATE INDEX IF NOT EXISTS idx_relations_target ON ontology_concept_relations(target_concept_id);
+CREATE INDEX IF NOT EXISTS idx_ksa_concepts_ksa ON ksa_concept_links(ksa_id);
+CREATE INDEX IF NOT EXISTS idx_ksa_concepts_concept ON ksa_concept_links(concept_id);
+CREATE INDEX IF NOT EXISTS idx_criteria_concepts_criteria ON criteria_concept_links(criteria_id);
+CREATE INDEX IF NOT EXISTS idx_criteria_concepts_concept ON criteria_concept_links(concept_id);
 CREATE INDEX IF NOT EXISTS idx_sqf_major ON sqf_duties(ncs_lclas_cd);
 CREATE INDEX IF NOT EXISTS idx_sqf_duty ON sqf_duties(duty_name);
 CREATE INDEX IF NOT EXISTS idx_sqf_job ON sqf_duties(job_name);
@@ -492,14 +646,21 @@ CREATE INDEX IF NOT EXISTS idx_evaluation_scope ON evaluation_runs(scope_tag);
 CREATE INDEX IF NOT EXISTS idx_refinement_target ON refinement_jobs(target_type, target_id);
 CREATE INDEX IF NOT EXISTS idx_refinement_status ON refinement_jobs(review_status);
 CREATE INDEX IF NOT EXISTS idx_refinement_issue ON refinement_jobs(source_issue_id);
+CREATE INDEX IF NOT EXISTS idx_recommendation_runs_target ON education_recommendation_runs(target_source_key);
+CREATE INDEX IF NOT EXISTS idx_recommendation_items_run ON education_recommendation_items(run_id);
+CREATE INDEX IF NOT EXISTS idx_recommendation_evidence_run ON education_recommendation_evidence(run_id);
+CREATE INDEX IF NOT EXISTS idx_recommendation_evidence_item ON education_recommendation_evidence(item_id);
+CREATE INDEX IF NOT EXISTS idx_recommendation_evidence_match ON education_recommendation_evidence(match_id);
+CREATE INDEX IF NOT EXISTS idx_recommendation_evidence_chunk ON education_recommendation_evidence(chunk_id);
 """
 
 
 def connect(db_path: Path | str) -> sqlite3.Connection:
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 30000")
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
@@ -636,14 +797,19 @@ def initialize_database(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
         UPDATE sqf_ncs_matches
-        SET scope_tag = 'management_support'
+        SET scope_tag = 'management_support_hr_mvp'
         WHERE source_id IN (
             SELECT source_key
             FROM sqf_duties
             WHERE ncs_lclas_cd = '02'
               AND sqf_field_name = '경영관리'
-              AND job_name = '경영지원'
+              AND job_name IN ('경영지원', '인사')
         )
+          AND (
+              scope_tag IS NULL
+              OR TRIM(scope_tag) = ''
+              OR scope_tag IN ('management_support', 'business_accounting_office_02')
+          )
         """
     )
     conn.execute(
@@ -654,8 +820,8 @@ def initialize_database(conn: sqlite3.Connection) -> None:
                 CASE
                     WHEN sd.ncs_lclas_cd = '02'
                      AND sd.sqf_field_name = '경영관리'
-                     AND sd.job_name = '경영지원'
-                    THEN 'management_support'
+                     AND sd.job_name IN ('경영지원', '인사')
+                    THEN 'management_support_hr_mvp'
                     WHEN sd.ncs_lclas_cd = '02'
                     THEN 'business_accounting_office_02'
                     ELSE 'sqf_major_' || COALESCE(sd.ncs_lclas_cd, 'unknown')
@@ -690,7 +856,7 @@ def initialize_database(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "INSERT OR REPLACE INTO schema_metadata(key, value) VALUES (?, ?)",
-        ("schema_version", "0.7.0"),
+        ("schema_version", "0.8.0"),
     )
     conn.commit()
 
@@ -723,6 +889,130 @@ def rows_to_dicts(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
 
 def normalize_spaces(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
+
+
+def normalize_concept_key(value: str) -> str:
+    return re.sub(r"\s+", "", normalize_spaces(value)).lower()
+
+
+def concept_type_from_ksa(ksa_type_name: str) -> str:
+    mapping = {
+        "지식": "knowledge",
+        "기술": "skill",
+        "태도": "attitude",
+    }
+    return mapping.get(ksa_type_name.strip(), "knowledge")
+
+
+def ensure_ontology_seeded(conn: sqlite3.Connection) -> dict[str, int]:
+    """Create initial ontology concept nodes from raw KSA items if needed."""
+    ksa_count = int(conn.execute("SELECT COUNT(*) FROM ksa_items").fetchone()[0])
+    if ksa_count == 0:
+        return {"concepts": 0, "aliases": 0, "ksa_links": 0, "criteria_links": 0}
+
+    existing_links = int(conn.execute("SELECT COUNT(*) FROM ksa_concept_links").fetchone()[0])
+    if existing_links >= ksa_count:
+        return {
+            "concepts": int(conn.execute("SELECT COUNT(*) FROM ontology_concepts").fetchone()[0]),
+            "aliases": int(conn.execute("SELECT COUNT(*) FROM ontology_concept_aliases").fetchone()[0]),
+            "ksa_links": existing_links,
+            "criteria_links": int(conn.execute("SELECT COUNT(*) FROM criteria_concept_links").fetchone()[0]),
+        }
+
+    timestamp = now_utc()
+    rows = conn.execute(
+        """
+        SELECT DISTINCT ksa_type_name, ksa_text_raw
+        FROM ksa_items
+        WHERE TRIM(ksa_text_raw) <> ''
+        """
+    ).fetchall()
+    for row in rows:
+        concept_name = normalize_spaces(row["ksa_text_raw"])
+        concept_type = concept_type_from_ksa(row["ksa_type_name"])
+        normalized_key = normalize_concept_key(concept_name)
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO ontology_concepts(
+                concept_name, normalized_key, concept_type,
+                definition_status, relation_status, review_status,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, 'missing', 'unlinked', 'raw', ?, ?)
+            """,
+            (concept_name, normalized_key, concept_type, timestamp, timestamp),
+        )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO ontology_concept_aliases(
+            concept_id, alias_text, normalized_alias_key, alias_source, created_at
+        )
+        SELECT DISTINCT
+            oc.concept_id,
+            TRIM(ki.ksa_text_raw),
+            LOWER(REPLACE(TRIM(ki.ksa_text_raw), ' ', '')),
+            'raw_ksa',
+            ?
+        FROM ksa_items ki
+        JOIN ontology_concepts oc
+          ON oc.concept_type = CASE ki.ksa_type_name
+              WHEN '지식' THEN 'knowledge'
+              WHEN '기술' THEN 'skill'
+              WHEN '태도' THEN 'attitude'
+              ELSE 'knowledge'
+          END
+         AND oc.normalized_key = LOWER(REPLACE(TRIM(ki.ksa_text_raw), ' ', ''))
+        WHERE TRIM(ki.ksa_text_raw) <> ''
+        """,
+        (timestamp,),
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO ksa_concept_links(ksa_id, concept_id, link_status, created_at)
+        SELECT
+            ki.ksa_id,
+            oc.concept_id,
+            'raw',
+            ?
+        FROM ksa_items ki
+        JOIN ontology_concepts oc
+          ON oc.concept_type = CASE ki.ksa_type_name
+              WHEN '지식' THEN 'knowledge'
+              WHEN '기술' THEN 'skill'
+              WHEN '태도' THEN 'attitude'
+              ELSE 'knowledge'
+          END
+         AND oc.normalized_key = LOWER(REPLACE(TRIM(ki.ksa_text_raw), ' ', ''))
+        WHERE TRIM(ki.ksa_text_raw) <> ''
+        """,
+        (timestamp,),
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO criteria_concept_links(
+            criteria_id, concept_id, relation_type, link_status, created_at
+        )
+        SELECT DISTINCT
+            eck.criteria_id,
+            kcl.concept_id,
+            'related',
+            'raw',
+            ?
+        FROM element_criteria_ksa_links eck
+        JOIN ksa_concept_links kcl ON kcl.ksa_id = eck.ksa_id
+        """,
+        (timestamp,),
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_metadata(key, value) VALUES (?, ?)",
+        ("ontology_seeded_at", timestamp),
+    )
+    conn.commit()
+    return {
+        "concepts": int(conn.execute("SELECT COUNT(*) FROM ontology_concepts").fetchone()[0]),
+        "aliases": int(conn.execute("SELECT COUNT(*) FROM ontology_concept_aliases").fetchone()[0]),
+        "ksa_links": int(conn.execute("SELECT COUNT(*) FROM ksa_concept_links").fetchone()[0]),
+        "criteria_links": int(conn.execute("SELECT COUNT(*) FROM criteria_concept_links").fetchone()[0]),
+    }
 
 
 def split_unit_code(unit_code: str) -> tuple[str, str]:

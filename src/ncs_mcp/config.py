@@ -21,6 +21,7 @@ class Settings:
     db_path: Path
     service_key: str | None
     sqf_service_key: str | None
+    study_module_service_key: str | None
     reports_dir: Path
 
 
@@ -47,6 +48,7 @@ def load_settings() -> Settings:
     db_value = os.getenv("NCS_DB_PATH")
     service_key = os.getenv("NCS_SERVICE_KEY") or None
     sqf_service_key = os.getenv("NCS_SQF_SERVICE_KEY") or None
+    study_module_service_key = os.getenv("NCS_STUDY_MODULE_SERVICE_KEY") or None
     reports_value = os.getenv("NCS_REPORTS_DIR")
 
     return Settings(
@@ -54,5 +56,6 @@ def load_settings() -> Settings:
         db_path=Path(db_value) if db_value else DEFAULT_DB_PATH,
         service_key=service_key,
         sqf_service_key=sqf_service_key,
+        study_module_service_key=study_module_service_key,
         reports_dir=Path(reports_value) if reports_value else DEFAULT_REPORTS_DIR,
     )

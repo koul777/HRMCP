@@ -4,13 +4,16 @@ import argparse
 import hashlib
 import html
 import json
+import os
 import re
 import sqlite3
+import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urljoin
+from urllib.parse import unquote, urlencode, urljoin
 
 import requests
 
@@ -20,6 +23,24 @@ from ncs_mcp.db import connect, create_indexes, initialize_database, now_utc
 SQF_LIBRARY_BASE_URL = "https://www.ncs.go.kr"
 SQF_LIBRARY_LIST_URL = f"{SQF_LIBRARY_BASE_URL}/sqf/sqf01/bbs_lib_list.do"
 SQF_LIBRARY_DOWNLOAD_URL = f"{SQF_LIBRARY_BASE_URL}/common/file/downloadFile.do"
+HTTP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) NCS-SQF-Ontology-MCP/0.1"
+
+
+@dataclass
+class CurlResponse:
+    content: bytes
+    headers: dict[str, str]
+    status_code: int
+    url: str
+    encoding: str | None = None
+
+    @property
+    def text(self) -> str:
+        return self.content.decode(self.encoding or "utf-8", errors="replace")
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code} for {self.url}")
 
 
 @dataclass(frozen=True)
@@ -50,6 +71,148 @@ def content_hash_bytes(value: bytes) -> str:
 
 def content_hash_text(value: str) -> str:
     return content_hash_bytes(value.encode("utf-8", errors="ignore"))
+
+
+def content_type_encoding(content_type: str | None) -> str | None:
+    if not content_type:
+        return None
+    match = re.search(r"charset\s*=\s*([^;\s]+)", content_type, re.I)
+    return match.group(1).strip('"') if match else None
+
+
+def session_cookie_jar(session: requests.Session) -> str:
+    current = getattr(session, "_ncs_sqf_curl_cookie_jar", None)
+    if current:
+        return str(current)
+    handle = tempfile.NamedTemporaryFile(prefix="ncs_sqf_", suffix=".cookies", delete=False)
+    handle.close()
+    path = handle.name
+    setattr(session, "_ncs_sqf_curl_cookie_jar", path)
+    return path
+
+
+def cleanup_session_cookie_jar(session: requests.Session) -> None:
+    path = getattr(session, "_ncs_sqf_curl_cookie_jar", None)
+    if not path:
+        return
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def parse_curl_headers(raw_headers: bytes) -> tuple[int, dict[str, str]]:
+    text = raw_headers.decode("iso-8859-1", errors="replace").replace("\r\n", "\n")
+    blocks = [block.strip() for block in text.split("\n\n") if block.strip()]
+    header_block = next((block for block in reversed(blocks) if block.startswith("HTTP/")), "")
+    if not header_block:
+        return 0, {}
+    lines = header_block.splitlines()
+    status_match = re.search(r"\s(\d{3})\s", lines[0])
+    status_code = int(status_match.group(1)) if status_match else 0
+    headers: dict[str, str] = {}
+    for line in lines[1:]:
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        headers[key.strip()] = value.strip()
+    return status_code, headers
+
+
+def curl_request(
+    session: requests.Session,
+    method: str,
+    url: str,
+    *,
+    params: dict[str, str] | None = None,
+    data: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: int = 30,
+) -> CurlResponse:
+    if params:
+        separator = "&" if "?" in url else "?"
+        url = f"{url}{separator}{urlencode(params)}"
+    header_file = tempfile.NamedTemporaryFile(prefix="ncs_sqf_headers_", delete=False)
+    body_file = tempfile.NamedTemporaryFile(prefix="ncs_sqf_body_", delete=False)
+    header_path = header_file.name
+    body_path = body_file.name
+    header_file.close()
+    body_file.close()
+    command = [
+        "curl.exe",
+        "-sS",
+        "-L",
+        "--fail",
+        "--connect-timeout",
+        str(timeout),
+        "--max-time",
+        str(max(timeout, 1)),
+        "-A",
+        HTTP_USER_AGENT,
+        "-b",
+        session_cookie_jar(session),
+        "-c",
+        session_cookie_jar(session),
+        "-D",
+        header_path,
+        "-o",
+        body_path,
+    ]
+    for key, value in (headers or {}).items():
+        command.extend(["-H", f"{key}: {value}"])
+    if method.upper() == "POST":
+        command.extend(["-X", "POST"])
+        for key, value in (data or {}).items():
+            command.extend(["--data-urlencode", f"{key}={value}"])
+    command.append(url)
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            message = (result.stderr or result.stdout or "curl request failed").strip()
+            raise RuntimeError(message)
+        header_bytes = Path(header_path).read_bytes()
+        content = Path(body_path).read_bytes()
+        status_code, parsed_headers = parse_curl_headers(header_bytes)
+        return CurlResponse(
+            content=content,
+            headers=parsed_headers,
+            status_code=status_code,
+            url=url,
+            encoding=content_type_encoding(parsed_headers.get("Content-Type")),
+        )
+    finally:
+        for path in (header_path, body_path):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
+def get_with_fallback(
+    session: requests.Session,
+    url: str,
+    *,
+    params: dict[str, str],
+    timeout: int,
+) -> requests.Response | CurlResponse:
+    try:
+        return session.get(url, params=params, timeout=timeout)
+    except requests.RequestException:
+        return curl_request(session, "GET", url, params=params, timeout=timeout)
+
+
+def post_with_fallback(
+    session: requests.Session,
+    url: str,
+    *,
+    data: dict[str, str],
+    timeout: int,
+    headers: dict[str, str] | None = None,
+) -> requests.Response | CurlResponse:
+    try:
+        return session.post(url, data=data, timeout=timeout, headers=headers)
+    except requests.RequestException:
+        return curl_request(session, "POST", url, data=data, headers=headers, timeout=timeout)
 
 
 def clean_html_text(value: str) -> str:
@@ -112,7 +275,7 @@ def fetch_library_page(
         "searchKeyword": "",
         "pageIndex": str(page_index),
     }
-    response = session.get(SQF_LIBRARY_LIST_URL, params=params, timeout=timeout)
+    response = get_with_fallback(session, SQF_LIBRARY_LIST_URL, params=params, timeout=timeout)
     response.raise_for_status()
     response.encoding = response.encoding or "utf-8"
     return response.text, response.url
@@ -361,7 +524,8 @@ def download_file(
 ) -> dict[str, Any]:
     raw_dir.mkdir(parents=True, exist_ok=True)
     try:
-        response = session.post(
+        response = post_with_fallback(
+            session,
             SQF_LIBRARY_DOWNLOAD_URL,
             data=build_download_payload(row),
             timeout=timeout,
@@ -442,14 +606,7 @@ def collect_sqf_library(
     initialize_database(conn)
     create_indexes(conn)
     session = requests.Session()
-    session.headers.update(
-        {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "NCS-SQF-Ontology-MCP/0.1"
-            )
-        }
-    )
+    session.headers.update({"User-Agent": HTTP_USER_AGENT})
     page_summaries: list[dict[str, Any]] = []
     totals = {"posts_upserted": 0, "files_upserted": 0, "document_sources_upserted": 0}
     try:
@@ -556,6 +713,7 @@ def collect_sqf_library(
             "ontology_role_counts": role_counts,
         }
     finally:
+        cleanup_session_cookie_jar(session)
         conn.close()
 
 

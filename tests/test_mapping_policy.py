@@ -16,7 +16,11 @@ from ncs_mcp.collect_api import extract_sqf_items, upsert_sqf_items
 from ncs_mcp.db import connect, initialize_database, now_utc
 from ncs_mcp.evaluation import run_evaluation
 from ncs_mcp.mapping_policy import apply_mapping_filter
-from ncs_mcp.ontology import analyze_sqf_gap, build_sqf_mapping_candidates
+from ncs_mcp.ontology import (
+    SCOPE_MANAGEMENT_SUPPORT_HR_MVP,
+    analyze_sqf_gap,
+    build_sqf_mapping_candidates,
+)
 
 
 def seed_sqf_ncs_fixture(conn) -> str:
@@ -143,6 +147,8 @@ class MappingPolicyTests(unittest.TestCase):
             initialize_database(conn)
             source_key = seed_sqf_ncs_fixture(conn)
             build_sqf_mapping_candidates(conn, limit_per_duty=5)
+            conn.execute("UPDATE sqf_ncs_matches SET review_status = 'accepted'")
+            conn.commit()
             conn.close()
             os.environ["NCS_DB_PATH"] = str(db_path)
             from ncs_mcp.server import recommend_education_for_duty
@@ -166,15 +172,18 @@ class MappingPolicyTests(unittest.TestCase):
             build_sqf_mapping_candidates(conn, limit_per_duty=5)
             conn.close()
 
-            metrics = run_evaluation(db_path, scope_tag="management_support", run_name="test")
+            metrics = run_evaluation(db_path, scope_tag=SCOPE_MANAGEMENT_SUPPORT_HR_MVP, run_name="test")
 
             conn = connect(db_path)
             initialize_database(conn)
             saved = conn.execute("SELECT COUNT(*) AS count FROM evaluation_runs").fetchone()["count"]
             conn.close()
             self.assertEqual(saved, 1)
-            self.assertEqual(metrics["scope_tag"], "management_support")
+            self.assertEqual(metrics["scope_tag"], SCOPE_MANAGEMENT_SUPPORT_HR_MVP)
             self.assertGreaterEqual(metrics["mapping_count"], 1)
+            self.assertIn("recommendation_run_count", metrics)
+            self.assertIn("candidate_leakage_count", metrics)
+            self.assertEqual(metrics["human_review_precision_at_5_status"], "baseline_pending")
 
 
 if __name__ == "__main__":

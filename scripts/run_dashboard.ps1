@@ -16,21 +16,39 @@ $OutLog = Join-Path $Logs "dashboard.out.log"
 $ErrLog = Join-Path $Logs "dashboard.err.log"
 $Url = "http://$HostAddress`:$Port"
 
+function Get-ListeningProcessId {
+    param([int]$LocalPort)
+
+    $connection = Get-NetTCPConnection -LocalPort $LocalPort -ErrorAction SilentlyContinue |
+        Where-Object { $_.State -eq "Listen" } |
+        Select-Object -First 1
+    if ($connection) {
+        return [int]$connection.OwningProcess
+    }
+
+    $pattern = "^\s*TCP\s+\S+:$LocalPort\s+\S+\s+LISTENING\s+(\d+)\s*$"
+    foreach ($line in netstat -ano) {
+        if ($line -match $pattern) {
+            return [int]$Matches[1]
+        }
+    }
+
+    return $null
+}
+
 New-Item -ItemType Directory -Force -Path $Logs | Out-Null
 $env:PYTHONPATH = $PythonPath
 $env:NCS_DB_PATH = $DbPath
 
-$existing = Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue |
-    Where-Object { $_.State -eq "Listen" } |
-    Select-Object -First 1
+$existingPid = Get-ListeningProcessId -LocalPort $Port
 
-if ($Restart -and $existing) {
-    Stop-Process -Id $existing.OwningProcess -Force
+if ($Restart -and $existingPid) {
+    Stop-Process -Id $existingPid -Force
     Start-Sleep -Seconds 1
-    $existing = $null
+    $existingPid = Get-ListeningProcessId -LocalPort $Port
 }
 
-if (-not $existing) {
+if (-not $existingPid) {
     $python = (Get-Command python -ErrorAction Stop).Source
     $ArgsLine = "-u `"$Dashboard`" --host `"$HostAddress`" --port $Port --db-path `"$DbPath`""
     Start-Process `
@@ -45,7 +63,7 @@ if (-not $existing) {
     for ($i = 0; $i -lt 20; $i++) {
         Start-Sleep -Milliseconds 500
         try {
-            Invoke-WebRequest -Uri "$Url/api/status" -UseBasicParsing -TimeoutSec 2 | Out-Null
+            Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 2 | Out-Null
             $ready = $true
             break
         } catch {

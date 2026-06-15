@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "ncs-sqf-education": {
+      "type": "stdio",
+      "command": "python",
+      "args": [
+        "-m",
+        "ncs_mcp.server"
+      ],
+      "env": {
+        "PYTHONPATH": "C:/Workplace/NCS_MCP/src",
+        "NCS_DB_PATH": "C:/Workplace/NCS_MCP/data/processed/ncs.db",
+        "PYTHONUTF8": "1"
+      }
+    }
+  }
+}

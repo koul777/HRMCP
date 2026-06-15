@@ -7,7 +7,15 @@ from typing import Any
 
 from ncs_mcp.config import load_settings
 from ncs_mcp.db import connect, initialize_database, now_utc
-from ncs_mcp.mapping_policy import DEFAULT_MAPPING_FILTER
+from ncs_mcp.mapping_policy import DEFAULT_MAPPING_FILTER, REVIEWED_STATUSES
+from ncs_mcp.ontology import (
+    MVP_JOB_NAMES,
+    MVP_MAJOR_CODE,
+    MVP_SQF_FIELD_NAME,
+    SCOPE_BUSINESS_02,
+    SCOPE_MANAGEMENT_SUPPORT,
+    SCOPE_MANAGEMENT_SUPPORT_HR_MVP,
+)
 
 
 def run_evaluation(db_path: Path, *, scope_tag: str | None = None, run_name: str = "mvp") -> dict[str, Any]:
@@ -61,10 +69,21 @@ def run_evaluation(db_path: Path, *, scope_tag: str | None = None, run_name: str
             ).fetchone()[0]
         )
         sqf_where = ""
-        if scope_tag == "business_accounting_office_02":
+        if scope_tag == SCOPE_BUSINESS_02:
             sqf_where = "WHERE ncs_lclas_cd = '02'"
-        elif scope_tag == "management_support":
-            sqf_where = "WHERE ncs_lclas_cd = '02' AND sqf_field_name = '경영관리' AND job_name = '경영지원'"
+        elif scope_tag == SCOPE_MANAGEMENT_SUPPORT:
+            sqf_where = (
+                "WHERE ncs_lclas_cd = '02' "
+                "AND sqf_field_name = '경영관리' "
+                "AND job_name = '경영지원'"
+            )
+        elif scope_tag == SCOPE_MANAGEMENT_SUPPORT_HR_MVP:
+            placeholders = ",".join("'" + job_name + "'" for job_name in MVP_JOB_NAMES)
+            sqf_where = (
+                f"WHERE ncs_lclas_cd = '{MVP_MAJOR_CODE}' "
+                f"AND sqf_field_name = '{MVP_SQF_FIELD_NAME}' "
+                f"AND job_name IN ({placeholders})"
+            )
         sqf_total = int(conn.execute(f"SELECT COUNT(*) FROM sqf_duties {sqf_where}").fetchone()[0])
         sqf_with_direct = int(
             conn.execute(
@@ -80,6 +99,93 @@ def run_evaluation(db_path: Path, *, scope_tag: str | None = None, run_name: str
                 """
             ).fetchone()[0]
         )
+        rec_scope_condition = (
+            f"r.target_source_key IN (SELECT source_key FROM sqf_duties {sqf_where})"
+            if sqf_where
+            else ""
+        )
+
+        def rec_where(extra: list[str] | None = None) -> str:
+            rec_clauses = list(extra or [])
+            if rec_scope_condition:
+                rec_clauses.append(rec_scope_condition)
+            return f"WHERE {' AND '.join(rec_clauses)}" if rec_clauses else ""
+
+        recommendation_run_count = int(
+            conn.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM education_recommendation_runs r
+                {rec_where()}
+                """
+            ).fetchone()[0]
+        )
+        recommendation_item_count = int(
+            conn.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM education_recommendation_items i
+                JOIN education_recommendation_runs r ON r.run_id = i.run_id
+                {rec_where()}
+                """
+            ).fetchone()[0]
+        )
+        recommendation_evidence_count = int(
+            conn.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM education_recommendation_evidence e
+                JOIN education_recommendation_runs r ON r.run_id = e.run_id
+                {rec_where()}
+                """
+            ).fetchone()[0]
+        )
+        recommendation_items_with_evidence = int(
+            conn.execute(
+                f"""
+                SELECT COUNT(DISTINCT i.item_id)
+                FROM education_recommendation_items i
+                JOIN education_recommendation_runs r ON r.run_id = i.run_id
+                JOIN education_recommendation_evidence e ON e.item_id = i.item_id
+                {rec_where()}
+                """
+            ).fetchone()[0]
+        )
+        trusted_placeholders = ",".join("?" for _ in REVIEWED_STATUSES)
+        candidate_leakage_count = int(
+            conn.execute(
+                f"""
+                SELECT COUNT(DISTINCT e.evidence_id)
+                FROM education_recommendation_evidence e
+                JOIN education_recommendation_runs r ON r.run_id = e.run_id
+                JOIN sqf_ncs_matches m ON m.match_id = e.match_id
+                {rec_where(["e.source_table = 'sqf_ncs_matches'", f"m.review_status NOT IN ({trusted_placeholders})"])}
+                """,
+                list(REVIEWED_STATUSES),
+            ).fetchone()[0]
+        )
+
+        def evidence_item_count(*evidence_types: str) -> int:
+            placeholders = ",".join("?" for _ in evidence_types)
+            return int(
+                conn.execute(
+                    f"""
+                    SELECT COUNT(DISTINCT e.item_id)
+                    FROM education_recommendation_evidence e
+                    JOIN education_recommendation_runs r ON r.run_id = e.run_id
+                    {rec_where([f"e.evidence_type IN ({placeholders})"])}
+                    """,
+                    list(evidence_types),
+                ).fetchone()[0]
+            )
+
+        def item_rate(count: int) -> float:
+            return round(count / recommendation_item_count, 4) if recommendation_item_count else 0.0
+
+        direct_sqf_items = evidence_item_count("sqf_direct")
+        sqf_document_items = evidence_item_count("sqf_document")
+        ncs_supplement_items = evidence_item_count("ncs_mapping", "ontology_concept")
+        ontology_concept_items = evidence_item_count("ontology_concept")
         metrics = {
             "scope_tag": scope_tag,
             "mapping_count": total,
@@ -88,6 +194,22 @@ def run_evaluation(db_path: Path, *, scope_tag: str | None = None, run_name: str
             "sqf_duty_count": sqf_total,
             "sqf_direct_evidence_count": sqf_with_direct,
             "sqf_direct_evidence_rate": round(sqf_with_direct / sqf_total, 4) if sqf_total else 0.0,
+            "recommendation_run_count": recommendation_run_count,
+            "recommendation_item_count": recommendation_item_count,
+            "recommendation_evidence_count": recommendation_evidence_count,
+            "candidate_leakage_count": candidate_leakage_count,
+            "candidate_leakage_rate": (
+                round(candidate_leakage_count / recommendation_evidence_count, 4)
+                if recommendation_evidence_count
+                else 0.0
+            ),
+            "recommendation_items_with_evidence_rate": item_rate(recommendation_items_with_evidence),
+            "direct_sqf_evidence_recommendation_rate": item_rate(direct_sqf_items),
+            "sqf_document_evidence_recommendation_rate": item_rate(sqf_document_items),
+            "ncs_supplement_evidence_recommendation_rate": item_rate(ncs_supplement_items),
+            "ontology_concept_evidence_rate": item_rate(ontology_concept_items),
+            "human_review_precision_at_5": None,
+            "human_review_precision_at_5_status": "baseline_pending",
             "mapping_filter": DEFAULT_MAPPING_FILTER.as_dict(),
             "caveat_required": True,
         }

@@ -21,3 +21,6 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[project.scripts]
+ncs-mcp = "ncs_mcp.server:main"

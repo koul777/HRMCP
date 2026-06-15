@@ -5,16 +5,24 @@ import sqlite3
 from typing import Any
 
 from ncs_mcp.db import clamp_limit, now_utc, row_to_dict, rows_to_dicts
-from ncs_mcp.mapping_policy import DEFAULT_MAPPING_FILTER, apply_mapping_filter, merge_filter_metadata
+from ncs_mcp.mapping_policy import (
+    DEFAULT_MAPPING_FILTER,
+    MappingFilter,
+    apply_mapping_filter,
+    merge_filter_metadata,
+)
 
 
 MVP_MAJOR_CODE = "02"
 MVP_SQF_FIELD_NAME = "경영관리"
 MVP_JOB_NAME = "경영지원"
+MVP_JOB_NAMES = ("경영지원", "인사")
 MATCH_TARGET_TYPE = "ncs_competency_unit"
 DEFAULT_REFINED_POLICY = "refined_if_approved"
 SCOPE_MANAGEMENT_SUPPORT = "management_support"
+SCOPE_MANAGEMENT_SUPPORT_HR_MVP = "management_support_hr_mvp"
 SCOPE_BUSINESS_02 = "business_accounting_office_02"
+TRUSTED_MAPPING_FILTER = MappingFilter(include_candidates=False)
 
 ONTOLOGY_SCHEMA: dict[str, Any] = {
     "scope": "NCS-SQF ontology MCP",
@@ -290,13 +298,18 @@ def unit_summary(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
 
 
 def scope_tag_for_duty(row: sqlite3.Row | dict[str, Any], *, mvp_only: bool = False) -> str:
+    if mvp_only:
+        return SCOPE_MANAGEMENT_SUPPORT_HR_MVP
     if (
-        mvp_only
-        or (
-            value(row, "ncs_lclas_cd") == MVP_MAJOR_CODE
-            and value(row, "sqf_field_name") == MVP_SQF_FIELD_NAME
-            and value(row, "job_name") == MVP_JOB_NAME
-        )
+        value(row, "ncs_lclas_cd") == MVP_MAJOR_CODE
+        and value(row, "sqf_field_name") == MVP_SQF_FIELD_NAME
+        and value(row, "job_name") in MVP_JOB_NAMES
+    ):
+        return SCOPE_MANAGEMENT_SUPPORT_HR_MVP
+    if (
+        value(row, "ncs_lclas_cd") == MVP_MAJOR_CODE
+        and value(row, "sqf_field_name") == MVP_SQF_FIELD_NAME
+        and value(row, "job_name") == MVP_JOB_NAME
     ):
         return SCOPE_MANAGEMENT_SUPPORT
     if value(row, "ncs_lclas_cd") == MVP_MAJOR_CODE:
@@ -328,10 +341,10 @@ def query_sqf_duties(
             [
                 "ncs_lclas_cd = ?",
                 "sqf_field_name = ?",
-                "job_name = ?",
+                f"job_name IN ({','.join('?' for _ in MVP_JOB_NAMES)})",
             ]
         )
-        params.extend([MVP_MAJOR_CODE, MVP_SQF_FIELD_NAME, MVP_JOB_NAME])
+        params.extend([MVP_MAJOR_CODE, MVP_SQF_FIELD_NAME, *MVP_JOB_NAMES])
     else:
         if major_code:
             clauses.append("ncs_lclas_cd = ?")
@@ -582,7 +595,7 @@ def build_sqf_mapping_candidates(
     )
     inserted_or_updated = 0
     candidates_total = 0
-    scope_tag = SCOPE_MANAGEMENT_SUPPORT if mvp_only else None
+    scope_tag = SCOPE_MANAGEMENT_SUPPORT_HR_MVP if mvp_only else None
     for duty in duties:
         candidates = generate_mapping_candidates(conn, duty, limit=limit_per_duty)
         candidates_total += len(candidates)
@@ -704,9 +717,10 @@ def get_filtered_matches(
     sqf_row: sqlite3.Row | dict[str, Any],
     *,
     limit: int = 10,
+    policy: MappingFilter = DEFAULT_MAPPING_FILTER,
 ) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
     mapping_status, matches = get_or_generate_matches(conn, sqf_row, limit=max(limit, 50))
-    filtered = apply_mapping_filter(matches, DEFAULT_MAPPING_FILTER)
+    filtered = apply_mapping_filter(matches, policy)
     return mapping_status, filtered["matches"][: clamp_limit(limit, default=10, maximum=100)], filtered["metadata"]
 
 
@@ -979,8 +993,14 @@ def search_sqf_jobs_summary(
     clauses: list[str] = []
     params: list[Any] = []
     if mvp_only:
-        clauses.extend(["ncs_lclas_cd = ?", "sqf_field_name = ?", "job_name = ?"])
-        params.extend([MVP_MAJOR_CODE, MVP_SQF_FIELD_NAME, MVP_JOB_NAME])
+        clauses.extend(
+            [
+                "ncs_lclas_cd = ?",
+                "sqf_field_name = ?",
+                f"job_name IN ({','.join('?' for _ in MVP_JOB_NAMES)})",
+            ]
+        )
+        params.extend([MVP_MAJOR_CODE, MVP_SQF_FIELD_NAME, *MVP_JOB_NAMES])
     elif major_code:
         clauses.append("ncs_lclas_cd = ?")
         params.append(major_code)

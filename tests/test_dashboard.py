@@ -18,8 +18,12 @@ from ncs_dashboard import (
     get_item_detail,
     get_items,
     get_issues,
+    get_concepts,
+    get_ontology,
+    get_ontology_status,
     get_progress,
     get_status,
+    get_taxonomy,
     get_unit_detail,
     get_units,
     get_workbench,
@@ -69,6 +73,12 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("scheduleAutoRefresh", HTML)
         self.assertIn("자동갱신 30초", HTML)
 
+    def test_dashboard_html_keeps_javascript_newline_escapes(self) -> None:
+        escaped_newline_join = "join('" + "\\n" + "')"
+        literal_newline_join = "join('" + "\n" + "')"
+        self.assertIn(escaped_newline_join, HTML)
+        self.assertNotIn(literal_newline_join, HTML)
+
     @unittest.skipUnless(
         (ROOT / "data" / "processed" / "ncs.db").exists(),
         "local generated DB is not available",
@@ -115,6 +125,26 @@ class DashboardTests(unittest.TestCase):
         progress = get_progress(db_path, params)
         self.assertIn("phases", progress)
         self.assertGreaterEqual(len(progress["phases"]), 1)
+
+        taxonomy = get_taxonomy(db_path, {"level": ["major"], "limit": ["30"]})
+        self.assertIn("nodes", taxonomy)
+        self.assertGreaterEqual(len(taxonomy["nodes"]), 1)
+        self.assertIn("element_percent", taxonomy["nodes"][0])
+
+        ontology = get_ontology(db_path, params)
+        self.assertIn("units", ontology)
+        self.assertGreaterEqual(len(ontology["units"]), 1)
+        self.assertIn("elements", ontology["units"][0])
+
+        ontology_status = get_ontology_status(db_path, params)
+        self.assertIn("statuses", ontology_status)
+        self.assertEqual(
+            {item["concept_type"] for item in ontology_status["statuses"]},
+            {"knowledge", "skill", "attitude"},
+        )
+
+        concepts = get_concepts(db_path, {**params, "concept_type": ["knowledge"]})
+        self.assertIn("concepts", concepts)
 
         workbench = get_workbench(db_path, params)
         self.assertIn("cards", workbench)

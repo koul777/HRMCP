@@ -103,6 +103,8 @@ class NcsMcpTests(unittest.TestCase):
             }
             self.assertIn("competency_units", tables)
             self.assertIn("quality_issues", tables)
+            self.assertIn("ontology_concepts", tables)
+            self.assertIn("ksa_concept_links", tables)
             self.assertIn("sqf_duties", tables)
             self.assertIn("sqf_ncs_matches", tables)
             self.assertIn("sqf_library_posts", tables)
