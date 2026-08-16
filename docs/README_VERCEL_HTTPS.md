@@ -1,7 +1,8 @@
-# NCS MCP — Vercel HTTPS 배포 가이드
+# HRMCP — Vercel HTTPS 배포 가이드
 
-NCS MCP를 Vercel 서버리스(Streamable-HTTP)로 배포해 **하나의 HTTPS URL** 로
-ChatGPT·Claude 등 원격 MCP 클라이언트에 연결하는 방법을 정리합니다.
+HRMCP(NCS 기반 HR MCP)를 Vercel 서버리스(Streamable-HTTP)로 배포해
+**하나의 HTTPS URL** 로 ChatGPT·Claude 등 원격 MCP 클라이언트에 연결하는 방법을
+정리합니다. (`HRMCP` 는 표시 이름이며 내부 패키지는 `ncs_mcp` 로 유지됩니다.)
 
 - MCP 엔드포인트: `https://<your-vercel-domain>/api/mcp`
 - Health: `https://<your-vercel-domain>/api/health`
@@ -73,7 +74,12 @@ python scripts\export_interview_serving_db.py `
 
 ## 4. 서빙 DB를 GitHub Release 자산으로 업로드
 
-빌드 날짜 또는 NCS 소스 버전을 태그에 명시합니다.
+> 현재 배포용 서빙 DB는 이미 릴리스로 게시돼 있습니다:
+> <https://github.com/koul777/NCS_MCP/releases/tag/ncs-serving-2026-02>
+> 자산 URL:
+> `https://github.com/koul777/NCS_MCP/releases/download/ncs-serving-2026-02/ncs_interview_serving_release.db`
+
+새 슬라이스를 새로 게시할 때는 빌드 날짜 또는 NCS 소스 버전을 태그에 명시합니다.
 
 ```powershell
 gh release create ncs-serving-2026-02 `
@@ -149,7 +155,7 @@ ChatGPT Custom GPT(Agent/Tools) 설정용 최소 payload:
 ```json
 {
   "mcpServers": {
-    "ncs-training-http": {
+    "hrmcp": {
       "url": "https://<your-vercel-domain>/api/mcp"
     }
   }

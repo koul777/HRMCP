@@ -1,9 +1,13 @@
-# NCS MCP
+# HRMCP
 
-NCS MCP normalizes Korean National Competency Standards (NCS) source data and
-public API responses into a SQLite knowledge graph, then exposes that graph
-through MCP tools for HR ontology search and education/training
-recommendations.
+HRMCP (NCS-based HR MCP) normalizes Korean National Competency Standards (NCS)
+source data and public API responses into a SQLite knowledge graph, then exposes
+that graph through MCP tools for HR ontology search, job-description
+(채용 직무 설명자료) drafting, and education/training recommendations.
+
+> Naming note: "HRMCP" is the product/display name and MCP connection label.
+> Internal Python identifiers (the `ncs_mcp` package, `ncs_*` tool names) are
+> unchanged for compatibility.
 
 The active product scope is NCS-centered. SQF and NCS learning-module flows may
 remain in historical tables or compatibility code, but they are legacy/reference
@@ -187,17 +191,27 @@ That explicit opt-in does not provide authentication or TLS.
 ### Vercel MCP/ChatGPT quick run
 
 Vercel has now been wired as a serverless Streamable-HTTP surface, so ChatGPT 연결은
-주소 한 줄(`/api/mcp`)만 넣으면 됩니다.
+주소 한 줄(`/api/mcp`)만 넣으면 됩니다. 전체 배포 가이드는
+`docs/README_VERCEL_HTTPS.md` 를 참고하세요.
 
-- `vercel.json` defines the function entrypoint.
-- `api/mcp.py` exports `app` (ASGI) from `ncs_mcp.server`.
+- `vercel.json` defines the function entrypoint (`api/index.py`).
+- `api/mcp.py` exports `app` (ASGI) from `ncs_mcp.server` and bootstraps the
+  serving DB.
+- The serving DB (~117 MB) is **not committed**; it is published as a GitHub
+  Release asset and fetched at runtime via `NCS_DB_URL`.
 
-1. Prepare serving DB:
-   - 추천 방식: 공개 가능한 URL을 `NCS_DB_URL`로 지정하고 자동 다운로드.
-   - 대안: 배포 패키지에 `tmp/ncs_interview_serving_release.db`를 넣었으면
-     `_bootstrap`이 `/tmp/ncs_interview_serving.db`로 자동 복사합니다.
-   - 또는 `NCS_DB_PATH`와 `NCS_DB_URL`를 직접 지정합니다.
-2. Set read-only, public MCP defaults in Vercel environment:
+1. Prepare serving DB (**GitHub Release 방식, 권장**):
+   - 릴리스: <https://github.com/koul777/NCS_MCP/releases/tag/ncs-serving-2026-02>
+   - 자산 다운로드 URL을 `NCS_DB_URL`로 지정하면 배포 런타임에서 자동 다운로드:
+
+     ```text
+     https://github.com/koul777/NCS_MCP/releases/download/ncs-serving-2026-02/ncs_interview_serving_release.db
+     ```
+
+   - 새 슬라이스를 만들려면 `scripts/export_interview_serving_db.py` 로 export 후
+     `gh release create ...` 로 자산을 올립니다 (`docs/README_VERCEL_HTTPS.md` 3~4단계).
+2. Set read-only, public MCP defaults in Vercel environment
+   (`NCS_DB_URL` 만 추가로 등록):
 
 ```text
 NCS_MCP_READ_ONLY=1
@@ -206,6 +220,14 @@ NCS_MCP_DISABLE_DNS_REBINDING_PROTECTION=1
 NCS_MCP_STREAMABLE_HTTP_PATH=/mcp
 NCS_MCP_MAX_CONCURRENT_RECOMMENDATIONS=2
 NCS_DB_PATH=/tmp/ncs_interview_serving.db
+NCS_DB_URL=https://github.com/koul777/NCS_MCP/releases/download/ncs-serving-2026-02/ncs_interview_serving_release.db
+```
+
+위 기본값 중 `NCS_DB_URL` 외에는 `vercel.json` 에 이미 포함돼 있습니다.
+
+```powershell
+vercel env add NCS_DB_URL production
+# 위 Release 자산 URL 붙여넣기
 ```
 
 3. Deploy via Vercel.
@@ -227,7 +249,7 @@ For ChatGPT Custom GPT (Agent/Tools config), a minimum config payload is:
 ```json
 {
   "mcpServers": {
-    "ncs-training-http": {
+    "hrmcp": {
       "url": "https://<your-vercel-domain>/api/mcp"
     }
   }
@@ -311,6 +333,61 @@ python scripts\ncs_harness.py route-ncs-query "labor management to HR planning e
 Recommendation ranking distinguishes stronger direct training-goal evidence from
 weaker token, element-implied, or inherited evidence. Broad/generic KSA links are
 down-weighted so they do not dominate specialized recommendations.
+
+## 직무기술서(NCS 기반 채용 직무 설명자료) 생성 방법
+
+채용 공고문을 입력하면, 이 MCP를 통해 NCS 근거로 교차 확인된 **채용 직무
+설명자료(직무기술서)** 를 표 형식으로 만들고 워드(.docx) 파일로 저장할 수
+있습니다. 별도의 "생성 전용" 도구가 있는 것이 아니라, 아래 읽기 도구들이
+반환한 NCS 근거를 정해진 템플릿에 채워 넣는 방식입니다.
+
+### 1) 연결
+
+먼저 이 MCP를 ChatGPT(또는 다른 MCP 클라이언트)에 연결합니다.
+
+- Vercel HTTPS: `https://<your-vercel-domain>/api/mcp` (위 Vercel 섹션 참고)
+- 로컬 HTTP: `http://127.0.0.1:8766/mcp`
+
+### 2) 프롬프트
+
+공고문(PDF/텍스트)과 아래 지시를 함께 전달합니다.
+
+```text
+HRMCP 공고문을 보고 직무기술서를 만들어줘.
+아래 예시와 동일한 표 형식으로, NCS 분류체계 → 능력단위 → 직무수행내용
+→ 필요지식 → 필요기술 → 직무수행태도 → 필요자격 → 직업기초능력 →
+참고사이트 순서로 2페이지 표를 만들고 워드 파일로 저장해줘.
+```
+
+### 3) 출력 템플릿
+
+`[NCS 기반 채용 직무 설명자료 : <채용분야>]` 제목의 2페이지 표.
+
+| 항목 | 내용 | 채우는 NCS 근거 / 도구 |
+|------|------|------------------------|
+| 채용분야 | 공고의 직무명 | 공고문 + `ncs_search` |
+| 분류체계 | 대분류·중분류·소분류·세분류 | `ncs_search`(classifications) |
+| 능력단위 | 관련 NCS 능력단위 목록 | `ncs_search` scope=`unit`, `ncs_unit_detail` |
+| 직무수행내용 | 능력단위요소(수행 업무) | `ncs_unit_detail` include=`elements`(+`criteria`) |
+| 필요지식(K) | 요구 지식 | `ncs_unit_detail` include=`ksa` → K 항목 |
+| 필요기술(S) | 요구 기술 | `ncs_unit_detail` include=`ksa` → S 항목 |
+| 직무수행태도(A) | 요구 태도 | `ncs_unit_detail` include=`ksa` → A 항목 |
+| 필요자격 | 관련 국가자격 | `ncs_analysis` mode=`qualification` |
+| 직업기초능력 | NCS 10대 직업기초능력 | 능력단위 근거 + 표준 직업기초능력 |
+| 참고사이트 | 근거 출처 | NCS(ncs.go.kr), Work24 등 |
+
+각 능력단위요소의 지식/기술/태도는 원문(raw KSA)을 보존해 채우고, 자격·훈련
+근거는 `ncs_analysis`(qualification) 및 `ncs_unit_detail` include=`qualification`
+/`training` 으로 교차 확인합니다.
+
+### 4) 워드 파일 저장
+
+클라이언트에게 위 표를 `NCS_기반_채용_직무_설명자료_<채용분야>.docx` 형식의
+워드 파일로 저장하도록 지시하면 됩니다. (예: `기능직(전기)` → 채용분야
+`기능직(전기)`, 대분류 `19.전기·전자` 등으로 채워진 2페이지 표.)
+
+추천 결과·직무기술서는 교육/채용 실무 참고 자료이며, 공식 자격·채용·법적
+판단을 대체하지 않습니다.
 
 ## MCP Tool Surface
 
