@@ -4,9 +4,9 @@ HRMCP(NCS 기반 HR MCP)를 Vercel 서버리스(Streamable-HTTP)로 배포해
 **하나의 HTTPS URL** 로 ChatGPT·Claude 등 원격 MCP 클라이언트에 연결하는 방법을
 정리합니다. (`HRMCP` 는 표시 이름이며 내부 패키지는 `ncs_mcp` 로 유지됩니다.)
 
-- MCP 엔드포인트: `https://<your-vercel-domain>/api/mcp`
-- Health: `https://<your-vercel-domain>/api/health`
-- Readiness: `https://<your-vercel-domain>/api/ready`
+- MCP 엔드포인트: `https://ncs-mcp-bridge-mini2.vercel.app/api/mcp`
+- Health: `https://ncs-mcp-bridge-mini2.vercel.app/api/health`
+- Readiness: `https://ncs-mcp-bridge-mini2.vercel.app/api/ready`
 
 읽기 전용·운영도구 비활성화가 기본값입니다. 추천 결과는 교육 계획용 참고
 자료이며 공식 자격·채용·법적 판단이 아닙니다.
@@ -133,8 +133,8 @@ vercel deploy --prod
 배포 후 상태 확인:
 
 ```powershell
-curl https://<your-vercel-domain>/api/health
-curl https://<your-vercel-domain>/api/ready
+curl https://ncs-mcp-bridge-mini2.vercel.app/api/health
+curl https://ncs-mcp-bridge-mini2.vercel.app/api/ready
 ```
 
 `health` 응답의 `runtime.database.ready` 가 `true` 면 서빙 DB가 정상 로드된
@@ -147,7 +147,7 @@ curl https://<your-vercel-domain>/api/ready
 MCP URL 한 줄만 등록하면 됩니다.
 
 ```text
-https://<your-vercel-domain>/api/mcp
+https://ncs-mcp-bridge-mini2.vercel.app/api/mcp
 ```
 
 ChatGPT Custom GPT(Agent/Tools) 설정용 최소 payload:
@@ -156,7 +156,7 @@ ChatGPT Custom GPT(Agent/Tools) 설정용 최소 payload:
 {
   "mcpServers": {
     "hrmcp": {
-      "url": "https://<your-vercel-domain>/api/mcp"
+      "url": "https://ncs-mcp-bridge-mini2.vercel.app/api/mcp"
     }
   }
 }

@@ -239,7 +239,7 @@ vercel deploy --prod
 4. Connect ChatGPT (or any remote MCP client) to this single MCP URL:
 
 ```text
-https://<your-vercel-domain>/api/mcp
+https://ncs-mcp-bridge-mini2.vercel.app/api/mcp
 ```
 
 ChatGPT/Custom GPT 에서는 아래 JSON의 `url`만 넣으면 바로 등록됩니다.
@@ -250,7 +250,7 @@ For ChatGPT Custom GPT (Agent/Tools config), a minimum config payload is:
 {
   "mcpServers": {
     "hrmcp": {
-      "url": "https://<your-vercel-domain>/api/mcp"
+      "url": "https://ncs-mcp-bridge-mini2.vercel.app/api/mcp"
     }
   }
 }
@@ -259,8 +259,8 @@ For ChatGPT Custom GPT (Agent/Tools config), a minimum config payload is:
 Health/ready checks:
 
 ```text
-https://<your-vercel-domain>/api/health
-https://<your-vercel-domain>/api/ready
+https://ncs-mcp-bridge-mini2.vercel.app/api/health
+https://ncs-mcp-bridge-mini2.vercel.app/api/ready
 ```
 
 Reference chat mode:
@@ -345,7 +345,7 @@ down-weighted so they do not dominate specialized recommendations.
 
 먼저 이 MCP를 ChatGPT(또는 다른 MCP 클라이언트)에 연결합니다.
 
-- Vercel HTTPS: `https://<your-vercel-domain>/api/mcp` (위 Vercel 섹션 참고)
+- Vercel HTTPS: `https://ncs-mcp-bridge-mini2.vercel.app/api/mcp` (위 Vercel 섹션 참고)
 - 로컬 HTTP: `http://127.0.0.1:8766/mcp`
 
 ### 2) 프롬프트
