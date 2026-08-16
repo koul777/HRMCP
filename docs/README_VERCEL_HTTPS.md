@@ -75,9 +75,9 @@ python scripts\export_interview_serving_db.py `
 ## 4. 서빙 DB를 GitHub Release 자산으로 업로드
 
 > 현재 배포용 서빙 DB는 이미 릴리스로 게시돼 있습니다:
-> <https://github.com/koul777/NCS_MCP/releases/tag/ncs-serving-2026-02>
+> <https://github.com/koul777/HRMCP/releases/tag/ncs-serving-2026-02>
 > 자산 URL:
-> `https://github.com/koul777/NCS_MCP/releases/download/ncs-serving-2026-02/ncs_interview_serving_release.db`
+> `https://github.com/koul777/HRMCP/releases/download/ncs-serving-2026-02/ncs_interview_serving_release.db`
 
 새 슬라이스를 새로 게시할 때는 빌드 날짜 또는 NCS 소스 버전을 태그에 명시합니다.
 

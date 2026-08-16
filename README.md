@@ -201,11 +201,11 @@ Vercel has now been wired as a serverless Streamable-HTTP surface, so ChatGPT �
   Release asset and fetched at runtime via `NCS_DB_URL`.
 
 1. Prepare serving DB (**GitHub Release 방식, 권장**):
-   - 릴리스: <https://github.com/koul777/NCS_MCP/releases/tag/ncs-serving-2026-02>
+   - 릴리스: <https://github.com/koul777/HRMCP/releases/tag/ncs-serving-2026-02>
    - 자산 다운로드 URL을 `NCS_DB_URL`로 지정하면 배포 런타임에서 자동 다운로드:
 
      ```text
-     https://github.com/koul777/NCS_MCP/releases/download/ncs-serving-2026-02/ncs_interview_serving_release.db
+     https://github.com/koul777/HRMCP/releases/download/ncs-serving-2026-02/ncs_interview_serving_release.db
      ```
 
    - 새 슬라이스를 만들려면 `scripts/export_interview_serving_db.py` 로 export 후
@@ -220,7 +220,7 @@ NCS_MCP_DISABLE_DNS_REBINDING_PROTECTION=1
 NCS_MCP_STREAMABLE_HTTP_PATH=/mcp
 NCS_MCP_MAX_CONCURRENT_RECOMMENDATIONS=2
 NCS_DB_PATH=/tmp/ncs_interview_serving.db
-NCS_DB_URL=https://github.com/koul777/NCS_MCP/releases/download/ncs-serving-2026-02/ncs_interview_serving_release.db
+NCS_DB_URL=https://github.com/koul777/HRMCP/releases/download/ncs-serving-2026-02/ncs_interview_serving_release.db
 ```
 
 위 기본값 중 `NCS_DB_URL` 외에는 `vercel.json` 에 이미 포함돼 있습니다.
