@@ -22,7 +22,11 @@ class Settings:
     service_key: str | None
     sqf_service_key: str | None
     study_module_service_key: str | None
+    training_course_service_key: str | None
+    qualification_service_key: str | None
+    job_base_service_key: str | None
     reports_dir: Path
+    operator_tools_enabled: bool
 
 
 def load_env_file(path: Path) -> None:
@@ -39,17 +43,67 @@ def load_env_file(path: Path) -> None:
             os.environ[key] = value
 
 
-def load_settings() -> Settings:
-    if load_dotenv:
-        load_dotenv(PROJECT_ROOT / ".env")
-    load_env_file(PROJECT_ROOT / ".env")
+def read_env_values(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if value:
+            values[key] = value
+    return values
 
-    excel_value = os.getenv("NCS_EXCEL_PATH")
-    db_value = os.getenv("NCS_DB_PATH")
-    service_key = os.getenv("NCS_SERVICE_KEY") or None
-    sqf_service_key = os.getenv("NCS_SQF_SERVICE_KEY") or None
-    study_module_service_key = os.getenv("NCS_STUDY_MODULE_SERVICE_KEY") or None
-    reports_value = os.getenv("NCS_REPORTS_DIR")
+
+def load_settings() -> Settings:
+    env_path = PROJECT_ROOT / ".env"
+    if load_dotenv:
+        load_dotenv(env_path)
+    load_env_file(env_path)
+    file_values = read_env_values(env_path)
+
+    def value_for(*keys: str) -> str | None:
+        for key in keys:
+            value = os.getenv(key) or file_values.get(key)
+            if value:
+                return value
+        return None
+
+    def bool_for(*keys: str) -> bool:
+        value = value_for(*keys)
+        if value is None:
+            return False
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+    excel_value = value_for("NCS_EXCEL_PATH")
+    db_value = value_for("NCS_DB_PATH")
+    service_key = value_for("NCS_SERVICE_KEY")
+    sqf_service_key = value_for("NCS_SQF_SERVICE_KEY")
+    study_module_service_key = value_for(
+        "NCS_STUDY_MODULE_SERVICE_KEY",
+        "NCS_LEARNING_MODULE_SERVICE_KEY",
+        "NCS_SERVICE_KEY",
+    )
+    training_course_service_key = value_for(
+        "NCS_TRAINING_COURSE_SERVICE_KEY",
+        "NCS_SERVICE_KEY",
+    )
+    qualification_service_key = value_for(
+        "NCS_QUALIFICATION_SERVICE_KEY",
+        "NCS_NCS_CL_CD_JM_SERVICE_KEY",
+        "NCS_SERVICE_KEY",
+    )
+    job_base_service_key = value_for(
+        "NCS_JOB_BASE_SERVICE_KEY",
+        "NCS_JOB_BASE_COMPETENCY_SERVICE_KEY",
+        "NCS_SERVICE_KEY",
+    )
+    reports_value = value_for("NCS_REPORTS_DIR")
+    operator_tools_enabled = bool_for("NCS_MCP_ENABLE_OPERATOR_TOOLS")
 
     return Settings(
         excel_path=Path(excel_value) if excel_value else None,
@@ -57,5 +111,9 @@ def load_settings() -> Settings:
         service_key=service_key,
         sqf_service_key=sqf_service_key,
         study_module_service_key=study_module_service_key,
+        training_course_service_key=training_course_service_key,
+        qualification_service_key=qualification_service_key,
+        job_base_service_key=job_base_service_key,
         reports_dir=Path(reports_value) if reports_value else DEFAULT_REPORTS_DIR,
+        operator_tools_enabled=operator_tools_enabled,
     )

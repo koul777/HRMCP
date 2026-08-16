@@ -196,7 +196,13 @@ def refresh_learning_module_links(
 ) -> dict[str, int]:
     clauses: list[str] = []
     params: list[Any] = []
-    if module_seqs:
+    if module_seqs is not None:
+        if not module_seqs:
+            return {
+                "modules_processed": 0,
+                "unit_links_upserted": 0,
+                "concept_links_upserted": 0,
+            }
         clauses.append(f"learn_module_seq IN ({','.join('?' for _ in module_seqs)})")
         params.extend(module_seqs)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""

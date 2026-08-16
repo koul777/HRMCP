@@ -148,6 +148,16 @@ def build_refinement_prompt(issue: dict[str, Any], target: dict[str, Any]) -> st
     )
 
 
+def safe_typo_refinement(raw_text: str) -> str | None:
+    refined = normalize_whitespace(raw_text)
+    refined = re.sub(r"자가가(?!구)", "자가", refined)
+    refined = refined.replace("조진문화", "조직문화")
+    refined = refined.replace("자격요견", "자격요건")
+    if refined != normalize_whitespace(raw_text):
+        return refined
+    return None
+
+
 def local_rule_refine(issue: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
     issue_type = str(issue["issue_type"])
     raw_text = raw_text_for_target(target)
@@ -177,7 +187,19 @@ def local_rule_refine(issue: dict[str, Any], target: dict[str, Any]) -> dict[str
         action = "needs_human_review"
         confidence = 0.35
         rationale = "짧거나 반복되는 KSA는 도메인 판단이 필요하므로 자동 정제하지 않았다."
-    elif issue_type in {"suspected_typo", "api_value_mismatch", "api_element_value_mismatch"}:
+    elif issue_type == "suspected_typo":
+        typo_refined = safe_typo_refinement(raw_text)
+        if typo_refined:
+            refined = typo_refined
+            action = "refine"
+            confidence = 0.9
+            rationale = "Known narrow typo pattern was corrected in the refined field while preserving raw source text."
+        else:
+            action = "needs_human_review"
+            confidence = 0.4
+            rationale = "?ㅽ깉???먯쿇 ?뺤씤 ?먮뒗 LLM+?щ엺 寃?좉? ?꾩슂?섎떎."
+            warnings.append("?먮룞 ?섏젙 湲덉?: ?먮Ц怨?蹂닿컯媛믪쓣 ?④퍡 寃?좏빐???쒕떎.")
+    elif issue_type in {"api_value_mismatch", "api_element_value_mismatch"}:
         action = "needs_human_review"
         confidence = 0.4
         rationale = "오탈자/API 값 불일치는 원천 확인 또는 LLM+사람 검토가 필요하다."
@@ -385,6 +407,25 @@ def parse_job_result(row: sqlite3.Row) -> dict[str, Any]:
     return {}
 
 
+def unsafe_refinement_reason(
+    *,
+    target_type: str,
+    raw_text: str,
+    refined_text: str,
+) -> str | None:
+    """Return a reason when an auto-refinement is too risky to apply."""
+    if target_type != "criteria":
+        return None
+    normalized = normalize_whitespace(refined_text)
+    if re.search(r"할\s*수\s*(?:있|다)\.$", normalized):
+        return "criteria_sentence_ends_with_incomplete_can_do_phrase"
+    if re.search(r"있\s+다\.", normalized):
+        return "criteria_sentence_has_broken_itda_spacing"
+    if len(normalized) + 10 < len(normalize_whitespace(raw_text)):
+        return "refined_text_is_substantially_shorter_than_raw_text"
+    return None
+
+
 def apply_refinement_to_target(
     conn: sqlite3.Connection,
     *,
@@ -447,31 +488,49 @@ def apply_refinement_jobs(
     *,
     limit: int = 50,
     min_confidence: float = 0.95,
+    issue_types: list[str] | None = None,
     target_types: list[str] | None = None,
+    severity: str | None = None,
     job_status: str = "review_required",
     target_review_status: str = "model_refined",
     resolve_issues: bool = True,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    clauses = ["review_status = ?", "confidence >= ?"]
+    clauses = ["r.review_status = ?", "r.confidence >= ?"]
     params: list[Any] = [job_status, min_confidence]
     if target_types:
         placeholders = ",".join("?" for _ in target_types)
-        clauses.append(f"target_type IN ({placeholders})")
+        clauses.append(f"r.target_type IN ({placeholders})")
         params.extend(target_types)
+    join_quality_issues = bool(issue_types or severity)
+    if issue_types:
+        placeholders = ",".join("?" for _ in issue_types)
+        clauses.append(f"q.issue_type IN ({placeholders})")
+        params.extend(issue_types)
+    if severity:
+        clauses.append("q.severity = ?")
+        params.append(severity)
+    quality_issue_join = (
+        "JOIN quality_issues q ON q.issue_id = r.source_issue_id"
+        if join_quality_issues
+        else ""
+    )
     rows = conn.execute(
         f"""
-        SELECT *
-        FROM refinement_jobs
+        SELECT r.*
+        FROM refinement_jobs r
+        {quality_issue_join}
         WHERE {' AND '.join(clauses)}
-        ORDER BY confidence DESC, job_id
+        ORDER BY r.confidence DESC, r.job_id
         LIMIT ?
         """,
         params + [clamp_limit(limit, default=50, maximum=5000)],
     ).fetchall()
     applied = 0
     skipped = 0
+    skipped_unsafe = 0
     previews: list[dict[str, Any]] = []
+    unsafe_previews: list[dict[str, Any]] = []
     for row in rows:
         result = parse_job_result(row)
         if result.get("action") != "refine":
@@ -481,6 +540,26 @@ def apply_refinement_jobs(
         raw_text = str(row["raw_text"] or result.get("raw_text") or "").strip()
         if not refined_text or refined_text == raw_text:
             skipped += 1
+            continue
+        unsafe_reason = unsafe_refinement_reason(
+            target_type=row["target_type"],
+            raw_text=raw_text,
+            refined_text=refined_text,
+        )
+        if unsafe_reason:
+            skipped += 1
+            skipped_unsafe += 1
+            unsafe_previews.append(
+                {
+                    "job_id": row["job_id"],
+                    "target_type": row["target_type"],
+                    "target_id": row["target_id"],
+                    "confidence": row["confidence"],
+                    "raw_text": raw_text,
+                    "refined_text": refined_text,
+                    "unsafe_reason": unsafe_reason,
+                }
+            )
             continue
         previews.append(
             {
@@ -517,10 +596,15 @@ def apply_refinement_jobs(
         "jobs_seen": len(rows),
         "jobs_applied": applied,
         "jobs_skipped": skipped,
+        "jobs_skipped_unsafe": skipped_unsafe,
+        "issue_types": issue_types,
+        "target_types": target_types,
+        "severity": severity,
         "min_confidence": min_confidence,
         "target_review_status": target_review_status,
         "dry_run": dry_run,
         "previews": previews[:20],
+        "unsafe_previews": unsafe_previews[:20],
     }
 
 
@@ -775,7 +859,9 @@ def run_refinement_harness(
                 conn,
                 limit=limit,
                 min_confidence=min_confidence,
+                issue_types=issue_types,
                 target_types=target_types,
+                severity=severity,
                 dry_run=dry_run,
             )
         if action == "stats":

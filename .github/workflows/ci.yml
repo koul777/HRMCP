@@ -1,0 +1,79 @@
+name: NCS MCP CI
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Tests and MCP smoke
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+
+      - name: Compile key modules
+        run: python -m py_compile src\ncs_mcp\server.py src\ncs_mcp\tool_registry.py src\ncs_mcp\error_codes.py src\ncs_mcp\helpers.py src\ncs_mcp\smoke_data.py scripts\ncs_harness.py scripts\mcp_stdio_smoke.py scripts\mcp_http_health_smoke.py scripts\export_mcp_tool_contract.py scripts\check_text_encoding.py scripts\release_readiness_report.py
+
+      - name: Check MCP tool contract
+        run: python scripts\export_mcp_tool_contract.py --check --out mcp\ncs-tool-contract.json
+
+      - name: Check release text encoding
+        run: python scripts\check_text_encoding.py
+
+      - name: Run focused unit tests
+        run: python -m unittest tests.test_http_client tests.test_training_recommendation tests.test_ncs_mcp tests.test_harness -v
+
+      - name: Run repository lint guard
+        run: python scripts\ncs_harness.py lint
+
+      - name: Run protocol-level STDIO smoke
+        run: python scripts\mcp_stdio_smoke.py --timeout 20
+
+      - name: Run HTTP health smoke
+        run: python scripts\mcp_http_health_smoke.py --timeout 20
+
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t ncs-mcp:ci .
+
+      - name: Run container readiness smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p docker-smoke
+          docker run --rm -v "${PWD}/docker-smoke:/data" ncs-mcp:ci \
+            python -m ncs_mcp.smoke_data --out /data/ncs.db
+          docker run -d --name ncs-mcp-ci -p 8777:8777 \
+            -v "${PWD}/docker-smoke:/data" \
+            -e NCS_SERVICE_KEY=docker-smoke-secret \
+            -e NCS_MCP_PORT=8777 \
+            ncs-mcp:ci
+          trap 'docker rm -f ncs-mcp-ci >/dev/null 2>&1 || true' EXIT
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:8777/ready >/tmp/ncs-ready.json; then
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8777/ready
+          curl -fsS http://127.0.0.1:8777/health

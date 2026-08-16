@@ -9,8 +9,10 @@ if __package__ in {None, ""}:  # pragma: no cover - direct script support
 import argparse
 import hashlib
 import json
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from html import unescape as html_unescape
 from math import ceil
 from pathlib import Path
 from typing import Any
@@ -99,6 +101,48 @@ def extract_sqf_data_info(payload: dict[str, Any]) -> dict[str, Any]:
 
 def as_text(value: Any) -> str:
     return "" if value is None else str(value).strip()
+
+
+def normalize_api_compare_text(value: Any) -> str:
+    text = html_unescape(as_text(value)).replace("&;", "&")
+    return normalize_spaces(text)
+
+
+def insert_api_quality_issue_once(
+    conn,
+    *,
+    target_type: str,
+    target_id: str | int,
+    issue_type: str,
+    severity: str,
+    issue_detail: str,
+    suggested_action: str,
+) -> bool:
+    exists = conn.execute(
+        """
+        SELECT 1
+        FROM quality_issues
+        WHERE target_type = ?
+          AND target_id = ?
+          AND issue_type = ?
+          AND issue_detail = ?
+          AND resolved_at IS NULL
+        LIMIT 1
+        """,
+        (target_type, str(target_id), issue_type, issue_detail),
+    ).fetchone()
+    if exists:
+        return False
+    insert_quality_issue(
+        conn,
+        target_type=target_type,
+        target_id=target_id,
+        issue_type=issue_type,
+        severity=severity,
+        issue_detail=issue_detail,
+        suggested_action=suggested_action,
+    )
+    return True
 
 
 def as_int(value: Any, default: int = 0) -> int:
@@ -368,14 +412,24 @@ def upsert_standard_element_items(conn, items: list[dict[str, Any]]) -> dict[str
             """,
             (api_name, api_level, element["element_id"]),
         )
+        conn.execute(
+            """
+            UPDATE quality_issues
+            SET resolved_at = ?
+            WHERE target_type = 'element'
+              AND target_id = ?
+              AND issue_type = 'api_element_unmatched'
+              AND resolved_at IS NULL
+            """,
+            (now_utc(), str(element["element_id"])),
+        )
         comparisons = [
             ("element_name", element["element_name_raw"], api_name),
             ("element_level", element["element_level_raw"], api_level),
         ]
         for label, excel_value, api_value in comparisons:
-            if normalize_spaces(as_text(excel_value)) != normalize_spaces(as_text(api_value)):
-                mismatches += 1
-                insert_quality_issue(
+            if normalize_api_compare_text(excel_value) != normalize_api_compare_text(api_value):
+                inserted = insert_api_quality_issue_once(
                     conn,
                     target_type="element",
                     target_id=element["element_id"],
@@ -384,6 +438,8 @@ def upsert_standard_element_items(conn, items: list[dict[str, Any]]) -> dict[str
                     issue_detail=f"{label} mismatch: excel='{excel_value}', api='{api_value}'",
                     suggested_action="Check whether the Excel DB and API version differ.",
                 )
+                if inserted:
+                    mismatches += 1
     return {
         "items": count,
         "matched": matched,
@@ -567,9 +623,8 @@ def apply_api_join(conn) -> dict[str, int]:
             ("세분류명", unit["sub_name"], api["ncs_subd_cdnm"]),
         ]
         for label, excel_value, api_value in comparisons:
-            if normalize_spaces(as_text(excel_value)) != normalize_spaces(as_text(api_value)):
-                mismatches += 1
-                insert_quality_issue(
+            if normalize_api_compare_text(excel_value) != normalize_api_compare_text(api_value):
+                inserted = insert_api_quality_issue_once(
                     conn,
                     target_type="unit",
                     target_id=unit["unit_code"],
@@ -578,6 +633,8 @@ def apply_api_join(conn) -> dict[str, int]:
                     issue_detail=f"{label} 불일치: excel='{excel_value}', api='{api_value}'",
                     suggested_action="API와 엑셀 기준일 또는 버전 차이를 확인한다.",
                 )
+                if inserted:
+                    mismatches += 1
 
     unmatched_rows = conn.execute(
         "SELECT unit_code FROM competency_units WHERE api_match_status = 'unmatched'"
@@ -601,6 +658,178 @@ def apply_api_join(conn) -> dict[str, int]:
         "unmatched_excel_units": len(unmatched_rows),
         "api_value_mismatches": mismatches,
     }
+
+
+API_MISMATCH_DETAIL_PATTERN = re.compile(
+    r"^(?P<label>.+?) (?:mismatch|불일치): excel='(?P<excel>.*)', api='(?P<api>.*)'$"
+)
+
+
+def _api_quality_issue_counts(conn) -> dict[str, dict[str, int]]:
+    rows = conn.execute(
+        """
+        SELECT issue_type, severity, COUNT(*) AS count
+        FROM quality_issues
+        WHERE issue_type IN (
+            'api_unmatched',
+            'api_value_mismatch',
+            'api_element_unmatched',
+            'api_element_value_mismatch'
+        )
+          AND resolved_at IS NULL
+        GROUP BY issue_type, severity
+        ORDER BY issue_type, severity
+        """
+    ).fetchall()
+    counts: dict[str, dict[str, int]] = {}
+    for row in rows:
+        counts.setdefault(row["issue_type"], {})[row["severity"]] = int(row["count"])
+    return counts
+
+
+def _api_quality_hygiene_candidates(conn, *, limit: int = 50) -> list[dict[str, Any]]:
+    candidates: dict[int, dict[str, Any]] = {}
+    duplicate_rows = conn.execute(
+        """
+        SELECT issue_type, target_type, target_id, issue_detail,
+               MIN(issue_id) AS keep_issue_id,
+               GROUP_CONCAT(issue_id) AS issue_ids,
+               COUNT(*) AS duplicate_count
+        FROM quality_issues
+        WHERE issue_type IN (
+            'api_unmatched',
+            'api_value_mismatch',
+            'api_element_unmatched',
+            'api_element_value_mismatch'
+        )
+          AND resolved_at IS NULL
+        GROUP BY issue_type, target_type, target_id, issue_detail
+        HAVING COUNT(*) > 1
+        ORDER BY duplicate_count DESC, keep_issue_id
+        """
+    ).fetchall()
+    for row in duplicate_rows:
+        issue_ids = sorted(int(value) for value in str(row["issue_ids"]).split(",") if value)
+        keep_issue_id = int(row["keep_issue_id"])
+        for issue_id in issue_ids:
+            if issue_id == keep_issue_id:
+                continue
+            candidates[issue_id] = {
+                "issue_id": issue_id,
+                "action": "resolve_duplicate",
+                "reason": "duplicate open API quality issue",
+                "keep_issue_id": keep_issue_id,
+                "issue_type": row["issue_type"],
+                "target_type": row["target_type"],
+                "target_id": row["target_id"],
+                "issue_detail": row["issue_detail"],
+            }
+
+    mismatch_rows = conn.execute(
+        """
+        SELECT issue_id, issue_type, target_type, target_id, issue_detail
+        FROM quality_issues
+        WHERE issue_type IN ('api_value_mismatch', 'api_element_value_mismatch')
+          AND resolved_at IS NULL
+        ORDER BY issue_id
+        """
+    ).fetchall()
+    for row in mismatch_rows:
+        if int(row["issue_id"]) in candidates:
+            continue
+        match = API_MISMATCH_DETAIL_PATTERN.match(row["issue_detail"] or "")
+        if not match:
+            continue
+        if normalize_api_compare_text(match.group("excel")) != normalize_api_compare_text(match.group("api")):
+            continue
+        candidates[int(row["issue_id"])] = {
+            "issue_id": int(row["issue_id"]),
+            "action": "resolve_normalized_equal",
+            "reason": "Excel/API values match after HTML entity and whitespace normalization",
+            "issue_type": row["issue_type"],
+            "target_type": row["target_type"],
+            "target_id": row["target_id"],
+            "issue_detail": row["issue_detail"],
+        }
+
+    return list(candidates.values())[: max(0, int(limit))]
+
+
+def api_quality_hygiene_report(conn, *, limit: int = 50) -> dict[str, Any]:
+    candidates = _api_quality_hygiene_candidates(conn, limit=limit)
+    summary: dict[str, int] = {}
+    for candidate in candidates:
+        summary[candidate["action"]] = summary.get(candidate["action"], 0) + 1
+    return {
+        "ok": True,
+        "apply": False,
+        "before_counts": _api_quality_issue_counts(conn),
+        "candidate_count": len(candidates),
+        "candidate_action_counts": summary,
+        "candidates": candidates,
+    }
+
+
+def apply_api_quality_hygiene(
+    conn,
+    *,
+    limit: int = 50,
+    max_updates: int | None = None,
+) -> dict[str, Any]:
+    before = api_quality_hygiene_report(conn, limit=limit)
+    candidates = before["candidates"]
+    if max_updates is not None:
+        candidates = candidates[: max(0, int(max_updates))]
+    timestamp = now_utc()
+    resolved_ids: list[int] = []
+    for candidate in candidates:
+        conn.execute(
+            "UPDATE quality_issues SET resolved_at = ? WHERE issue_id = ? AND resolved_at IS NULL",
+            (timestamp, candidate["issue_id"]),
+        )
+        resolved_ids.append(int(candidate["issue_id"]))
+    conn.commit()
+    after = api_quality_hygiene_report(conn, limit=limit)
+    after.update(
+        {
+            "apply": True,
+            "before_counts": before["before_counts"],
+            "resolved_count": len(resolved_ids),
+            "resolved_issue_ids": resolved_ids,
+            "applied_candidates": candidates,
+            "after_counts": after["before_counts"],
+        }
+    )
+    return after
+
+
+def write_api_quality_hygiene_markdown(report: dict[str, Any], out_path: Path) -> None:
+    lines = [
+        "# API Quality Hygiene",
+        "",
+        f"- apply: {report.get('apply')}",
+        f"- candidate_count: {report.get('candidate_count')}",
+        f"- resolved_count: {report.get('resolved_count', 0)}",
+        "",
+        "## Counts",
+        "",
+        f"- before: `{json.dumps(report.get('before_counts') or {}, ensure_ascii=False, sort_keys=True)}`",
+        f"- after: `{json.dumps(report.get('after_counts') or report.get('before_counts') or {}, ensure_ascii=False, sort_keys=True)}`",
+        "",
+        "## Candidate Actions",
+        "",
+    ]
+    for action, count in sorted((report.get("candidate_action_counts") or {}).items()):
+        lines.append(f"- `{action}`: {count}")
+    lines.extend(["", "## Sample Candidates", ""])
+    for candidate in (report.get("applied_candidates") or report.get("candidates") or [])[:20]:
+        lines.append(
+            f"- #{candidate.get('issue_id')} `{candidate.get('action')}` "
+            f"{candidate.get('issue_type')} {candidate.get('target_type')}:{candidate.get('target_id')} - "
+            f"{candidate.get('reason')}"
+        )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def write_report(summary: dict[str, int], reports_dir: Path, filename: str = "api_join_report.md") -> None:
@@ -991,6 +1220,8 @@ def collect_elements_api(
     small_code: str | None = None,
     sub_code: str | None = None,
     only_uncollected: bool = False,
+    only_failed: bool = False,
+    only_open_unmatched: bool = False,
     retry_failed: bool = False,
     concurrency: int = 1,
     max_retries: int = 2,
@@ -1013,11 +1244,26 @@ def collect_elements_api(
         if value:
             clauses.append(f"{column} = ?")
             params.append(value)
-    if only_uncollected:
+    if only_failed:
+        clauses.append("ce.api_match_status = 'api_failed'")
+    elif only_uncollected:
         if retry_failed:
             clauses.append("ce.api_match_status IN ('not_collected', 'api_failed')")
         else:
             clauses.append("ce.api_match_status = 'not_collected'")
+    if only_open_unmatched:
+        clauses.append(
+            """
+            EXISTS (
+                SELECT 1
+                FROM quality_issues qi
+                WHERE qi.target_type = 'element'
+                  AND qi.target_id = CAST(ce.element_id AS TEXT)
+                  AND qi.issue_type = 'api_element_unmatched'
+                  AND qi.resolved_at IS NULL
+            )
+            """
+        )
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     limit_sql = ""
     if element_limit is not None:
@@ -1106,7 +1352,7 @@ def collect_elements_api(
                 "UPDATE competency_elements SET api_match_status = ? WHERE element_id = ?",
                 ("api_failed", result["element_id"]),
             )
-            insert_quality_issue(
+            insert_api_quality_issue_once(
                 conn,
                 target_type="element",
                 target_id=result["element_id"],
@@ -1210,6 +1456,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--small-code")
     parser.add_argument("--sub-code")
     parser.add_argument("--only-uncollected", action="store_true")
+    parser.add_argument("--only-failed", action="store_true")
+    parser.add_argument("--only-open-unmatched", action="store_true")
     parser.add_argument("--retry-failed", action="store_true")
     return parser.parse_args()
 
@@ -1269,6 +1517,8 @@ def main() -> None:
             small_code=args.small_code,
             sub_code=args.sub_code,
             only_uncollected=args.only_uncollected,
+            only_failed=args.only_failed,
+            only_open_unmatched=args.only_open_unmatched,
             retry_failed=args.retry_failed,
             concurrency=args.concurrency,
             max_retries=args.max_retries,

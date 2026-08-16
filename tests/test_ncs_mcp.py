@@ -120,8 +120,28 @@ class NcsMcpTests(unittest.TestCase):
             self.assertIn("sqf_document_chunks", tables)
             self.assertIn("sqf_chunk_job_level_matches", tables)
             self.assertIn("sqf_document_evidence_links", tables)
+            self.assertIn("ncs_reference_documents", tables)
+            self.assertIn("ncs_reference_pages", tables)
+            self.assertIn("ncs_reference_chunks", tables)
+            self.assertIn("ncs_reference_entities", tables)
+            self.assertIn("ncs_reference_entity_links", tables)
             self.assertIn("review_audit_log", tables)
             self.assertIn("evaluation_runs", tables)
+            self.assertIn("ncs_query_aliases", tables)
+            self.assertIn("training_transition_gold_scenarios", tables)
+            self.assertIn("training_transition_scenario_reviews", tables)
+            self.assertIn("ncs_career_paths", tables)
+            self.assertIn("ncs_qualification_items", tables)
+            self.assertIn("ncs_unit_qualification_links", tables)
+            self.assertIn("ncs_job_base_competencies", tables)
+            self.assertIn("ncs_job_base_factors", tables)
+            self.assertIn("ncs_unit_job_base_links", tables)
+            alias_count = conn.execute("SELECT COUNT(*) FROM ncs_query_aliases").fetchone()[0]
+            scenario_count = conn.execute(
+                "SELECT COUNT(*) FROM training_transition_gold_scenarios"
+            ).fetchone()[0]
+            self.assertGreaterEqual(alias_count, 1)
+            self.assertGreaterEqual(scenario_count, 1)
             conn.close()
 
     def test_sqf_payload_upserts_duties(self) -> None:

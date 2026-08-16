@@ -332,154 +332,226 @@ def validate_ontology_readiness(db_path: Path) -> dict[str, Any]:
                 "competency_elements",
                 "performance_criteria",
                 "ksa_items",
-                "sqf_duties",
-                "sqf_job_levels_normalized",
-                "sqf_document_sources",
-                "sqf_document_assets",
-                "sqf_document_chunks",
-                "sqf_chunk_job_level_matches",
-                "sqf_ncs_matches",
+                "ontology_concepts",
+                "ksa_atomic_items",
+                "ksa_atomic_concept_links",
+                "ksa_meaning_candidates",
+                "task_ksa_concept_relations",
+                "task_similarity_links",
+                "ncs_training_courses",
+                "ncs_training_course_unit_links",
+                "ncs_training_course_concept_links",
+                "ncs_training_course_element_links",
+                "training_goal_concept_links",
+                "training_delivery_relations",
             ]
         }
         issues: list[dict[str, Any]] = []
-        unextracted_assets = int(
+
+        unlinked_ksa_items = int(
             conn.execute(
                 """
                 SELECT COUNT(*)
-                FROM sqf_document_assets
-                WHERE extraction_status != 'extracted'
+                FROM ksa_items ki
+                LEFT JOIN ksa_concept_links link ON link.ksa_id = ki.ksa_id
+                WHERE TRIM(COALESCE(ki.ksa_text_raw, '')) <> ''
+                  AND link.link_id IS NULL
                 """
             ).fetchone()[0]
         )
-        if unextracted_assets:
+        if unlinked_ksa_items:
             issues.append(
                 {
                     "severity": "error",
-                    "check": "document_extraction",
-                    "detail": f"{unextracted_assets} SQF document assets are not extracted.",
+                    "check": "ksa_concept_links",
+                    "detail": f"{unlinked_ksa_items} non-empty KSA rows are not linked to ontology concepts.",
                 }
             )
 
-        missing_job_levels = int(
+        atomic_without_concepts = int(
             conn.execute(
                 """
                 SELECT COUNT(*)
-                FROM sqf_duties d
-                LEFT JOIN sqf_job_levels_normalized jl ON jl.sqf_source_key = d.source_key
-                WHERE jl.sqf_job_level_id IS NULL
+                FROM ksa_atomic_items atom
+                LEFT JOIN ksa_atomic_concept_links link ON link.atomic_id = atom.atomic_id
+                WHERE link.link_id IS NULL
                 """
             ).fetchone()[0]
         )
-        if missing_job_levels:
+        if atomic_without_concepts:
             issues.append(
                 {
                     "severity": "error",
-                    "check": "sqf_normalization",
-                    "detail": f"{missing_job_levels} SQF API rows are not normalized as job levels.",
+                    "check": "atomic_ksa_concept_links",
+                    "detail": f"{atomic_without_concepts} atomic KSA rows are not linked to concepts.",
                 }
             )
 
-        eligible_mappings = int(
+        tasks_with_similarity = int(
             conn.execute(
                 """
-                SELECT COUNT(*)
-                FROM sqf_ncs_matches
-                WHERE filter_status = 'eligible'
+                SELECT COUNT(DISTINCT source_criteria_id)
+                FROM task_similarity_links
                 """
             ).fetchone()[0]
         )
-        if eligible_mappings == 0:
+        task_similarity_coverage = (
+            round(tasks_with_similarity / counts["performance_criteria"], 4)
+            if counts["performance_criteria"]
+            else 0.0
+        )
+        if counts["performance_criteria"] and task_similarity_coverage == 0:
             issues.append(
                 {
                     "severity": "error",
-                    "check": "sqf_ncs_mapping",
-                    "detail": "No eligible SQF-NCS mapping candidates are available.",
+                    "check": "task_similarity_links",
+                    "detail": "No task similarity links are available.",
                 }
             )
 
-        mapped_job_levels = int(
+        concepts_with_meanings = int(
             conn.execute(
                 """
-                SELECT COUNT(DISTINCT source_id)
-                FROM sqf_ncs_matches
-                WHERE filter_status = 'eligible'
+                SELECT COUNT(DISTINCT concept_id)
+                FROM ksa_meaning_candidates
                 """
             ).fetchone()[0]
         )
-        total_job_levels = counts["sqf_job_levels_normalized"]
-        mapping_coverage = round(mapped_job_levels / total_job_levels, 4) if total_job_levels else 0.0
-        if mapping_coverage < 0.5:
-            issues.append(
-                {
-                    "severity": "warning",
-                    "check": "mapping_coverage",
-                    "detail": f"Eligible SQF-NCS mapping coverage is {mapping_coverage:.1%}.",
-                }
-            )
-
-        chunk_matched_job_levels = int(
-            conn.execute(
-                """
-                SELECT COUNT(DISTINCT sqf_job_level_id)
-                FROM sqf_chunk_job_level_matches
-                WHERE review_status != 'rejected'
-                """
-            ).fetchone()[0]
+        ksa_meaning_coverage = (
+            round(concepts_with_meanings / counts["ontology_concepts"], 4)
+            if counts["ontology_concepts"]
+            else 0.0
         )
-        chunk_evidence_coverage = (
-            round(chunk_matched_job_levels / total_job_levels, 4) if total_job_levels else 0.0
-        )
-        if chunk_evidence_coverage < 0.3:
-            issues.append(
-                {
-                    "severity": "warning",
-                    "check": "chunk_evidence_coverage",
-                    "detail": f"Document chunk evidence coverage is {chunk_evidence_coverage:.1%}.",
-                }
-            )
-
-        framework_reference_documents = int(
+        candidate_definitions = int(
             conn.execute(
                 """
                 SELECT COUNT(*)
-                FROM sqf_document_sources
-                WHERE ontology_role IN ('framework_reference', 'development_manual')
-                  AND text_extraction_status = 'extracted'
+                FROM ontology_concepts
+                WHERE definition_status = 'candidate'
                 """
             ).fetchone()[0]
         )
-        if framework_reference_documents == 0:
+
+        linked_training_courses = int(
+            conn.execute(
+                """
+                SELECT COUNT(DISTINCT training_course_id)
+                FROM ncs_training_course_concept_links
+                """
+            ).fetchone()[0]
+        )
+        training_course_concept_coverage = (
+            round(linked_training_courses / counts["ncs_training_courses"], 4)
+            if counts["ncs_training_courses"]
+            else 0.0
+        )
+        if counts["ncs_training_courses"] and linked_training_courses == 0:
             issues.append(
                 {
                     "severity": "warning",
-                    "check": "framework_reference_documents",
-                    "detail": "No extracted KQF/SQF framework reference document is registered.",
+                    "check": "training_course_concept_links",
+                    "detail": "No training courses are linked to KSA concepts.",
                 }
             )
+        element_linked_training_courses = int(
+            conn.execute(
+                """
+                SELECT COUNT(DISTINCT training_course_id)
+                FROM ncs_training_course_element_links
+                """
+            ).fetchone()[0]
+        )
+        goal_linked_training_courses = int(
+            conn.execute(
+                """
+                SELECT COUNT(DISTINCT training_course_id)
+                FROM training_goal_concept_links
+                """
+            ).fetchone()[0]
+        )
+        delivery_linked_training_courses = int(
+            conn.execute(
+                """
+                SELECT COUNT(DISTINCT training_course_id)
+                FROM training_delivery_relations
+                """
+            ).fetchone()[0]
+        )
+        training_course_element_coverage = (
+            round(element_linked_training_courses / counts["ncs_training_courses"], 4)
+            if counts["ncs_training_courses"]
+            else 0.0
+        )
+        training_goal_concept_coverage = (
+            round(goal_linked_training_courses / counts["ncs_training_courses"], 4)
+            if counts["ncs_training_courses"]
+            else 0.0
+        )
+        training_delivery_coverage = (
+            round(delivery_linked_training_courses / counts["ncs_training_courses"], 4)
+            if counts["ncs_training_courses"]
+            else 0.0
+        )
+        if counts["ncs_training_courses"] and element_linked_training_courses == 0:
+            issues.append(
+                {
+                    "severity": "warning",
+                    "check": "training_course_element_links",
+                    "detail": "No training courses are linked to competency elements.",
+                }
+            )
+        if counts["ncs_training_courses"] and delivery_linked_training_courses == 0:
+            issues.append(
+                {
+                    "severity": "warning",
+                    "check": "training_delivery_relations",
+                    "detail": "No training delivery relations are available.",
+                }
+            )
+
+        saved_training_recommendations = int(
+            conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM education_recommendation_evidence
+                WHERE source_table = 'ncs_training_courses'
+                """
+            ).fetchone()[0]
+        )
 
         return {
             "ok": not any(issue["severity"] == "error" for issue in issues),
             "counts": counts,
             "metrics": {
-                "eligible_mappings": eligible_mappings,
-                "mapped_job_levels": mapped_job_levels,
-                "mapping_coverage": mapping_coverage,
-                "chunk_matched_job_levels": chunk_matched_job_levels,
-                "chunk_evidence_coverage": chunk_evidence_coverage,
-                "framework_reference_documents": framework_reference_documents,
+                "unlinked_ksa_items": unlinked_ksa_items,
+                "atomic_without_concepts": atomic_without_concepts,
+                "tasks_with_similarity": tasks_with_similarity,
+                "task_similarity_coverage": task_similarity_coverage,
+                "concepts_with_ksa_meanings": concepts_with_meanings,
+                "ksa_meaning_coverage": ksa_meaning_coverage,
+                "candidate_definitions": candidate_definitions,
+                "linked_training_courses": linked_training_courses,
+                "training_course_concept_coverage": training_course_concept_coverage,
+                "element_linked_training_courses": element_linked_training_courses,
+                "training_course_element_coverage": training_course_element_coverage,
+                "goal_linked_training_courses": goal_linked_training_courses,
+                "training_goal_concept_coverage": training_goal_concept_coverage,
+                "delivery_linked_training_courses": delivery_linked_training_courses,
+                "training_delivery_coverage": training_delivery_coverage,
+                "saved_training_recommendations": saved_training_recommendations,
             },
             "issues": issues,
-            "note": "This validates readiness for evidence-based recommendation, not official SQF recognition.",
+            "note": "This validates NCS task/KSA/training-course recommendation readiness.",
         }
     finally:
         conn.close()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Export and validate the NCS-SQF ontology graph.")
+    parser = argparse.ArgumentParser(description="Export and validate the NCS ontology graph.")
     parser.add_argument("action", choices=["export-jsonld", "validate"])
     parser.add_argument("--db", type=Path, default=Path("data/processed/ncs.db"))
-    parser.add_argument("--out", type=Path, default=Path("exports/ncs_sqf_ontology.jsonld"))
+    parser.add_argument("--out", type=Path, default=Path("exports/ncs_training_ontology.jsonld"))
     parser.add_argument("--include-excluded-mappings", action="store_true")
     parser.add_argument("--no-chunk-evidence", action="store_true")
     parser.add_argument("--chunk-evidence-limit", type=int, default=50000)

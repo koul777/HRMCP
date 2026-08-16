@@ -3,26 +3,38 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+*.egg-info/
+build/
+dist/
 .venv/
 venv/
+.codex/
 .env
 .env.*
 !.env.example
+.mcp.json
 logs/
 *.log
 
 data/raw/*
 !data/raw/.gitkeep
-!data/raw/*.xlsx
-!data/raw/*.xls
+data/ocr/tessdata/*.traineddata
 data/processed/*
 !data/processed/.gitkeep
-!data/processed/*.db
 data/processed/*.db-*
-reports/*.json
-reports/*.md
-reports/pdf_pages/
-reports/**/*.json
-reports/**/*.md
+docs/reference/ncs_hrd_guide_codex_readable.md
+docs/reference/ncs_hrd_guide_reference.*
+reports/*
+!reports/.gitkeep
 !docs/*.md
 exports/
+tmp/
+ci-smoke*/
+
+.vercel
+
+# Vercel serving DB is published as a GitHub Release asset, not committed.
+# See docs/README_VERCEL_HTTPS.md and docs/INTERVIEW_SERVING_DB.md.
+api/ncs_interview_serving_release.db
+api/*.db
+api/ncs_interview_db.zip

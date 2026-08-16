@@ -214,6 +214,41 @@ class LearningRecommendationTests(unittest.TestCase):
             conn.close()
             self.assertEqual(count, 1)
 
+    def test_refresh_learning_module_links_empty_scope_does_not_refresh_all(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "ncs.db")
+            initialize_database(conn)
+            seed_ncs_unit(conn)
+            upsert_study_modules(
+                conn,
+                [
+                    {
+                        "ncsLclasCd": "02",
+                        "ncsMclasCd": "02",
+                        "ncsSclasCd": "02",
+                        "ncsSubdCd": "01",
+                        "learnModulSeq": "LM-HR-1",
+                        "learnModulName": "HR workforce planning",
+                        "learnModulText": "Learn workforce planning.",
+                    }
+                ],
+            )
+
+            empty_summary = refresh_learning_module_links(conn, module_seqs=[])
+            link_count_after_empty = conn.execute(
+                "SELECT COUNT(*) FROM learning_module_unit_links"
+            ).fetchone()[0]
+            full_summary = refresh_learning_module_links(conn, module_seqs=None)
+            link_count_after_full = conn.execute(
+                "SELECT COUNT(*) FROM learning_module_unit_links"
+            ).fetchone()[0]
+            conn.close()
+
+            self.assertEqual(empty_summary["modules_processed"], 0)
+            self.assertEqual(link_count_after_empty, 0)
+            self.assertEqual(full_summary["modules_processed"], 1)
+            self.assertGreater(link_count_after_full, 0)
+
     def test_recommendation_uses_trusted_mapping_and_saves_audit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "ncs.db"

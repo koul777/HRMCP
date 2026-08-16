@@ -1,51 +1,19 @@
-# NCS-SQF 연결 취지
+# Current Purpose
 
-근거 문서: `C:\Users\dd\Desktop\미래+교육+품질,+NCS에서+길을+찾다.pdf`
+This project implements NCS-based HR training recommendation.
 
-## 핵심 해석
+NCS is treated as a structured job-competency source:
 
-이 프로젝트는 NCS와 SQF를 단순히 코드로 조인하는 작업이 아니다. NCS가 지향하는 직무능력 중심 사회, 교육훈련 품질 보장, 중복학습 완화, 평생경력개발경로 가시화, 인력 이동 촉진을 데이터 구조로 구현하는 작업이다.
+- competency units describe work capability;
+- competency elements group execution units;
+- performance criteria are task nodes;
+- KSA items describe task performance requirements;
+- training courses are linked to units and KSA concepts.
 
-## KQF와 SQF
-
-KQF는 NCS 등을 바탕으로 학력, 자격, 현장경력, 교육훈련 이수 결과가 상호 연계될 수 있도록 한 국가 수준의 수준체계다.
-
-SQF는 산업별 현장에서 통용되는 직무를 도출하여 표준화하고, 직무수행에 필요한 능력을 구조화한 것이다. SQF는 국가직무능력표준 등을 바탕으로 교육훈련-학위-자격-현장경력을 연계해 활용하는 체계다.
-
-## 온톨로지에 반영할 개념
-
-- `KQF`: 국가 수준의 역량/수준체계.
-- `SQF`: 산업별 직무와 직무수준을 중심으로 학습결과와 노동시장 요구를 연결하는 체계.
-- `Sector`: 근로자의 경력이동이 가능한 산업 활동분야 또는 영역.
-- `Qualification`: 직업이나 특정 업무 수행에 필요한 자질, 소질, 능력. 학위, 직업자격, 교육훈련 이수증 등 공식적으로 인정받은 역량을 포함한다.
-- `Framework`: 학위, 자격, 교육훈련 등을 장착하기 위한 골격 또는 틀.
-- `SQFJob`: 지식과 기술이 유사하여 수직적 경력이동이 일반적으로 이루어지는 업무의 집합.
-- `SQFLevel`: 지식과 기술의 난이도·복잡성에 따라 SQF 직무를 구분하는 기준.
-- `SQFJobLevel`: SQF 직무를 SQF 수준에 따라 구분한 것으로, 직무역량이 객관적으로 구분되는 일의 단위.
-- `JobCompetency`: 특정 직무수준을 수행하기 위해 요구되는 지식, 기술, 자율성, 책임성 및 관련 능력.
-
-## 구현 원칙
-
-1. SQF 직무수준을 추천과 갭분석의 기본 단위로 둔다.
-2. NCS 능력단위는 SQF 직무수준을 설명하고 학습목표로 전환하는 원자 단위로 사용한다.
-3. SQF API의 교육훈련·자격·경력 필드가 비어 있으면 NCS 능력단위요소, 수행준거, KSA를 학습목표로 변환해 보완한다.
-4. SQF 자료실 보고서 PDF/OCR/HWP 청크는 직무수준과 매핑의 근거로 사용한다.
-5. 추천 결과는 공식 인정 판정이 아니라 근거 기반 보조 판단으로 표현한다.
-
-## 서비스 질문으로 바꾸는 방식
-
-나쁜 질문:
+The MCP should answer training questions through the path:
 
 ```text
-인사기획 하려면 교육 뭐 들어?
+Task query -> NCS task -> KSA concepts -> training courses -> evidence
 ```
 
-좋은 질문:
-
-```text
-NCS 인사기획 능력단위를 기준으로 SQF 경영관리 > 인사 직무수준 중 어떤 수준과 연결되는지 보고,
-부족한 능력단위와 KSA를 학습목표로 바꿔 교육 추천을 해줘.
-근거는 SQF API, NCS DB, SQF 보고서 청크를 함께 보여줘.
-```
-
-이 프로젝트의 MCP는 사용자의 자연어 질문을 좋은 질문 형태로 재해석해 `SQFJobLevel -> MappingCandidate -> NCSCompetencyUnit -> Element/Criterion/KSA -> Recommendation` 경로로 답해야 한다.
+SQF is not used in the active recommendation path.

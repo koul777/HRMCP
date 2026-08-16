@@ -1,239 +1,233 @@
-# 하네스 엔지니어링
+# Harness Engineering
 
-## 에이전트 우선 목표
+The active harness supports NCS source loading, NCS API enrichment, KSA/task ontology preprocessing, NCS training-course collection, and task-based training recommendation.
 
-이 저장소는 Codex 같은 에이전트가 프로젝트 상태를 읽고, 파이프라인을 실행하고, 결과를 검증하고, 다음 작업을 이어갈 수 있도록 설계한다. 긴 설명보다 실행 가능한 점검 명령과 짧은 기준 문서를 우선한다.
-
-## 지식 맵
-
-- `AGENTS.md`: 에이전트와 기여자를 위한 짧은 작업 지도.
-- `ARCHITECTURE.md`: 데이터 소스, 스키마, 불변조건의 기준 문서.
-- `docs/NCS_MCP_PRD.md`: 제품 요구사항과 프로젝트 의도.
-- `docs/NCS_SQF_ONTOLOGY.md`: NCS-SQF 매핑 지식그래프와 추천 설계.
-- `docs/NCS_SQF_HARNESS_ENGINEERING.md`: NCS-SQF 경영지원 MVP 실행 루프.
-- `docs/HARNESS_ENGINEERING.md`: 실행 하네스와 에이전트 작업 방식.
-- `reports/*.md`: 전처리, 품질진단, API 보강 결과의 증거 자료.
-
-## 하네스 명령
-
-저장소 루트에서 실행한다.
+## Required Checks
 
 ```powershell
-$env:PYTHONPATH="C:\Workplace\NCS_MCP\src"
+$env:PYTHONPATH="C:\workspace\NCS_MCP\src"
 python scripts\ncs_harness.py inspect
-python scripts\ncs_harness.py smoke
 python scripts\ncs_harness.py lint
-python scripts\ncs_harness.py plan-elements --batch-size 8000
-python scripts\ncs_harness.py dashboard
-```
-
-선택 단계 실행:
-
-```powershell
-python scripts\ncs_harness.py pipeline --quality --smoke
-python scripts\ncs_harness.py pipeline --api-standards --api-subd --smoke
-python scripts\ncs_harness.py pipeline --api-elements-hr --smoke
-python scripts\ncs_harness.py pipeline --api-sqf --sqf-major-code 02
-python scripts\ncs_harness.py build-sqf-mappings
-python scripts\ncs_harness.py export-package
-```
-
-전체 전처리는 `--reset` 사용 시 기존 DB를 재생성한다.
-
-```powershell
-python scripts\ncs_harness.py pipeline --preprocess --reset --quality --smoke
-```
-
-## 피드백 루프
-
-큰 변경 후에는 아래 세 가지를 통과해야 한다.
-
-```powershell
+python scripts\ncs_harness.py smoke
 python -m unittest discover -s tests -v
-python scripts\ncs_harness.py lint
-python scripts\ncs_harness.py smoke
+python scripts\ncs_harness.py quality-gates --out reports\quality_gates.json --markdown-out reports\quality_gates.md
 ```
 
-데이터 변경이 있었다면 관련 리포트를 결과 요약에 포함한다.
+`quality-gates` is a read-only health check. It opens the SQLite DB in read-only
+mode, does not initialize or migrate schema, and returns exit code `1` only when
+at least one gate has `status: "fail"`. A warning-only report is still a valid
+run and should be used as the next data-quality backlog.
 
-- `preprocess_summary.md`
-- `quality_issues.md`
-- `api_join_report.md`
-- `api_subd_report.md`
-- `api_elements_report.md`
-- `api_sqf_report.md`
-
-## NCS-SQF 온톨로지 루프
-
-NCS-SQF 작업은 바로 추천 알고리즘을 만들지 않고, 먼저 실제 데이터를 파악한 뒤 관계 그래프를 만든다. PDF 요약의 원칙처럼 테이블 값보다 의미 관계, 근거 추적, 설명 가능성을 우선한다. 1차 MVP는 SQF `02 > 경영관리 > 경영지원`과 NCS `02 경영·회계·사무`다.
-
-1. 상태 확인:
+Use the transition gate only when reviewed scenarios exist:
 
 ```powershell
-python scripts\ncs_harness.py inspect
+python scripts\ncs_harness.py quality-gates --include-transition-eval --transition-limit 5 --transition-scenario-limit 20 --out reports\quality_gates_with_transition.json
 ```
 
-확인 항목:
+Candidate or auto-generated transition scenarios are not hard-gated. If no
+`human_reviewed`, `reviewed`, or `accepted` scenarios exist, the command reports
+a warning instead of failing the run.
+`--transition-limit` controls recommendations per scenario, while
+`--transition-scenario-limit` caps how many trusted scenarios the quality gate
+evaluates.
 
-- `sqf_service_key_present`가 `true`인지 확인한다.
-- `counts.sqf_duties`로 SQF 적재 건수를 확인한다.
-- `api_sqf_report.md`가 최신인지 확인한다.
+## Training-Course Collection
 
-2. SQF 샘플 수집:
+Collect one major classification:
 
 ```powershell
-python scripts\ncs_harness.py pipeline --api-sqf --sqf-major-code 02
+python scripts\ncs_harness.py collect-training-courses --major-code 02 --num-of-rows 500
 ```
 
-`/openapi26`의 실제 응답은 Swagger 예시와 다를 수 있다. 현재 확인된 구조는 최상위 `data` 배열과 `dataInfo` 객체다. 정상 코드는 `000`, 빈 데이터는 `002 empty data`로 온다.
-
-3. 전체 SQF 수집:
+Collect all major classifications discovered from `classifications`:
 
 ```powershell
-python scripts\ncs_harness.py pipeline --api-sqf
+python scripts\ncs_harness.py collect-training-courses --all-majors --num-of-rows 500
 ```
 
-수집 후에는 대분류별 건수, 교육훈련·자격·경력 필드 충실도, 빈 대분류를 확인한다. 현재 관찰상 SQF 교육훈련 필드는 일부 산업에만 채워져 있으므로, 추천은 SQF 필드와 NCS 능력단위/KSA를 함께 사용해야 한다.
+The collector stores rows in `ncs_training_courses` and exact NCS unit-code links in `ncs_training_course_unit_links`.
+Storage commands require an explicit scope: pass `--all-majors` for operating
+collection or `--major-code` for a scoped debug refresh. The same rule applies to
+`collect-job-base` and legacy `collect-study-modules`.
 
-4. 매핑 그래프 생성:
+Qualification coverage should be checked before relying on qualification evidence
+in recommendations:
 
 ```powershell
-python scripts\ncs_harness.py build-sqf-mappings
-python scripts\ncs_harness.py build-sqf-mappings --all-sqf --major-code 02
-python scripts\ncs_harness.py pipeline --build-sqf-mappings --smoke
-python scripts\ncs_harness.py evaluate --scope-tag business_accounting_office_02
+python scripts\ncs_harness.py qualification-summary --limit 10
 ```
 
-NCS와 SQF는 1:1 구조가 아니므로 `sameAs`로 단정하지 않는다. SQF 직무수준과 NCS 능력단위 사이에는 별도 매핑 객체를 둔다.
-추천/갭분석 기본 매핑은 `score >= 7`, `relation != related`, `review_status != rejected` 품질 게이트를 통과해야 한다.
+The summary includes total/attempted/unattempted unit counts, collection coverage,
+status counts, and error concentration by NCS major code.
 
-```text
-Mapping
-  source: SQF duty level
-  target: NCS competency unit | element | KSA
-  relation: requires | closeMatch | partiallyCovers
-  confidence: official | lexical | reviewed
-  evidenceSource: SQF API | NCS DB | API | human review
-  version: source version
-```
-
-5. 추천 검증:
-
-사용자가 원하는 업무를 질의하면 결과는 단순 교육명 목록이 아니라 아래 근거를 포함해야 한다.
-
-- 매칭된 SQF 직무와 직무수준
-- 직접 제공된 교육훈련·자격·경력 조건
-- 연결된 NCS 능력단위
-- 부족한 능력단위요소, 수행준거, KSA
-- 매칭 점수와 근거 텍스트
-
-공식 인정·평가는 MVP 범위가 아니다. 하네스의 성공 기준은 역량 탐색, 교육 추천, 부족역량 설명이 재현 가능하고 근거 추적 가능하게 나오는 것이다.
-
-6. 핸드오프 패키지 생성:
+Before retrying qualification API errors, generate a read-only hygiene report.
+This does not call the API or mutate retry metadata; it classifies cached
+errors, shows missing `last_error_type` / `attempt_count` / `next_retry_at`
+metadata, and warns when broad retries are likely to hit rate limits again.
 
 ```powershell
-python scripts\ncs_harness.py export-package
-python scripts\ncs_harness.py export-package --db-mode hardlink
+python scripts\ncs_harness.py qualification-retry-hygiene --limit 50 --out reports\qualification_retry_hygiene.json --markdown-out reports\qualification_retry_hygiene.md
 ```
 
-첫 명령은 문서와 SQL만 생성한다. 두 번째 명령은 `exports/ncs_sqf_output/data/db/ncs_sqf.sqlite` 전달용 DB 이름을 하드링크로 만든다.
+Only use `retry-qualification-errors` after inspecting that report, preferably
+with a small `--limit-units`, a request delay, and low retry count while
+rate-limit errors dominate.
 
-## 대시보드와 수작업 정제
-
-대시보드는 단순 진행률 화면이 아니라 온톨로지 준비 전처리 워크벤치다. Codex가 전처리를 실행한 뒤 사람이 다음을 확인한다.
+Use the rate-limit circuit breaker on every broad qualification retry or
+all-unit collection batch:
 
 ```powershell
-python scripts\ncs_dashboard.py --host 127.0.0.1 --port 8765
+python scripts\ncs_harness.py retry-qualification-errors --limit-units 50 --num-of-rows 50 --max-pages 1 --request-delay 2 --max-retries 1 --retry-backoff-seconds 30 --stop-after-rate-limit-errors 3 --report-path reports\qualification_error_report.md
+python scripts\ncs_harness.py collect-qualification-items --all-units --limit-units 100 --num-of-rows 50 --max-pages 1 --request-delay 2 --max-retries 1 --retry-backoff-seconds 30 --stop-after-rate-limit-errors 3
 ```
 
-사용자가 파일로 실행할 때는 저장소 루트의 `run_dashboard.bat`를 더블클릭한다.
+If the command output includes `stopped_early=true` or
+`stop_reason=rate_limited`, stop the collection wave, keep the generated error
+report, and wait for the API retry window before increasing `--limit-units`.
+Do not use `--include-not-due` or `--refresh` for routine recovery runs.
+`--refresh` is only for an explicit re-collection decision after reviewing the
+cached status table and API conditions.
 
-브라우저에서 `http://127.0.0.1:8765`를 연다. 대시보드는 다음을 제공한다.
-
-- 단계별 전처리 진행률과 잔여 작업 확인
-- 분류코드별 DB 전처리 결과 조회
-- 능력단위별 API 매칭 상태와 요소 검증 상태 조회
-- Excel에는 없고 API에만 존재하는 능력단위 조회
-- `/NCS006` 요소 검증 상태 확인
-- 전처리 완료/미처리/실패 항목 클릭 후 상세 리스트 조회
-- 품질 이슈 목록 조회
-- 분류, 능력단위, 요소, 수행준거, KSA의 수작업 정제본 입력
-- 이슈 해결 처리
-
-수작업 정제는 원문을 바꾸지 않는다. refined 계열 필드에만 저장하고 `review_status='human_reviewed'`로 표시한다.
-LLM/사람 검토용 JSONL 왕복도 원문을 덮어쓰지 않고 `refinement_jobs`에만 저장한다.
+## Ontology Preprocessing
 
 ```powershell
-python scripts\ncs_harness.py refine export-jsonl --issue-types short_ksa,duplicate_text --limit 100 --out data/refinement/export.jsonl
-python scripts\ncs_harness.py refine import-jsonl --input data/refinement/results.jsonl
+python scripts\ncs_harness.py preprocess-ncs-ontology --atomic-ksa --task-ksa-relations --task-similarity --training-course-links
 ```
 
-## 학습모듈/API/보고서 보강 루프
+This command:
 
-교육 추천용 학습모듈은 API 수집을 먼저 시도하고, API가 비어 있거나 특정 능력단위의 모듈을 반환하지 않으면 공식 PDF와 보고서 근거로 보강한다. 학습모듈 API의 저장 기준 필드는 `결과코드`, `결과메시지`, `대분류코드`, `대분류코드명`, `중분류코드`, `중분류코드명`, `소분류코드`, `소분류코드명`, `세분류코드`, `세분류코드명`, `학습모듈번호`, `학습모듈명`, `학습모듈내용`이다.
+- preserves raw KSA in `ksa_items`;
+- creates atomic KSA candidates in `ksa_atomic_items`;
+- links KSA to `ontology_concepts`;
+- creates task KSA relations and task similarity;
+- links training courses to KSA concepts in `ncs_training_course_concept_links`.
 
-API 확인과 수집:
+## Recommendation Smoke
 
 ```powershell
-python scripts\ncs_harness.py query-study-modules --major-code 02 --module-name "인사기획"
-python scripts\ncs_harness.py collect-study-modules --major-code 02 --num-of-rows 200
-python scripts\ncs_harness.py collect-study-modules --major-code 02 --module-name "교육훈련" --num-of-rows 50
+python scripts\ncs_harness.py recommend-training-for-task --query "인력채용" --limit 5 --compact --no-save
 ```
 
-판단 기준:
+Recommendation output must include NCS task context, KSA concepts, training courses, and evidence. It must not depend on SQF or NCS study modules.
 
-- API에서 정확한 `학습모듈번호`와 `학습모듈명`이 오면 `ncs_learning_modules`에 API 원천 행으로 저장한다.
-- API가 `002 empty data`를 반환하거나 정확 모듈이 없으면 공식 NCS 학습모듈 PDF를 보강 원천으로 등록한다.
-- `LM0202020101_19v2_인사기획.pdf` 같은 파일은 `role = ncs_learning_module`이며, `학습모듈의 개요`에서 목표, 선수학습, 내용체계, 핵심 용어를 우선 추출한다.
-- `report.pdf` 형태의 NCS 활용패키지는 `role = ncs_learning_package`이며, 수행준거, KSA, 자가진단, 직무기술서 근거로 사용한다.
-- SQF 보고서와 개발 매뉴얼은 `role = sqf_report` 또는 `framework_reference`이며, SQF 직무수준과 NCS 능력단위의 필수/선택 관계 근거로 사용한다.
+Recommendation responses include both the full `recommendations` list and compact
+`recommendation_groups`:
 
-자료가 방대하면 전체 파일을 한 번에 밀어 넣지 않고 대상 범위, API 공백, 추천 실패 케이스 순으로 처리한다. 운영형 v1 기준에서는 대상 SQF/NCS 범위의 공식 보고서와 학습모듈 PDF가 모두 `extracted` 상태여야 하므로, 우선순위 큐를 만들어 자산 단위로 끝까지 등록한다.
+- `primary`: direct target-scope or strong training-goal/element evidence.
+- `supplemental`: useful support courses for missing or adjacent competencies.
+- `adjacent`: low-confidence nearby courses for reference only.
 
-로컬 PDF 등록:
+Each grouped item includes compact decision fields for UI and operator review:
+`evidence_strength`, `evidence_strength_summary`, `evidence_highlights`,
+`delivery`, `coverage_counts`, `coverage_breakdown`, `coverage_summary`,
+`score_component_highlights`, `direct_unit_evidence`, and
+`source_element_covered`.
+
+Compact cards should expose small named evidence samples, not only counts.
+`evidence_highlights` keeps top KSA, ability-element, qualification, and
+job-base labels so a user can see why the course was returned without loading
+the raw full `recommendations` payload. `why_recommended` summarizes the most
+important named evidence and match-basis details in a few lines. When a query is short or broad,
+`input_quality.candidate_queries` provides structured candidate follow-up
+queries.
+
+For user-facing transition checks, prefer compact output:
 
 ```powershell
-python scripts\ncs_harness.py import-ontology-source --input "<LM...pdf>" --title "NCS 학습모듈 - <능력단위명>" --role ncs_learning_module
-python scripts\ncs_harness.py import-ontology-source --input "<NCS-package.pdf>" --title "NCS 활용패키지 - <직무명>" --role ncs_learning_package
-python scripts\ncs_harness.py import-ontology-source --input "<SQF-report.pdf>" --title "SQF 보고서 - <분야명>" --role sqf_report
-python scripts\ncs_harness.py preprocess-sqf-documents --only-unprocessed --chunk-chars 2400 --overlap-chars 250 --ocr-empty --ocr-lang kor+eng --ocr-dpi 160
+python scripts\ncs_harness.py recommend-training-transition --current-query "노무관리" --target-query "인사기획" --limit 5 --compact --no-save
 ```
 
-DB 반영 기준:
+The compact view keeps scope interpretation, KSA gaps, job-base/qualification
+signals, and course cards, while omitting raw `recommendations`, `audit`, and
+`source_payload` debug details. Low-evidence supplemental courses are displayed
+as `adjacent_reference` so operators do not read weak evidence as a primary
+recommendation.
 
-- 공식 학습모듈 PDF는 `ncs_learning_modules.source_payload`에 `source_type = local_pdf_learning_module`, 문서 ID, 파일 해시, 원본 경로, 원본 학습모듈번호를 남긴다.
-- PDF의 `LM0202020101_19v2`와 현재 DB의 `0202020101_23v3`처럼 버전이 다르면 기본 능력단위 코드로 연결하고, 원래 버전은 evidence에 보존한다.
-- `learning_module_unit_links`에는 `link_method = local_pdf_unit_code`, 높은 `confidence_score`, 추출 근거 문장을 저장한다.
-- 중복 다운로드 파일은 내용 해시로 같은 원천인지 확인하고 중복 삽입하지 않는다.
-- 추천기는 `major_code`만 맞는 학습모듈을 추천하지 않는다. 능력단위 링크, 개념 링크, 모듈명/본문의 강한 근거가 없으면 NCS-derived 학습목표로 fallback한다.
+Invalid task locator input for `recommend-training-for-task` and invalid
+`review-triage` inputs print structured JSON errors and exit non-zero. Treat
+those as failed automation steps.
 
-## 운영 원칙
-
-- 셸 명령에서는 한글명 필터보다 코드 필터를 우선한다. 예: `major_code=02`, `middle_code=02`, `small_code=02`, `sub_code=01`.
-- `/NCS006` 전체 수집은 트래픽 제한 때문에 배치로 실행한다.
-- 같은 실패가 반복되면 더 큰 프롬프트를 던지지 말고 하네스, 문서, 불변조건 검사를 개선한다.
-
-## SQF Library Collection
-
-SQF library reports are collected as ontology source evidence. Metadata is stored in `sqf_library_posts`, `sqf_library_files`, and `sqf_document_sources`; attachments are downloaded into `data/raw/sqf_docs`.
+Human-review queue commands support dry runs for planning without mutating
+`quality_issues`:
 
 ```powershell
-python scripts\ncs_harness.py collect-sqf-library --start-page 0 --end-page 10
-python scripts\ncs_harness.py collect-sqf-library --start-page 0 --end-page 10 --download --timeout 60
-python scripts\ncs_harness.py pipeline --collect-sqf-library --download-sqf-library --timeout 60
-python scripts\ncs_harness.py build-sqf-sqlite-model
-python scripts\ncs_harness.py preprocess-sqf-documents --chunk-chars 2400 --overlap-chars 250
-python scripts\ncs_harness.py build-sqf-sqlite-model --summary
+python scripts\ncs_harness.py prepare-hr-review-queue --concept-limit 300 --goal-link-limit 300 --dry-run
+python scripts\ncs_harness.py prepare-ontology-review-queue --concept-limit 500 --goal-link-limit 500 --relation-limit 500 --dry-run
 ```
 
-The downloader posts to `/common/file/downloadFile.do` with `sysDstinCd`, `fileMstky`, `filedetlSeq`, and `downlDstinCd`.
-
-Local policy or framework PDFs can be registered as ontology source evidence without adding a new scraper:
+Use `review-priority` to inspect the highest-impact open review items with
+target context attached:
 
 ```powershell
-$env:PDF_PATH=(Get-Item 'C:\Users\dd\Desktop\미래+교육+품질,+NCS에서+길을+찾다.pdf').FullName
-python scripts\ncs_harness.py import-ontology-source --input "$env:PDF_PATH" --title "미래 교육 품질, NCS에서 길을 찾다" --role framework_reference
-python scripts\ncs_harness.py preprocess-sqf-documents --only-unprocessed --ocr-empty --ocr-lang kor+eng --ocr-dpi 160
+python scripts\ncs_harness.py review-priority --limit 20 --per-issue-type-limit 5
 ```
 
-Use this for KQF/SQF purpose documents, development manuals, and other conceptual references. The file is copied under `data/raw/ontology_sources` and then processed by the same PDF/OCR/chunk pipeline as downloaded SQF reports.
+The default priority set focuses on training-goal concept links, task-KSA
+relations, core ontology concepts, criteria format issues, API mismatches, and
+suspected typos. Bulk duplicate/short-KSA hygiene issues are intentionally
+excluded from this operator queue.
+
+Export a stable JSONL seedpack when a human reviewer needs an auditable input
+file:
+
+```powershell
+python scripts\ncs_harness.py export-review-seedpack --limit 50 --per-issue-type-limit 5 --out reports\review_seedpack.jsonl --markdown-out reports\review_seedpack.md --source-report-path reports\review_priority.md
+```
+
+The seedpack is export-only. It leaves `decision`, `reviewer_id`, `reviewed_at`,
+and `rationale` empty for a person to fill later, and it does not mutate the DB
+or mark anything `human_reviewed`. Use it to keep manual approval separate from
+model refinement and raw-source preservation.
+
+Review seedpacks and triage reports are written as UTF-8. On Windows, inspect
+them with an explicit encoding to avoid console mojibake:
+
+```powershell
+Get-Content -Encoding utf8 reports\review_seedpack.jsonl -TotalCount 3
+Get-Content -Encoding utf8 reports\transition_scenario_seedpack.md
+```
+
+Transition gold scenarios have a separate review seedpack because they gate
+recommendation readiness rather than ontology/link review:
+
+```powershell
+python scripts\ncs_harness.py export-transition-scenario-seedpack --review-status candidate,candidate_auto --scenario-limit 10 --recommendation-limit 5 --out reports\transition_scenario_seedpack.jsonl --markdown-out reports\transition_scenario_seedpack.md --source-report-path reports\training_transition_evaluation.md
+```
+
+This command is also export-only. It bundles each candidate scenario with the
+current recommendation hits, recall, precision, and expected courses so a human
+reviewer can approve, reject, or defer the scenario in a later audited apply
+step.
+
+Build a read-only triage view when you want one operator handoff across quality
+gates, review-priority items, and transition scenario review candidates:
+
+```powershell
+python scripts\ncs_harness.py review-triage --quality-report reports\quality_gates_with_transition.json --review-priority-report reports\review_priority.json --transition-seedpack reports\transition_scenario_seedpack.jsonl --out reports\review_triage.json --markdown-out reports\review_triage.md
+```
+
+`review-triage` reads existing artifacts only. It categorizes warnings into
+human-review debt, collection stability, and data-quality work; it does not
+update review statuses, apply seedpack decisions, or mutate source data.
+
+## Transition Evaluation
+
+Use trusted-only evaluation for readiness reporting:
+
+```powershell
+python scripts\ncs_harness.py evaluate-training-transitions --trusted-only --limit 5
+```
+
+Use `--review-status` for candidate exploration and `--scenario-limit` for fast
+sample checks. `--limit` controls recommendations per scenario, while
+`--scenario-limit` controls how many scenarios are evaluated.
+
+```powershell
+python scripts\ncs_harness.py evaluate-training-transitions --review-status candidate,candidate_auto --limit 5 --scenario-limit 10
+```
+
+`generate-training-transition-eval-set` writes separate report sections for
+`all_non_rejected`, `trusted_reviewed`, and `candidate_or_auto` so candidate
+metrics are not mistaken for reviewed readiness. In JSON output, the mixed
+summary is named `all_non_rejected_evaluation`; readiness automation should read
+`evaluations.trusted_reviewed`.

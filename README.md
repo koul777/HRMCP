@@ -1,286 +1,342 @@
-# NCS-SQF Ontology MCP
+# NCS MCP
 
-이 저장소는 NCS정보망 Excel DB, NCS 기준정보 API, SQF API, SQF 자료실 보고서를 하나의 SQLite 기반 지식베이스로 정규화하고 MCP 서버로 노출하는 프로젝트다.
+NCS MCP normalizes Korean National Competency Standards (NCS) source data and
+public API responses into a SQLite knowledge graph, then exposes that graph
+through MCP tools for HR ontology search and education/training
+recommendations.
 
-목표는 단순 문서 검색이 아니다. 사용자가 원하는 업무를 물었을 때 관련 SQF 직무수준, NCS 능력단위, 능력단위요소, 수행준거, KSA, 교육훈련·학위·자격·현장경력 근거를 연결해 교육 추천과 역량 갭분석에 활용하는 것이다.
+The active product scope is NCS-centered. SQF and NCS learning-module flows may
+remain in historical tables or compatibility code, but they are legacy/reference
+surfaces unless an operator explicitly reactivates them.
 
-## 프로젝트 취지
+Recommendations are education-planning guidance, not official qualification,
+licensing, hiring, legal, or compliance decisions.
 
-`미래 교육 품질, NCS에서 길을 찾다.pdf`의 관점에 따르면 NCS는 학벌이나 연공서열이 아니라 직무능력과 성과 중심의 능력사회를 구현하기 위한 정책 수단이다. NCS는 교육훈련, 자격, 채용으로 확산되고, 궁극적으로 국가역량체계와 연결된다.
+## Publication Status
 
-KQF와 SQF의 연결 취지는 다음과 같이 정리한다.
+This repository can be published as a private or draft developer preview when
+lint, smoke, unit tests, dashboard verification, and release-readiness evidence
+are current. Do not describe it as a stable public release until
+`release_ready=true` in the active release-readiness report.
 
-- KQF는 NCS 등을 바탕으로 학력, 자격, 현장경력, 교육훈련 이수 결과가 상호 연계될 수 있도록 하는 국가 수준 체계다.
-- SQF는 산업별 현장에서 통용되는 직무를 도출·표준화하고, 직무수행에 필요한 능력을 구조화하는 산업 수준 체계다.
-- SQF는 교육훈련, 학위, 자격, 현장경력을 산업별 직무와 수준에 장착하기 위한 골격이다.
-- SQF 직무수준은 인사관리, 채용, 배치, 교육 추천, 경력경로 설계의 실무 단위로 본다.
-- 이 프로젝트는 공식 인정 판정기가 아니라 근거 기반 추천·탐색·갭분석 보조 시스템이다.
+CI enforces encoding, unit, lint, and smoke checks. The source-boundary audit is
+available as a `workflow_dispatch` deployment gate and must be run with
+`enforce_source_boundary=true` before pushing or sharing a source-only preview
+branch. Dashboard verification and release-readiness evidence are manual
+release gates that must be regenerated and attached or linked from the private
+preview note before sharing the preview.
 
-## 현재 구축 상태
+Known non-preview blockers must be disclosed in preview notes: pending human
+review for ontology concepts, training-goal links, and task-KSA relations;
+qualification collection coverage below the release target; and any provenance
+reconfirmation packet that still requires a human decision.
 
-현재 `data/processed/ncs.db`에는 다음 레이어가 들어 있다.
+## What It Does
+
+- Preserves NCS hierarchy, competency units, elements, performance criteria, and
+  raw KSA rows from source files.
+- Builds KSA/task ontology tables without overwriting source KSA text.
+- Links training-course goals, hours, methods, facilities, and NCS unit evidence
+  to task/KSA recommendation evidence.
+- Supports career-transition and task-based training recommendations with
+  compact evidence summaries.
+- Adds supporting evidence from NCS career paths, qualification-item APIs, and
+  job-base competency APIs.
+- Exposes a small MCP tool surface for NCS structure search, ontology lookup,
+  training-course search, and AI-HR education-path planning.
+- Includes a separate read-only institutional chat reference UI/API that routes
+  natural-language requests to public tools and blocks operator workflows.
+
+## Data Flow
 
 ```text
-NCS Excel/API
+NCS Excel/source data
   -> classifications
   -> competency_units
   -> competency_elements
   -> performance_criteria
   -> ksa_items
 
-SQF API
-  -> sqf_duties
-  -> sqf_industry_sectors
-  -> sqf_jobs_normalized
-  -> sqf_levels
-  -> sqf_job_levels_normalized
-  -> sqf_recognition_evidence
+KSA ontology preprocessing
+  -> ksa_atomic_items
+  -> ontology_concepts
+  -> ksa_concept_links
+  -> criteria_concept_links
+  -> task_ksa_concept_relations
+  -> task_similarity_links
 
-SQF 자료실 보고서
-  -> sqf_library_posts
-  -> sqf_library_files
-  -> sqf_document_sources
-  -> sqf_document_assets
-  -> sqf_document_pages
-  -> sqf_document_chunks
-  -> sqf_chunk_job_level_matches
+Training-course API
+  -> ncs_training_courses
+  -> ncs_training_course_unit_links
+  -> ncs_training_course_concept_links
+  -> ncs_training_course_element_links
+  -> training_goal_concept_links
+  -> training_delivery_relations
 
-NCS-SQF 연결
-  -> sqf_ncs_matches
-  -> MCP tools
-  -> dashboard review
-  -> JSON-LD export
+MCP / harness
+  -> query routing
+  -> KSA gap and transfer analysis
+  -> training recommendation with evidence
 ```
 
-대표 수치:
+## Quick Start In 5 Steps
 
-- NCS 능력단위: 13,435건
-- NCS 능력단위요소: 47,620건
-- 수행준거: 196,658건
-- KSA: 574,279건
-- SQF API 직무/직무수준 원천: 2,397건
-- 정규화 SQF 직무수준: 2,397건
-- SQF/온톨로지 원천 문서: 106건
-- 추출 문서 자산: 126개, 모두 extracted
-- PDF/OCR/HWP 기반 문서 청크: 9,108건
-- 문서 청크와 SQF 직무수준 후보 근거: 49,940건
-- SQF-NCS 후보 매핑: 22,642건
+Run commands from the repository root.
 
-## 설치
+1. Create and activate a Python 3.11+ environment.
 
 ```powershell
 cd C:\workspace\NCS_MCP
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+```
+
+2. Install the package in editable mode.
+
+```powershell
 python -m pip install -e .
+```
+
+3. Create local configuration.
+
+```powershell
 Copy-Item .env.example .env
 ```
 
-`.env`에는 실제 키를 넣는다. 키는 커밋하지 않는다.
+Edit `.env` so paths point to your local NCS source file and generated SQLite
+database:
 
 ```text
 NCS_EXCEL_PATH=C:/workspace/NCS_MCP/data/raw/ncs_info_network_db_2026_02.xlsx
 NCS_DB_PATH=C:/workspace/NCS_MCP/data/processed/ncs.db
-NCS_SERVICE_KEY=your_data_go_kr_service_key
-NCS_SQF_SERVICE_KEY=your_decoded_sqf_data_go_kr_service_key
+NCS_SERVICE_KEY=<your_data_go_kr_service_key>
+NCS_TRAINING_COURSE_SERVICE_KEY=<your_ncs_training_course_data_go_kr_service_key>
+NCS_QUALIFICATION_SERVICE_KEY=<your_ncs_qualification_item_data_go_kr_service_key>
+NCS_JOB_BASE_SERVICE_KEY=<your_ncs_job_base_competency_data_go_kr_service_key>
+NCS_MCP_ENABLE_OPERATOR_TOOLS=0
+NCS_MCP_READ_ONLY=1
+NCS_MCP_MAX_CONCURRENT_RECOMMENDATIONS=2
+NCS_MCP_RECOMMENDATION_QUEUE_TIMEOUT_SECONDS=30
+NCS_API_BASE_URL=https://apis.data.go.kr/B490007/hrdkapi
+NCS_API_TIMEOUT_SECONDS=30
 ```
 
-## 핵심 명령
+4. Provide source data or a prepared SQLite DB.
 
-상태 확인:
+Large source files and generated DBs are not part of the normal source package.
+For a local run, place your NCS Excel/source files under `data/raw` and generate
+`data/processed/ncs.db`, or mount/copy a prepared DB to the path configured by
+`NCS_DB_PATH`. For a GitHub developer preview, keep generated SQLite databases
+out of the source commit; if a prepared DB is needed, publish it as a controlled
+private LFS/artifact handoff with the retrieval path documented in the preview
+note.
+
+Common preprocessing commands:
 
 ```powershell
 $env:PYTHONPATH="C:\workspace\NCS_MCP\src"
 python scripts\ncs_harness.py inspect
+python scripts\ncs_harness.py preprocess-ncs-ontology --atomic-ksa
+python scripts\ncs_harness.py preprocess-ncs-ontology --task-ksa-relations
+python scripts\ncs_harness.py preprocess-ncs-ontology --task-similarity
+python scripts\ncs_harness.py preprocess-ncs-ontology --training-course-links
 ```
 
-검증:
+5. Verify and run the MCP server.
 
 ```powershell
-python -m unittest discover -s tests -v
+$env:PYTHONPATH="C:\workspace\NCS_MCP\src"
 python scripts\ncs_harness.py lint
 python scripts\ncs_harness.py smoke
+python -m unittest discover -s tests -v
 python scripts\ncs_harness.py ontology validate
+python scripts\benchmark_chatbot_readiness.py --db data\processed\ncs.db --out reports\institutional_chatbot_readiness_benchmark.json --markdown-out reports\institutional_chatbot_readiness_benchmark.md --current-query "HR manager" --target-query "HR planning"
 ```
 
-NCS 전처리:
+STDIO mode:
 
 ```powershell
-python scripts\ncs_harness.py pipeline --preprocess --reset --quality --smoke
-python scripts\ncs_harness.py pipeline --api-standards --api-subd --smoke
-python scripts\ncs_harness.py pipeline --api-elements-hr --smoke
+.\run_ncs_mcp_stdio.cmd
 ```
 
-SQF API 수집:
+The STDIO launcher respects an existing `NCS_DB_PATH`; set it to a separately
+mounted or handed-off SQLite DB when the generated DB is not inside the checkout.
+
+HTTP mode:
 
 ```powershell
-python scripts\ncs_harness.py pipeline --api-sqf --sqf-major-code 02
+.\run_ncs_mcp_http.cmd
 ```
 
-SQF 자료실 수집과 문서 전처리:
+Default HTTP endpoints:
+
+- MCP: `http://127.0.0.1:8766/mcp`
+- Health: `http://127.0.0.1:8766/health`
+- Readiness: `http://127.0.0.1:8766/ready`
+
+The launchers default to read-only SQLite serving and suppress the operator MCP
+surface. A hardened loopback-only container example is available at
+`deploy/compose.internal.yml`; identity, TLS, and user-level authorization
+still belong at the institution gateway described in
+`docs/INSTITUTIONAL_CHATBOT_SELF_HOST_GUIDE.md`.
+Non-loopback HTTP binding is rejected unless `--allow-remote-bind` is supplied
+directly, or `NCS_MCP_ALLOW_REMOTE_BIND=1` is set for the Windows HTTP launcher.
+That explicit opt-in does not provide authentication or TLS.
+
+### Vercel MCP/ChatGPT quick run
+
+Vercel has now been wired as a serverless Streamable-HTTP surface, so ChatGPT 연결은
+주소 한 줄(`/api/mcp`)만 넣으면 됩니다.
+
+- `vercel.json` defines the function entrypoint.
+- `api/mcp.py` exports `app` (ASGI) from `ncs_mcp.server`.
+
+1. Prepare serving DB:
+   - 추천 방식: 공개 가능한 URL을 `NCS_DB_URL`로 지정하고 자동 다운로드.
+   - 대안: 배포 패키지에 `tmp/ncs_interview_serving_release.db`를 넣었으면
+     `_bootstrap`이 `/tmp/ncs_interview_serving.db`로 자동 복사합니다.
+   - 또는 `NCS_DB_PATH`와 `NCS_DB_URL`를 직접 지정합니다.
+2. Set read-only, public MCP defaults in Vercel environment:
+
+```text
+NCS_MCP_READ_ONLY=1
+NCS_MCP_ENABLE_OPERATOR_TOOLS=0
+NCS_MCP_DISABLE_DNS_REBINDING_PROTECTION=1
+NCS_MCP_STREAMABLE_HTTP_PATH=/mcp
+NCS_MCP_MAX_CONCURRENT_RECOMMENDATIONS=2
+NCS_DB_PATH=/tmp/ncs_interview_serving.db
+```
+
+3. Deploy via Vercel.
 
 ```powershell
-python scripts\ncs_harness.py collect-sqf-library --download --timeout 60
-python scripts\ncs_harness.py build-sqf-sqlite-model
-python scripts\ncs_harness.py preprocess-sqf-documents --ocr-empty --ocr-lang kor+eng --ocr-dpi 160
-python scripts\ncs_harness.py build-sqf-precision-matches --min-score 9 --max-matches-per-chunk 8
+vercel deploy --prod
 ```
 
-증분 문서 처리:
+4. Connect ChatGPT (or any remote MCP client) to this single MCP URL:
 
-```powershell
-python scripts\ncs_harness.py preprocess-sqf-documents --only-unprocessed --ocr-empty
-python scripts\ncs_harness.py build-sqf-precision-matches --asset-id 122
+```text
+https://<your-vercel-domain>/api/mcp
 ```
 
-전체 SQF-NCS 후보 매핑:
+ChatGPT/Custom GPT 에서는 아래 JSON의 `url`만 넣으면 바로 등록됩니다.
 
-```powershell
-python scripts\ncs_harness.py build-sqf-mappings --all-sqf --duty-limit 5000 --limit-per-duty 10
-```
-
-JSON-LD export:
-
-```powershell
-python scripts\ncs_harness.py ontology export-jsonld --out exports\ncs_sqf_ontology.jsonld
-```
-
-Local ontology source import:
-
-```powershell
-$env:PDF_PATH=(Get-Item 'C:\Users\dd\Desktop\미래+교육+품질,+NCS에서+길을+찾다.pdf').FullName
-python scripts\ncs_harness.py import-ontology-source --input "$env:PDF_PATH" --title "미래 교육 품질, NCS에서 길을 찾다" --role framework_reference
-python scripts\ncs_harness.py preprocess-sqf-documents --only-unprocessed --ocr-empty --ocr-lang kor+eng --ocr-dpi 160
-python scripts\ncs_harness.py ontology validate
-```
-
-This path is for policy or conceptual sources such as KQF/SQF purpose PDFs. The importer copies the file into `data/raw/ontology_sources`, registers it in `sqf_library_posts`, `sqf_library_files`, and `sqf_document_sources`, then the normal PDF/OCR/chunk pipeline can extract it as graph evidence.
-
-대시보드:
-
-```powershell
-python scripts\ncs_dashboard.py --host 127.0.0.1 --port 8765
-```
-
-## MCP 실행
-
-```powershell
-python -m ncs_mcp.server
-```
-
-Claude Desktop 또는 MCP host 설정 예시:
+For ChatGPT Custom GPT (Agent/Tools config), a minimum config payload is:
 
 ```json
 {
   "mcpServers": {
-    "ncs-mcp": {
-      "command": "python",
-      "args": ["C:/workspace/NCS_MCP/src/ncs_mcp/server.py"],
-      "env": {
-        "NCS_DB_PATH": "C:/workspace/NCS_MCP/data/processed/ncs.db"
-      }
+    "ncs-training-http": {
+      "url": "https://<your-vercel-domain>/api/mcp"
     }
   }
 }
 ```
 
-## 주요 MCP 도구
-
-NCS:
-
-- `list_classifications`
-- `get_competency_units`
-- `get_unit_structure`
-- `get_element_detail`
-- `get_performance_criteria`
-- `get_ksa`
-- `search_ncs`
-
-SQF/NCS-SQF:
-
-- `search_sqf_jobs`
-- `get_sqf_job_level`
-- `map_sqf_to_ncs`
-- `analyze_gap`
-- `recommend_next_ncs_units`
-- `recommend_education_for_duty`
-- `explain_mapping`
-- `get_sqf_ontology_summary`
-- `search_sqf_document_chunks`
-- `search_sqf_precision_matches`
-- `get_sqf_ontology_job_level`
-
-Resources/Prompts:
-
-- `ontology://schema`
-- `sqf://mvp/management-support`
-- `sqf_gap_report_prompt`
-
-## 온톨로지 모델
-
-핵심 노드:
-
-- `NCSCategory`
-- `NCSCompetencyUnit`
-- `NCSUnitElement`
-- `PerformanceCriterion`
-- `KSA`
-- `SQFSector`
-- `SQFJob`
-- `SQFLevel`
-- `SQFJobLevel`
-- `RecognitionEvidence`
-- `MappingCandidate`
-- `DocumentEvidence`
-
-핵심 관계:
-
-- `NCSCategory -> NCSCompetencyUnit`
-- `NCSCompetencyUnit -> NCSUnitElement`
-- `NCSUnitElement -> PerformanceCriterion`
-- `NCSUnitElement -> KSA`
-- `SQFSector -> SQFJob`
-- `SQFJob -> SQFJobLevel`
-- `SQFJobLevel -> RecognitionEvidence`
-- `SQFJobLevel -> MappingCandidate -> NCSCompetencyUnit`
-- `SQFDocumentChunk -> DocumentEvidence -> SQFJobLevel`
-
-매핑은 `sameAs`로 단정하지 않는다. 기본 관계는 `closeMatch`, `partiallyCovers`, `related`, `strongEvidence`, `supportingEvidence`로 둔다. `accepted`, `reviewed`, `human_reviewed`가 아닌 후보는 항상 `candidate`로 다룬다.
-
-## 교육 추천 로직
-
-SQF API의 `duty_education_training`, `duty_qualification`, `duty_career`, `duty_license`는 일부 직무에만 채워져 있다. 따라서 추천은 다음 순서로 만든다.
-
-1. SQF 직무수준 직접 근거가 있으면 우선 사용한다.
-2. 직접 근거가 부족하면 SQF-NCS 후보 매핑을 가져온다.
-3. 연결된 NCS 능력단위의 요소, 수행준거, KSA를 학습목표로 변환한다.
-4. SQF 보고서 청크 근거를 붙여 왜 이 직무수준과 연결되는지 설명한다.
-5. 공식 인정 판정이 아니라 후보 기반 추천임을 명시한다.
-
-예시:
+Health/ready checks:
 
 ```text
-질문: 인사기획을 하려면 어떤 교육을 받아야 해?
-
-해석:
-NCS 인사기획(0202020101_23v3)은 SQF 경영관리 > 인사(6)에 closeMatch 후보로 연결된다.
-SQF API의 교육훈련 필드는 비어 있으므로 NCS 인사기획의 능력단위요소, 수행준거, KSA를 학습목표로 변환한다.
-보고서 근거는 2022년 SQF 개발 최종보고서(인사조직, 재무, 회계 분야)의 인사(6) 직무역량체계 청크를 사용한다.
+https://<your-vercel-domain>/api/health
+https://<your-vercel-domain>/api/ready
 ```
 
-## 데이터 정책
+Reference chat mode:
 
-- `.env`와 API 키는 커밋하지 않는다.
-- 원천 Excel과 생성 SQLite DB는 Git LFS로 관리한다.
-- 원문 필드는 수정하지 않는다.
-- 사람 또는 LLM이 보정한 값은 refined 계열 필드에 저장한다.
-- 추천/갭분석은 근거 기반 보조 정보이며 공식 인정·자격 부여가 아니다.
+```powershell
+.\run_ncs_institutional_chat.cmd
+```
 
-## 관련 문서
+- Chat UI: `http://127.0.0.1:8780/`
+- Chat API: `http://127.0.0.1:8780/api/chat`
+- Readiness: `http://127.0.0.1:8780/ready`
 
-- `AGENTS.md`
-- `ARCHITECTURE.md`
-- `docs/HARNESS_ENGINEERING.md`
-- `docs/NCS_MCP_PRD.md`
-- `docs/NCS_SQF_PROJECT_SYSTEM.md`
-- `docs/NCS_SQF_ONTOLOGY.md`
-- `docs/SQF_SQLITE_ONTOLOGY_SYSTEM.md`
-- `docs/CHATGPT_PRO_PROGRAM_BRIEF.md`
+The local reference chat requires read-only mode and disabled operator tools.
+For an institution gateway deployment, configure authenticated identity/group
+headers, Origin enforcement, and pseudonymous audit logging as documented in
+`docs/INSTITUTIONAL_CHATBOT_SELF_HOST_GUIDE.md`. The checked-in integration
+evidence template remains unverified until the institution supplies target-host
+SSO, TLS, privacy, backup, and operations evidence.
+
+## API Key Issuance
+
+The NCS API keys are issued outside this repository. Use the Korean public data
+portal that hosts the HRDK/NCS APIs, apply for access to the required services,
+and copy the issued service keys into your local `.env`.
+
+Required or commonly used keys:
+
+- `NCS_SERVICE_KEY`: NCS reference API key.
+- `NCS_TRAINING_COURSE_SERVICE_KEY`: NCS training-course API key.
+- `NCS_QUALIFICATION_SERVICE_KEY`: NCS unit qualification-item API key.
+- `NCS_JOB_BASE_SERVICE_KEY`: NCS job-base competency API key.
+
+Operational notes:
+
+- Do not commit `.env`.
+- Do not paste real keys into reports, logs, issues, or screenshots.
+- Keep key values out of `/health`, `/ready`, and MCP responses; only key
+  presence booleans are safe to expose.
+- Some broad collection jobs are rate limited. Use guarded batch commands with
+  request delays, retry limits, and `--stop-after-rate-limit-errors`.
+
+## Collection Scope
+
+Production collection and preprocessing should cover the full NCS scope, not a
+single major code. Code `02` is acceptable only for examples, smoke tests, and
+API connectivity checks.
+
+```powershell
+python scripts\ncs_harness.py collect-training-courses --all-majors --num-of-rows 500
+python scripts\ncs_harness.py collect-job-base --all-majors --num-of-rows 500
+python scripts\ncs_harness.py qualification-retry-hygiene --ncs006-checkpoint-path reports\checkpoint_ncs006_element_api_status_<DATE>_current.json --out reports\qualification_retry_hygiene_<DATE>.json --markdown-out reports\qualification_retry_hygiene_<DATE>.md
+python scripts\ncs_harness.py qualification-coverage-plan --target-ratio 0.9 --batch-size 100 --ncs006-checkpoint-path reports\checkpoint_ncs006_element_api_status_<DATE>_current.json --out reports\qualification_collection_coverage_plan_<DATE>.json --markdown-out reports\qualification_collection_coverage_plan_<DATE>.md --csv-out reports\qualification_collection_coverage_plan_<DATE>.csv
+python scripts\ncs_harness.py agent-queue-status --queue reports\aihr_agent_queue_<DATE>.json --out reports\aihr_agent_queue_status_<DATE>.json --markdown-out reports\aihr_agent_queue_status_<DATE>.md
+python scripts\ncs_harness.py collect-qualification-items --all-units --limit-units 100 --num-of-rows 50 --max-pages 1 --request-delay 2 --max-retries 1 --retry-backoff-seconds 30 --stop-after-rate-limit-errors 3 --ncs006-checkpoint-path reports\checkpoint_ncs006_element_api_status_<DATE>_current.json
+```
+
+Qualification collection records unit-level status and is designed to resume.
+Run the final collection command only after the queue status shows the guarded
+item is operator-ready and there are no safety violations. Use `--refresh` only
+when deliberately recollecting completed or empty units.
+
+## Example Recommendation Commands
+
+```powershell
+python scripts\ncs_harness.py recommend-training-transition --current-query "labor management" --target-query "HR planning" --limit 5 --compact --no-save
+python scripts\ncs_harness.py recommend-training-for-task --query "recruitment" --limit 5 --compact --no-save
+python scripts\ncs_harness.py route-ncs-query "labor management to HR planning education path"
+```
+
+Recommendation ranking distinguishes stronger direct training-goal evidence from
+weaker token, element-implied, or inherited evidence. Broad/generic KSA links are
+down-weighted so they do not dominate specialized recommendations.
+
+## MCP Tool Surface
+
+The active public surface focuses on read-heavy NCS search and recommendation:
+
+- NCS structure and ontology lookup.
+- Training-course search and detail.
+- Task-based and transition-based training recommendations.
+- AI-HR education-path planning with `query_route`, `recommended_path`,
+  `training_system_matrix`, and guide-trace evidence.
+
+Operator and review tools are not part of the default public execution surface.
+Recommendation tools executed through meta execution must use no-save behavior.
+
+## Release And Operations References
+
+- Architecture: `ARCHITECTURE.md`
+- Vercel HTTPS deployment guide: `docs/README_VERCEL_HTTPS.md`
+- Interview serving DB policy: `docs/INTERVIEW_SERVING_DB.md`
+- Harness and validation: `docs/HARNESS_ENGINEERING.md`
+- MCP release checklist: `docs/MCP_RELEASE_CHECKLIST.md`
+- Productization strategy: `docs/AIHR_PRODUCTIZATION_STRATEGY.md`
+- Deployment runbook: `docs/AIHR_DEPLOYMENT_RUNBOOK.md`
+- Institutional chatbot self-host guide: `docs/INSTITUTIONAL_CHATBOT_SELF_HOST_GUIDE.md`
+
+The generated SQLite graph is a local prepared knowledge graph. Current full
+builds can be large, so Docker/internal deployments should mount
+`data/processed` as an external volume rather than copying DB files into an
+image.

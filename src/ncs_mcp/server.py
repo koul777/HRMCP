@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import argparse
+import inspect
 import json
+import sqlite3
 
 if __package__ in {None, ""}:  # pragma: no cover - direct script support
     import sys
@@ -12,16 +15,31 @@ from contextlib import contextmanager
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from starlette.responses import JSONResponse
 
 from ncs_mcp.config import load_settings
+from ncs_mcp.career_path import (
+    career_path_summary as ncs_career_path_summary,
+    import_career_paths_csv as ncs_import_career_paths_csv,
+)
 from ncs_mcp.db import (
     clamp_limit,
     connect,
     initialize_database,
     normalize_concept_key,
     now_utc,
+    prepare_ontology_human_review_queue as db_prepare_ontology_human_review_queue,
+    recommend_task_transitions as db_recommend_task_transitions,
     row_to_dict,
     rows_to_dicts,
+)
+from ncs_mcp.error_codes import error_metadata
+from ncs_mcp.helpers import DISCLAIMER, mask_sensitive_payload, not_found_response
+from ncs_mcp.job_base_api import (
+    collect_job_base_competencies as job_base_collect_competencies,
+    fetch_job_base_page as job_base_fetch_page,
+    job_base_summary as job_base_cached_summary,
+    search_job_base_links as job_base_search_links,
 )
 from ncs_mcp.ontology import (
     MVP_JOB_NAME,
@@ -44,6 +62,27 @@ from ncs_mcp.ontology import (
     sqf_summary,
 )
 from ncs_mcp.mapping_policy import REVIEWED_STATUSES, apply_mapping_filter
+from ncs_mcp.ncs_reference import (
+    build_ncs_derived_learning_plans as ncs_ref_build_derived_plans,
+    build_report_training_courses as ncs_ref_build_report_training_courses,
+    extract_ncs_reference_entities as ncs_ref_extract_entities,
+    import_ncs_reference_docx as ncs_ref_import_docx,
+    import_ncs_reference_html as ncs_ref_import_html,
+    link_reference_entities_to_ncs as ncs_ref_link_entities,
+    recommend_education_by_concepts as ncs_ref_recommend_by_concepts,
+    recommend_learning_modules_by_ncs as ncs_ref_recommend_modules,
+    review_exact_learning_module_name_links as ncs_ref_review_exact_module_links,
+    review_learning_module_ncs_link as ncs_ref_review_module_link,
+    search_ncs_reference_chunks as ncs_ref_search_chunks,
+)
+from ncs_mcp.qualification_api import (
+    collect_qualification_links as qualification_collect_links,
+    fetch_qualification_page as qualification_fetch_page,
+    qualification_error_report as qualification_cached_error_report,
+    qualification_summary as qualification_cached_summary,
+    retry_qualification_error_units as qualification_retry_error_units,
+    search_qualification_links as qualification_search_links,
+)
 from ncs_mcp.recommendation import (
     explain_education_recommendation as recommendation_explain_education,
     get_learning_path_for_sqf_job as recommendation_get_learning_path,
@@ -52,15 +91,145 @@ from ncs_mcp.recommendation import (
     search_learning_modules as recommendation_search_learning_modules,
 )
 from ncs_mcp.sqf_sqlite import sqf_model_summary
+from ncs_mcp.training_recommendation import (
+    build_training_course_ontology_links as training_build_course_links,
+    compact_training_task_response as training_compact_task_response,
+    compact_training_transition_response as training_compact_transition_response,
+    get_training_course as training_get_course,
+    recommend_training_for_task as training_recommend_for_task,
+    recommend_training_transition as training_recommend_transition,
+    resolve_ncs_query_scope as training_resolve_ncs_query_scope,
+    search_training_courses as training_search_courses,
+)
+from ncs_mcp import tool_registry
 
 
 mcp = FastMCP("ncs-mcp")
+
+CURRENT_TRANSPORT = "stdio"
+
+
+READINESS_CORE_TABLES = (
+    "competency_units",
+    "performance_criteria",
+    "ksa_items",
+    "ncs_training_courses",
+)
+
+
+@mcp.custom_route("/health", methods=["GET"], include_in_schema=False)
+async def health_check(_request: Any) -> JSONResponse:
+    surface = current_mcp_tool_surface()
+    runtime = runtime_health_metadata()
+    transport = current_transport_metadata()
+    return JSONResponse(
+        {
+            "status": "ok" if runtime["database"]["ready"] else "degraded",
+            "name": "ncs-mcp",
+            "transport": transport["transport"],
+            "endpoint": transport["endpoint"],
+            "tools": {
+                "exposed": len(surface["all_tools"]),
+                "user": len(surface["user_tools"]),
+                "operator": len(surface["operator_tools"]),
+                "legacy_present": len(surface["legacy_tools_present"]),
+                "unexpected": len(surface["unexpected_tools"]),
+            },
+            "runtime": runtime,
+        }
+    )
+
+
+@mcp.custom_route("/ready", methods=["GET"], include_in_schema=False)
+async def readiness_check(_request: Any) -> JSONResponse:
+    runtime = runtime_health_metadata()
+    ready = bool(runtime["database"]["ready"])
+    return JSONResponse(
+        {
+            "status": "ready" if ready else "not_ready",
+            "name": "ncs-mcp",
+            "runtime": runtime,
+        },
+        status_code=200 if ready else 503,
+    )
 
 
 def db():
     conn = connect(load_settings().db_path)
     initialize_database(conn)
     return conn
+
+
+def runtime_health_metadata() -> dict[str, Any]:
+    settings = load_settings()
+    api_keys = {
+        "service_key_present": bool(settings.service_key),
+        "training_course_service_key_present": bool(settings.training_course_service_key),
+        "qualification_service_key_present": bool(settings.qualification_service_key),
+        "job_base_service_key_present": bool(settings.job_base_service_key),
+        "sqf_service_key_present": bool(settings.sqf_service_key),
+        "study_module_service_key_present": bool(settings.study_module_service_key),
+    }
+    return {
+        "database": database_readiness_metadata(settings.db_path),
+        "operator_tools_enabled": settings.operator_tools_enabled,
+        "api_keys": api_keys,
+        "api_key_present_count": sum(1 for present in api_keys.values() if present),
+    }
+
+
+def current_transport_metadata() -> dict[str, str | None]:
+    if CURRENT_TRANSPORT == "streamable-http":
+        endpoint = mcp.settings.streamable_http_path
+    elif CURRENT_TRANSPORT == "sse":
+        endpoint = mcp.settings.sse_path
+    else:
+        endpoint = None
+    return {"transport": CURRENT_TRANSPORT, "endpoint": endpoint}
+
+
+def database_readiness_metadata(db_path) -> dict[str, Any]:
+    configured = bool(db_path)
+    exists = bool(configured and db_path.exists())
+    result: dict[str, Any] = {
+        "configured": configured,
+        "exists": exists,
+        "openable": False,
+        "ready": False,
+        "core_tables": {},
+    }
+    if not configured:
+        result["error"] = {"code": "database_not_configured"}
+        return result
+    if not exists:
+        result["error"] = {"code": "database_missing"}
+        return result
+    try:
+        db_uri = db_path.resolve().as_uri() + "?mode=ro"
+        conn = sqlite3.connect(db_uri, uri=True)
+        try:
+            result["openable"] = True
+            for table_name in READINESS_CORE_TABLES:
+                exists_row = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                    (table_name,),
+                ).fetchone()
+                if exists_row is None:
+                    result["core_tables"][table_name] = {"exists": False, "row_count": None}
+                    continue
+                row_count = int(conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0])
+                result["core_tables"][table_name] = {"exists": True, "row_count": row_count}
+            result["ready"] = all(
+                item.get("exists") and int(item.get("row_count") or 0) > 0
+                for item in result["core_tables"].values()
+            ) and len(result["core_tables"]) == len(READINESS_CORE_TABLES)
+            if not result["ready"]:
+                result["error"] = {"code": "database_not_ready"}
+        finally:
+            conn.close()
+    except Exception as exc:  # pragma: no cover - defensive health path
+        result["error"] = {"code": "database_unopenable", "type": type(exc).__name__}
+    return result
 
 
 @contextmanager
@@ -132,8 +301,36 @@ def tool_response(
 
 
 def error_response(code: str, **fields: Any) -> dict[str, Any]:
+    safe_fields = mask_sensitive_payload(fields)
+    metadata = error_metadata(code)
+    reserved = {"code", "category", "retryable", "known", "severity", "description"}
+    structured_fields = {key: value for key, value in safe_fields.items() if key not in reserved}
+    if "not_found" in code.lower() or code.upper() == "NOT_FOUND":
+        detail = ", ".join(f"{key}={value}" for key, value in safe_fields.items())
+        message = code if not detail else f"{code}: {detail}"
+        response = not_found_response(message)
+        suggestions = response.get("error", {}).get("suggestions", [])
+        not_found_fields = {
+            key: value
+            for key, value in structured_fields.items()
+            if key not in {"message", "suggestions"}
+        }
+        response["error"] = {
+            "code": code,
+            **metadata,
+            "message": message,
+            "suggestions": suggestions,
+            **not_found_fields,
+        }
+        if len(not_found_fields) != len(safe_fields):
+            response["error"]["details"] = safe_fields
+        response["data"] = {**response.get("data", {}), **safe_fields}
+        return response
+    error_payload = {"code": code, **metadata, **structured_fields}
+    if len(structured_fields) != len(safe_fields):
+        error_payload["details"] = safe_fields
     return tool_response(
-        {"error": {"code": code, **fields}},
+        {"error": error_payload},
         data={},
         audit={"data_sources": ["SQLite NCS/SQF knowledge base"], "generated_at": now_utc()},
         ok=False,
@@ -166,6 +363,16 @@ def unit_path(row) -> dict[str, Any]:
         "duty_definition": row["duty_def_api"],
         "duty_order": row["duty_order"],
     }
+
+
+def has_not_found_error(result: dict[str, Any]) -> bool:
+    error = result.get("error")
+    code = ""
+    if isinstance(error, dict):
+        code = str(error.get("code", ""))
+    elif error:
+        code = str(error)
+    return code.upper() == "NOT_FOUND" or "not_found" in code.lower()
 
 
 @mcp.resource("ontology://schema")
@@ -220,6 +427,241 @@ def sqf_gap_report_prompt(
 
 
 @mcp.tool()
+def ncs_search(query: str = "", scope: str = "all", limit: int = 20) -> dict[str, Any]:
+    """Search NCS classification/unit/element/criteria/KSA records through one tool."""
+    normalized_scope = scope if scope in {"unit", "element", "criteria", "all"} else "all"
+    if not query:
+        result = list_classifications(limit=limit)
+        rows = result.get("classifications", [])
+        if not rows:
+            return not_found_response("NCS 분류 목록을 찾을 수 없습니다.")
+        return tool_response(
+            {"query": query, "scope": "classification", "classifications": rows},
+            audit={
+                "data_sources": ["classifications", "competency_units"],
+                "returned": len(rows),
+                "generated_at": now_utc(),
+            },
+        )
+    result = search_ncs(query=query, scope=normalized_scope, limit=limit)
+    rows = result.get("results", [])
+    if not rows:
+        return not_found_response(f"NCS 검색 결과가 없습니다: {query}")
+    return tool_response(
+        result,
+        audit={
+            "data_sources": [
+                "classifications",
+                "competency_units",
+                "competency_elements",
+                "performance_criteria",
+                "ksa_items",
+            ],
+            "returned": len(rows),
+            "generated_at": now_utc(),
+        },
+    )
+
+
+@mcp.tool()
+def ncs_unit_detail(
+    unit_code: str,
+    include: list[str] | None = None,
+    text_version: str = "raw",
+) -> dict[str, Any]:
+    """Return one NCS unit with selected elements, criteria, KSA, training, and qualification evidence."""
+    include_set = set(include or ["elements", "criteria", "ksa"])
+    result = get_unit_structure(unit_code, text_version=text_version)
+    if has_not_found_error(result):
+        return not_found_response(f"NCS 능력단위를 찾을 수 없습니다: {unit_code}")
+    if "elements" not in include_set:
+        result.pop("elements", None)
+    elif result.get("elements"):
+        for element in result["elements"]:
+            if "criteria" not in include_set:
+                element.pop("performance_criteria", None)
+            if "ksa" not in include_set:
+                element.pop("ksa", None)
+    with open_db() as conn:
+        if "training" in include_set:
+            result["training_courses"] = training_search_courses(conn, unit_code=unit_code, limit=20)
+        if "qualification" in include_set:
+            result["qualification_links"] = qualification_search_links(conn, unit_code=unit_code, limit=20)
+    return tool_response(
+        result,
+        audit={
+            "data_sources": [
+                "competency_units",
+                "competency_elements",
+                "performance_criteria",
+                "ksa_items",
+                "ncs_training_courses",
+                "ncs_qualification_items",
+            ],
+            "generated_at": now_utc(),
+        },
+    )
+
+
+@mcp.tool()
+def ncs_training(
+    query: str | None = None,
+    training_course_id: int | None = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Search NCS training courses or return one course by id."""
+    if training_course_id is not None:
+        result = get_training_course(training_course_id)
+        if has_not_found_error(result):
+            return not_found_response(f"훈련과정을 찾을 수 없습니다: {training_course_id}")
+        return result
+    result = search_training_courses(query=query, limit=limit)
+    rows = result.get("training_courses") or result.get("data", {}).get("training_courses", [])
+    if not rows:
+        return not_found_response(f"훈련과정 검색 결과가 없습니다: {query or ''}".strip())
+    return result
+
+
+@mcp.tool()
+def ncs_analysis(
+    mode: str,
+    query: str | None = None,
+    unit_code: str | None = None,
+    concept_type: str | None = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Search career path, qualification, job-base, or ontology evidence through one analysis tool."""
+    if mode == "career_path":
+        result = get_career_path_summary(limit=limit)
+        items = result.get("career_paths") or result.get("data", {}).get("career_paths", [])
+    elif mode == "qualification":
+        result = search_qualification_items(
+            unit_code=unit_code,
+            qualification_name=query,
+            limit=limit,
+        )
+        items = result.get("qualification_links") or result.get("data", {}).get("qualification_links", [])
+    elif mode == "job_base":
+        result = search_job_base_competencies(
+            unit_code=unit_code,
+            competency_name=query,
+            limit=limit,
+        )
+        items = result.get("job_base_links") or result.get("data", {}).get("job_base_links", [])
+    elif mode == "ontology":
+        result = search_ontology_concepts(
+            query=query,
+            concept_type=concept_type,
+            limit=limit,
+        )
+        items = result.get("concepts") or result.get("data", {}).get("concepts", [])
+    else:
+        return error_response(
+            "unsupported_analysis_mode",
+            mode=mode,
+            allowed=["career_path", "qualification", "job_base", "ontology"],
+        )
+    if not items:
+        return not_found_response(f"{mode} 분석 결과가 없습니다.")
+    return result
+
+
+@mcp.tool()
+def ncs_discover_tools(intent: str = "") -> dict[str, Any]:
+    """Discover the compact NCS MCP tool surface by user intent or category."""
+    surface = current_mcp_tool_surface()
+    matches = tool_registry.discover_tools_for_intent(
+        intent,
+        executable_tool_names=tool_registry.NCS_EXECUTABLE_TOOL_NAMES,
+        available_tool_names=set(surface["all_tools"]),
+    )
+    return tool_response(
+        {
+            "intent": intent,
+            "matched_categories": matches,
+            "exposed_tool_count": len(surface["all_tools"]),
+            "execution_note": (
+                "Use ncs_execute_tool for read-only user tools. Operator/review tools must be called directly."
+            ),
+            "hidden_operator_note": (
+                "Review/operator tools are hidden unless NCS_MCP_ENABLE_OPERATOR_TOOLS=1 is set before server start."
+            ),
+            "hidden_legacy_note": "SQF and learning-module legacy tools are not part of the active recommendation path.",
+        },
+        audit={
+            "data_sources": ["NCS MCP tool registry"],
+            "generated_at": now_utc(),
+        },
+    )
+
+
+@mcp.tool()
+def ncs_execute_tool(tool_name: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Execute a read-only user NCS MCP tool discovered by ncs_discover_tools."""
+    if tool_name in {"ncs_discover_tools", "ncs_execute_tool"}:
+        return error_response("meta_tool_recursion_blocked", tool_name=tool_name)
+    if tool_name not in tool_registry.NCS_EXECUTABLE_TOOL_NAMES:
+        return error_response(
+            "tool_not_executable_via_meta",
+            tool_name=tool_name,
+            executable_tools=sorted(tool_registry.NCS_EXECUTABLE_TOOL_NAMES),
+            note="Operator/review tools and hidden legacy tools are blocked from ncs_execute_tool.",
+        )
+    tool_params = dict(params or {})
+    if tool_name in tool_registry.NCS_META_READ_ONLY_SAVE_FORCED_TOOLS:
+        tool_params["save"] = False
+    if tool_name in tool_registry.NCS_META_COMPACT_DEFAULT_TOOLS:
+        tool_params.setdefault("compact", True)
+    handler = NCS_EXECUTABLE_TOOL_HANDLERS[tool_name]
+    try:
+        inspect.signature(handler).bind(**tool_params)
+    except TypeError as exc:
+        return error_response(
+            "invalid_tool_parameters",
+            tool_name=tool_name,
+            message=str(exc),
+        )
+    try:
+        result = handler(**tool_params)
+    except Exception as exc:
+        return error_response(
+            "tool_execution_failed",
+            tool_name=tool_name,
+            message=str(exc),
+        )
+    if isinstance(result, dict):
+        result.setdefault("meta_execution", {})
+        result["meta_execution"].update(
+            {
+                "tool_name": tool_name,
+                "save_forced_false": tool_name in tool_registry.NCS_META_READ_ONLY_SAVE_FORCED_TOOLS,
+                "compact_defaulted": (
+                    tool_name in tool_registry.NCS_META_COMPACT_DEFAULT_TOOLS
+                    and "compact" not in (params or {})
+                ),
+            }
+        )
+        return result
+    return tool_response(
+        {
+            "tool_name": tool_name,
+            "result": result,
+            "meta_execution": {
+                "tool_name": tool_name,
+                "save_forced_false": tool_name in tool_registry.NCS_META_READ_ONLY_SAVE_FORCED_TOOLS,
+                "compact_defaulted": (
+                    tool_name in tool_registry.NCS_META_COMPACT_DEFAULT_TOOLS
+                    and "compact" not in (params or {})
+                ),
+            },
+        },
+        audit={
+            "data_sources": ["NCS MCP tool registry"],
+            "generated_at": now_utc(),
+        },
+    )
+
+
 def list_classifications(
     major_code: str | None = None,
     major_name: str | None = None,
@@ -265,7 +707,6 @@ def list_classifications(
     return {"classifications": rows_to_dicts(rows)}
 
 
-@mcp.tool()
 def get_competency_units(
     major_code: str | None = None,
     major_name: str | None = None,
@@ -328,7 +769,6 @@ def get_competency_units(
     return {"units": rows_to_dicts(rows)}
 
 
-@mcp.tool()
 def search_ncs_units(
     keyword: str,
     major_code: str | None = None,
@@ -338,7 +778,6 @@ def search_ncs_units(
     return get_competency_units(major_code=major_code, keyword=keyword, limit=limit)
 
 
-@mcp.tool()
 def get_unit_structure(
     unit_code: str,
     text_version: str = "raw",
@@ -448,7 +887,6 @@ def get_unit_structure(
         return result
 
 
-@mcp.tool()
 def get_element_detail(
     element_id: int,
     text_version: str = "raw",
@@ -474,7 +912,6 @@ def get_element_detail(
     return {"error": "not_found", "element_id": element_id}
 
 
-@mcp.tool()
 def get_performance_criteria(
     unit_code: str | None = None,
     element_id: int | None = None,
@@ -526,7 +963,6 @@ def get_performance_criteria(
     }
 
 
-@mcp.tool()
 def get_ksa(
     unit_code: str | None = None,
     element_id: int | None = None,
@@ -583,7 +1019,6 @@ def get_ksa(
     }
 
 
-@mcp.tool()
 def search_ncs(query: str, scope: str = "all", limit: int = 50) -> dict[str, Any]:
     """Search NCS units, elements, criteria, and KSA text."""
     max_rows = clamp_limit(limit)
@@ -750,11 +1185,20 @@ def get_quality_issues(
             """,
             params + [clamp_limit(limit)],
         ).fetchall()
-    return {"quality_issues": rows_to_dicts(rows)}
+    issues = rows_to_dicts(rows)
+    if not issues:
+        return not_found_response("품질 이슈 조회 결과가 없습니다.")
+    return tool_response(
+        {"quality_issues": issues},
+        audit={
+            "data_sources": ["quality_issues"],
+            "returned": len(issues),
+            "generated_at": now_utc(),
+        },
+    )
 
 
-@mcp.tool()
-def compare_raw_refined(target_type: str, target_id: str) -> dict[str, Any]:
+def _legacy_compare_raw_refined(target_type: str, target_id: str) -> dict[str, Any]:
     """Compare raw and refined text for criteria or KSA targets."""
     with open_db() as conn:
         if target_type == "criteria":
@@ -789,8 +1233,7 @@ def compare_raw_refined(target_type: str, target_id: str) -> dict[str, Any]:
         }
 
 
-@mcp.tool()
-def get_api_join_status(
+def _legacy_get_api_join_status(
     unit_code: str | None = None,
     classification_filter: str | None = None,
     limit: int = 50,
@@ -829,8 +1272,7 @@ def get_api_join_status(
     return {"api_join_status": rows_to_dicts(rows)}
 
 
-@mcp.tool()
-def get_sqf_duties(
+def _legacy_get_sqf_duties(
     major_code: str | None = None,
     keyword: str | None = None,
     duty_level: str | None = None,
@@ -880,8 +1322,7 @@ def get_sqf_duties(
     return {"sqf_duties": rows_to_dicts(rows)}
 
 
-@mcp.tool()
-def search_sqf_jobs(
+def _legacy_search_sqf_jobs(
     keyword: str | None = None,
     major_code: str | None = MVP_MAJOR_CODE,
     mvp_only: bool = False,
@@ -904,8 +1345,7 @@ def search_sqf_jobs(
     })
 
 
-@mcp.tool()
-def get_sqf_job_level(
+def _legacy_get_sqf_job_level(
     source_key: str | None = None,
     job_name: str = MVP_JOB_NAME,
     duty_name: str | None = None,
@@ -950,8 +1390,7 @@ def get_sqf_job_level(
     })
 
 
-@mcp.tool()
-def build_sqf_ncs_mapping_candidates(
+def _legacy_build_sqf_ncs_mapping_candidates(
     mvp_only: bool = True,
     major_code: str | None = None,
     keyword: str | None = None,
@@ -970,8 +1409,7 @@ def build_sqf_ncs_mapping_candidates(
         )
 
 
-@mcp.tool()
-def map_sqf_to_ncs(
+def _legacy_map_sqf_to_ncs(
     source_key: str,
     persist: bool = False,
     limit: int = 10,
@@ -1017,8 +1455,7 @@ def map_sqf_to_ncs(
     })
 
 
-@mcp.tool()
-def analyze_gap(
+def _legacy_analyze_gap(
     current_ncs_unit_codes: list[str],
     target_source_key: str | None = None,
     target_job_name: str = MVP_JOB_NAME,
@@ -1041,8 +1478,7 @@ def analyze_gap(
     return tool_response(result)
 
 
-@mcp.tool()
-def recommend_next_ncs_units(
+def _legacy_recommend_next_ncs_units(
     current_ncs_unit_codes: list[str],
     target_source_key: str | None = None,
     target_job_name: str = MVP_JOB_NAME,
@@ -1064,8 +1500,7 @@ def recommend_next_ncs_units(
     return tool_response(result)
 
 
-@mcp.tool()
-def explain_mapping(
+def _legacy_explain_mapping(
     sqf_source_key: str,
     ncs_unit_code: str,
 ) -> dict[str, Any]:
@@ -1134,8 +1569,7 @@ def related_units_for_sqf(conn, sqf_row, query: str, limit: int = 5) -> list[dic
     return rows_to_dicts(rows)
 
 
-@mcp.tool()
-def search_learning_modules(
+def _legacy_search_learning_modules(
     query: str | None = None,
     major_code: str | None = None,
     limit: int = 20,
@@ -1160,8 +1594,7 @@ def search_learning_modules(
     })
 
 
-@mcp.tool()
-def get_learning_module(learn_module_seq: str) -> dict[str, Any]:
+def _legacy_get_learning_module(learn_module_seq: str) -> dict[str, Any]:
     """Return one cached NCS learning module with unit and ontology concept links."""
     with open_db() as conn:
         result = recommendation_get_learning_module(conn, learn_module_seq)
@@ -1170,8 +1603,543 @@ def get_learning_module(learn_module_seq: str) -> dict[str, Any]:
     return tool_response({"ok": True, **result})
 
 
+def resolve_ncs_query_scope(
+    query: str,
+    major_code: str | None = None,
+    middle_code: str | None = None,
+    small_code: str | None = None,
+    sub_code: str | None = None,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """Resolve a natural-language query against NCS hierarchy, tasks, and KSA concepts."""
+    with open_db() as conn:
+        result = training_resolve_ncs_query_scope(
+            conn,
+            query,
+            major_code=major_code,
+            middle_code=middle_code,
+            small_code=small_code,
+            sub_code=sub_code,
+            limit=limit,
+        )
+    return tool_response(
+        result,
+        audit={
+            "data_sources": [
+                "classifications",
+                "competency_units",
+                "competency_elements",
+                "performance_criteria",
+                "ontology_concepts",
+            ],
+            "generated_at": now_utc(),
+        },
+    )
+
+
+def search_training_courses(
+    query: str | None = None,
+    major_code: str | None = None,
+    unit_code: str | None = None,
+    concept_query: str | None = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Search cached NCS training courses collected from openapi18."""
+    with open_db() as conn:
+        courses = training_search_courses(
+            conn,
+            query=query,
+            major_code=major_code,
+            unit_code=unit_code,
+            concept_query=concept_query,
+            limit=limit,
+        )
+    return tool_response(
+        {
+            "ok": True,
+            "query": query,
+            "major_code": major_code,
+            "unit_code": unit_code,
+            "concept_query": concept_query,
+            "training_courses": courses,
+        },
+        audit={
+            "data_sources": [
+                "ncs_training_courses",
+                "ncs_training_course_unit_links",
+                "ncs_training_course_concept_links",
+                "ncs_training_course_element_links",
+                "training_goal_concept_links",
+                "training_delivery_relations",
+            ],
+            "returned": len(courses),
+            "generated_at": now_utc(),
+            "sqf_used": False,
+            "learning_modules_used": False,
+        },
+    )
+
+
+def get_training_course(training_course_id: int) -> dict[str, Any]:
+    """Return one cached NCS training course with NCS unit and KSA concept links."""
+    with open_db() as conn:
+        result = training_get_course(conn, training_course_id)
+    return tool_response(result)
+
+
+def build_training_course_ontology_links(
+    major_code: str | None = None,
+    reset: bool = False,
+) -> dict[str, Any]:
+    """Build links from NCS training courses to KSA ontology concepts."""
+    with open_db() as conn:
+        result = training_build_course_links(conn, major_code=major_code, reset=reset)
+    return tool_response(
+        {"ok": True, **result},
+        audit={
+            "data_sources": [
+                "ncs_training_courses",
+                "ncs_training_course_unit_links",
+                "ncs_training_course_concept_links",
+                "ncs_training_course_element_links",
+                "training_goal_concept_links",
+                "training_delivery_relations",
+                "ontology_concepts",
+            ],
+            "generated_at": now_utc(),
+        },
+    )
+
+
+def _legacy_prepare_ontology_review_queue(
+    major_code: str | None = None,
+    middle_code: str | None = None,
+    small_code: str | None = None,
+    sub_code: str | None = None,
+    concept_limit: int = 250,
+    goal_link_limit: int = 250,
+    relation_limit: int = 250,
+    min_confidence: float = 0.75,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Create all-domain review issues for weak ontology concepts, goal links, and KSA relations."""
+    with open_db() as conn:
+        result = db_prepare_ontology_human_review_queue(
+            conn,
+            major_code=major_code,
+            middle_code=middle_code,
+            small_code=small_code,
+            sub_code=sub_code,
+            concept_limit=concept_limit,
+            goal_link_limit=goal_link_limit,
+            relation_limit=relation_limit,
+            min_confidence=min_confidence,
+            dry_run=dry_run,
+        )
+    return tool_response(
+        result,
+        audit={
+            "data_sources": [
+                "ontology_concepts",
+                "training_goal_concept_links",
+                "task_ksa_concept_relations",
+                "quality_issues",
+            ],
+            "generated_at": now_utc(),
+        },
+    )
+
+
+def import_career_paths(
+    csv_path: str,
+    encoding: str = "cp949",
+    reset: bool = False,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """Import an NCS career development path CSV and link rows to NCS classifications and units."""
+    with open_db() as conn:
+        result = ncs_import_career_paths_csv(
+            conn,
+            csv_path,
+            encoding=encoding,
+            reset=reset,
+            limit=limit,
+        )
+    return tool_response(
+        result,
+        audit={
+            "data_sources": ["NCS career development path CSV", "ncs_career_paths"],
+            "generated_at": now_utc(),
+        },
+    )
+
+
+def get_career_path_summary(limit: int = 20) -> dict[str, Any]:
+    """Summarize imported NCS career development paths and unmatched competency rows."""
+    with open_db() as conn:
+        result = ncs_career_path_summary(conn, limit=limit)
+    return tool_response(
+        result,
+        audit={
+            "data_sources": ["ncs_career_paths"],
+            "generated_at": now_utc(),
+        },
+    )
+
+
+def query_qualification_items(
+    unit_code: str,
+    page_no: int = 1,
+    num_of_rows: int = 10,
+    timeout: int = 30,
+) -> dict[str, Any]:
+    """Query live qualification items linked to one NCS competency unit code."""
+    settings = load_settings()
+    if not settings.qualification_service_key:
+        return error_response("qualification_service_key_missing")
+    result = qualification_fetch_page(
+        settings.qualification_service_key,
+        unit_code=unit_code,
+        page_no=page_no,
+        num_of_rows=num_of_rows,
+        timeout=timeout,
+    )
+    return tool_response(
+        result,
+        audit={
+            "data_sources": ["ncsClCdJm/getNcsClCdJmList"],
+            "generated_at": now_utc(),
+        },
+    )
+
+
+def _legacy_collect_qualification_items(
+    unit_code: str | None = None,
+    major_code: str | None = None,
+    all_units: bool = False,
+    limit_units: int | None = None,
+    page_no: int = 1,
+    num_of_rows: int = 50,
+    max_pages: int | None = None,
+    timeout: int = 30,
+    refresh: bool = False,
+    request_delay: float = 0.2,
+    max_retries: int = 3,
+    retry_backoff_seconds: float = 2.0,
+) -> dict[str, Any]:
+    """Collect qualification item links into SQLite for one unit, a major code, or all units."""
+    settings = load_settings()
+    if not settings.qualification_service_key:
+        return error_response("qualification_service_key_missing")
+    try:
+        result = qualification_collect_links(
+            settings.db_path,
+            settings.qualification_service_key,
+            unit_codes=[unit_code] if unit_code else None,
+            major_code=major_code,
+            all_units=all_units,
+            limit_units=limit_units,
+            page_no=page_no,
+            num_of_rows=num_of_rows,
+            max_pages=max_pages,
+            timeout=timeout,
+            resume=not refresh,
+            request_delay=request_delay,
+            max_retries=max_retries,
+            retry_backoff_seconds=retry_backoff_seconds,
+        )
+    except ValueError as exc:
+        return error_response("qualification_collection_scope_required", detail=str(exc))
+    return tool_response(
+        result,
+        audit={
+            "data_sources": [
+                "ncsClCdJm/getNcsClCdJmList",
+                "ncs_qualification_items",
+                "ncs_unit_qualification_links",
+                "ncs_qualification_collection_status",
+            ],
+            "generated_at": now_utc(),
+        },
+    )
+
+
+def get_qualification_error_report(limit: int = 50) -> dict[str, Any]:
+    """Report cached NCS qualification API collection errors by status, major, and sample unit."""
+    with open_db() as conn:
+        result = qualification_cached_error_report(conn, limit=limit)
+    return tool_response(
+        result,
+        audit={
+            "data_sources": ["ncs_qualification_collection_status", "competency_units", "classifications"],
+            "generated_at": now_utc(),
+        },
+    )
+
+
+def retry_qualification_errors(
+    major_code: str | None = None,
+    limit_units: int | None = None,
+    page_no: int = 1,
+    num_of_rows: int = 50,
+    max_pages: int | None = None,
+    timeout: int = 30,
+    request_delay: float = 1.0,
+    max_retries: int = 5,
+    retry_backoff_seconds: float = 5.0,
+    retry_ready_only: bool = True,
+) -> dict[str, Any]:
+    """Retry qualification API error units, respecting next_retry_at by default."""
+    settings = load_settings()
+    if not settings.qualification_service_key:
+        return error_response("qualification_service_key_missing")
+    result = qualification_retry_error_units(
+        settings.db_path,
+        settings.qualification_service_key,
+        major_code=major_code,
+        limit_units=limit_units,
+        page_no=page_no,
+        num_of_rows=num_of_rows,
+        max_pages=max_pages,
+        timeout=timeout,
+        request_delay=request_delay,
+        max_retries=max_retries,
+        retry_backoff_seconds=retry_backoff_seconds,
+        retry_ready_only=retry_ready_only,
+    )
+    return tool_response(
+        result,
+        audit={
+            "data_sources": [
+                "ncsClCdJm/getNcsClCdJmList",
+                "ncs_qualification_collection_status",
+                "ncs_qualification_items",
+                "ncs_unit_qualification_links",
+            ],
+            "generated_at": now_utc(),
+        },
+    )
+
+
+def search_qualification_items(
+    unit_code: str | None = None,
+    qualification_name: str | None = None,
+    qualification_code: str | None = None,
+    unit_type: str | None = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Search cached qualification items linked to NCS competency units."""
+    with open_db() as conn:
+        links = qualification_search_links(
+            conn,
+            unit_code=unit_code,
+            qualification_name=qualification_name,
+            qualification_code=qualification_code,
+            unit_type=unit_type,
+            limit=limit,
+        )
+        summary = qualification_cached_summary(conn, limit=10)
+    return tool_response(
+        {
+            "qualification_links": links,
+            "summary": summary,
+        },
+        audit={
+            "data_sources": ["ncs_qualification_items", "ncs_unit_qualification_links"],
+            "generated_at": now_utc(),
+        },
+    )
+
+
+def query_job_base_competencies(
+    major_code: str = "02",
+    module_name: str | None = None,
+    page_no: int = 1,
+    num_of_rows: int = 10,
+    timeout: int = 30,
+) -> dict[str, Any]:
+    """Query live NCS job base competencies by major code and optional unit-name keyword."""
+    settings = load_settings()
+    if not settings.job_base_service_key:
+        return error_response("job_base_service_key_missing")
+    result = job_base_fetch_page(
+        settings.job_base_service_key,
+        major_code=major_code,
+        module_name=module_name,
+        page_no=page_no,
+        num_of_rows=num_of_rows,
+        timeout=timeout,
+    )
+    return tool_response(
+        result,
+        audit={
+            "data_sources": ["ncsJobBase/openapi19"],
+            "generated_at": now_utc(),
+        },
+    )
+
+
+def _legacy_collect_job_base_competencies(
+    major_code: str = "02",
+    module_name: str | None = None,
+    page_no: int = 1,
+    num_of_rows: int = 500,
+    max_pages: int | None = None,
+    timeout: int = 30,
+) -> dict[str, Any]:
+    """Collect NCS job base competencies into SQLite."""
+    settings = load_settings()
+    if not settings.job_base_service_key:
+        return error_response("job_base_service_key_missing")
+    result = job_base_collect_competencies(
+        settings.db_path,
+        settings.job_base_service_key,
+        major_code=major_code,
+        module_name=module_name,
+        page_no=page_no,
+        num_of_rows=num_of_rows,
+        max_pages=max_pages,
+        timeout=timeout,
+    )
+    return tool_response(
+        result,
+        audit={
+            "data_sources": [
+                "ncsJobBase/openapi19",
+                "ncs_job_base_competencies",
+                "ncs_job_base_factors",
+                "ncs_unit_job_base_links",
+            ],
+            "generated_at": now_utc(),
+        },
+    )
+
+
+def search_job_base_competencies(
+    unit_code: str | None = None,
+    competency_name: str | None = None,
+    factor_name: str | None = None,
+    major_code: str | None = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Search cached NCS job base competencies linked to NCS competency units."""
+    with open_db() as conn:
+        links = job_base_search_links(
+            conn,
+            unit_code=unit_code,
+            competency_name=competency_name,
+            factor_name=factor_name,
+            major_code=major_code,
+            limit=limit,
+        )
+        summary = job_base_cached_summary(conn, limit=10)
+    return tool_response(
+        {
+            "job_base_links": links,
+            "summary": summary,
+        },
+        audit={
+            "data_sources": [
+                "ncs_job_base_competencies",
+                "ncs_job_base_factors",
+                "ncs_unit_job_base_links",
+            ],
+            "generated_at": now_utc(),
+        },
+    )
+
+
 @mcp.tool()
-def get_learning_path_for_sqf_job(
+def recommend_training_for_task(
+    criteria_id: int | None = None,
+    unit_code: str | None = None,
+    query: str | None = None,
+    major_code: str | None = None,
+    middle_code: str | None = None,
+    small_code: str | None = None,
+    sub_code: str | None = None,
+    mode: str = "all",
+    current_concepts: list[str] | None = None,
+    preferred_max_hours: float | None = None,
+    preferred_methods: list[str] | None = None,
+    limit: int = 5,
+    save: bool = True,
+    compact: bool = False,
+) -> dict[str, Any]:
+    """Recommend NCS training courses from a task's KSA ontology and task transitions."""
+    with open_db() as conn:
+        result = training_recommend_for_task(
+            conn,
+            criteria_id=criteria_id,
+            unit_code=unit_code,
+            query=query,
+            major_code=major_code,
+            middle_code=middle_code,
+            small_code=small_code,
+            sub_code=sub_code,
+            mode=mode,
+            current_concepts=current_concepts,
+            preferred_max_hours=preferred_max_hours,
+            preferred_methods=preferred_methods,
+            limit=limit,
+            save=save,
+        )
+    if compact:
+        result = training_compact_task_response(result, recommendation_limit=limit)
+    if result.get("ok"):
+        result.setdefault("disclaimer", DISCLAIMER)
+    return tool_response(result)
+
+
+@mcp.tool()
+def recommend_training_transition(
+    current_query: str,
+    target_query: str,
+    major_code: str | None = None,
+    current_major_code: str | None = None,
+    target_major_code: str | None = None,
+    current_middle_code: str | None = None,
+    target_middle_code: str | None = None,
+    current_small_code: str | None = None,
+    target_small_code: str | None = None,
+    current_sub_code: str | None = None,
+    target_sub_code: str | None = None,
+    mode: str = "all",
+    preferred_max_hours: float | None = None,
+    preferred_methods: list[str] | None = None,
+    limit: int = 5,
+    save: bool = True,
+    compact: bool = False,
+) -> dict[str, Any]:
+    """Recommend training for moving from one NCS scope to another using KSA gap analysis."""
+    with open_db() as conn:
+        result = training_recommend_transition(
+            conn,
+            current_query=current_query,
+            target_query=target_query,
+            major_code=major_code,
+            current_major_code=current_major_code,
+            target_major_code=target_major_code,
+            current_middle_code=current_middle_code,
+            target_middle_code=target_middle_code,
+            current_small_code=current_small_code,
+            target_small_code=target_small_code,
+            current_sub_code=current_sub_code,
+            target_sub_code=target_sub_code,
+            mode=mode,
+            preferred_max_hours=preferred_max_hours,
+            preferred_methods=preferred_methods,
+            limit=limit,
+            save=save,
+        )
+    if compact:
+        result = training_compact_transition_response(result, recommendation_limit=limit)
+    if result.get("ok"):
+        result.setdefault("disclaimer", DISCLAIMER)
+    return tool_response(result)
+
+
+def _legacy_get_learning_path_for_sqf_job(
     query: str,
     major_code: str | None = None,
     target_source_key: str | None = None,
@@ -1193,8 +2161,7 @@ def get_learning_path_for_sqf_job(
     return tool_response(result)
 
 
-@mcp.tool()
-def recommend_education_for_duty(
+def _legacy_recommend_education_for_duty(
     query: str,
     major_code: str | None = None,
     target_source_key: str | None = None,
@@ -1218,8 +2185,7 @@ def recommend_education_for_duty(
     return tool_response(result)
 
 
-@mcp.tool()
-def explain_education_recommendation(
+def _legacy_explain_education_recommendation(
     recommendation_item_id: int | None = None,
     recommendation_run_id: int | None = None,
     rank: int | None = None,
@@ -1233,6 +2199,320 @@ def explain_education_recommendation(
             rank=rank,
         )
     return tool_response(result)
+
+
+def _legacy_import_ncs_reference_html(
+    input_path: str,
+    title: str,
+    chunk_min_chars: int = 500,
+    chunk_max_chars: int = 1200,
+    extract_entities: bool = False,
+    link_entities: bool = False,
+    major_code: str | None = None,
+    middle_code: str | None = None,
+    small_code: str | None = None,
+    sub_code: str | None = None,
+    sub_codes: list[str] | None = None,
+) -> dict[str, Any]:
+    """Import report.html-style NCS reference evidence into page/chunk tables."""
+    with open_db() as conn:
+        result = ncs_ref_import_html(
+            conn,
+            input_path,
+            title=title,
+            chunk_min_chars=chunk_min_chars,
+            chunk_max_chars=chunk_max_chars,
+        )
+        if extract_entities:
+            result["entity_extraction"] = ncs_ref_extract_entities(
+                conn,
+                document_id=result["document_id"],
+                major_code=major_code,
+                middle_code=middle_code,
+                small_code=small_code,
+                sub_code=sub_code,
+                sub_codes=sub_codes,
+            )
+        if link_entities:
+            result["entity_links"] = ncs_ref_link_entities(
+                conn,
+                document_id=result["document_id"],
+                major_code=major_code,
+                middle_code=middle_code,
+                small_code=small_code,
+                sub_code=sub_code,
+                sub_codes=sub_codes,
+            )
+    return tool_response(
+        {"ok": True, **result},
+        audit={
+            "data_sources": [
+                "ncs_reference_documents",
+                "ncs_reference_pages",
+                "ncs_reference_chunks",
+            ],
+            "generated_at": now_utc(),
+        },
+    )
+
+
+def search_ncs_reference_chunks(
+    query: str,
+    document_id: int | None = None,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """Search imported NCS reference chunks and return summaries with page/chunk locations."""
+    with open_db() as conn:
+        chunks = ncs_ref_search_chunks(
+            conn,
+            query=query,
+            document_id=document_id,
+            limit=limit,
+        )
+    return tool_response(
+        {"ok": True, "query": query, "document_id": document_id, "chunks": chunks},
+        audit={
+            "data_sources": ["ncs_reference_chunks"],
+            "returned": len(chunks),
+            "generated_at": now_utc(),
+        },
+    )
+
+
+def _legacy_import_ncs_reference_docx(
+    input_path: str,
+    title: str,
+    chunk_min_chars: int = 500,
+    chunk_max_chars: int = 1200,
+) -> dict[str, Any]:
+    """Import a DOCX NCS/API reference document into page/chunk tables."""
+    with open_db() as conn:
+        result = ncs_ref_import_docx(
+            conn,
+            input_path,
+            title=title,
+            chunk_min_chars=chunk_min_chars,
+            chunk_max_chars=chunk_max_chars,
+        )
+    return tool_response(
+        {"ok": True, **result},
+        audit={
+            "data_sources": [
+                "ncs_reference_documents",
+                "ncs_reference_pages",
+                "ncs_reference_chunks",
+            ],
+            "generated_at": now_utc(),
+        },
+    )
+
+
+def _legacy_extract_ncs_reference_entities(
+    document_id: int | None = None,
+    limit_chunks: int | None = None,
+    major_code: str | None = None,
+    middle_code: str | None = None,
+    small_code: str | None = None,
+    sub_code: str | None = None,
+    sub_codes: list[str] | None = None,
+) -> dict[str, Any]:
+    """Extract NCS unit, element, criteria, KSA, and training-standard candidates from imported chunks."""
+    with open_db() as conn:
+        result = ncs_ref_extract_entities(
+            conn,
+            document_id=document_id,
+            limit_chunks=limit_chunks,
+            major_code=major_code,
+            middle_code=middle_code,
+            small_code=small_code,
+            sub_code=sub_code,
+            sub_codes=sub_codes,
+        )
+    return tool_response(
+        {"ok": True, **result},
+        audit={
+            "data_sources": ["ncs_reference_chunks", "ncs_reference_entities"],
+            "generated_at": now_utc(),
+        },
+    )
+
+
+def _legacy_link_reference_entities_to_ncs(
+    document_id: int | None = None,
+    major_code: str | None = None,
+    middle_code: str | None = None,
+    small_code: str | None = None,
+    sub_code: str | None = None,
+    sub_codes: list[str] | None = None,
+) -> dict[str, Any]:
+    """Link extracted NCS reference entities to canonical NCS tables as candidate evidence."""
+    with open_db() as conn:
+        result = ncs_ref_link_entities(
+            conn,
+            document_id=document_id,
+            major_code=major_code,
+            middle_code=middle_code,
+            small_code=small_code,
+            sub_code=sub_code,
+            sub_codes=sub_codes,
+        )
+    return tool_response(
+        {"ok": True, **result},
+        audit={
+            "data_sources": ["ncs_reference_entities", "ncs_reference_entity_links"],
+            "generated_at": now_utc(),
+        },
+    )
+
+
+def _legacy_recommend_learning_modules_by_ncs(
+    query: str | None = None,
+    unit_code: str | None = None,
+    major_code: str | None = "02",
+    middle_code: str | None = None,
+    small_code: str | None = None,
+    sub_code: str | None = None,
+    sub_codes: list[str] | None = None,
+    trust_mode: str = "trusted",
+    limit: int = 5,
+    save: bool = True,
+) -> dict[str, Any]:
+    """Recommend learning modules directly from an NCS unit/query using trusted module-NCS links."""
+    with open_db() as conn:
+        result = ncs_ref_recommend_modules(
+            conn,
+            query=query,
+            unit_code=unit_code,
+            major_code=major_code,
+            middle_code=middle_code,
+            small_code=small_code,
+            sub_code=sub_code,
+            sub_codes=sub_codes,
+            trust_mode=trust_mode,
+            limit=limit,
+            save=save,
+        )
+    return tool_response(result)
+
+
+def _legacy_review_exact_learning_module_name_links(
+    major_code: str | None = "02",
+    middle_code: str | None = "02",
+    small_code: str | None = "02",
+    sub_codes: list[str] | None = None,
+    reviewer_id: str = "mcp",
+) -> dict[str, Any]:
+    """Mark exact learning-module-name to NCS-unit-name links as reviewed within a scoped MVP."""
+    with open_db() as conn:
+        result = ncs_ref_review_exact_module_links(
+            conn,
+            major_code=major_code,
+            middle_code=middle_code,
+            small_code=small_code,
+            sub_codes=sub_codes or ["01", "02"],
+            reviewer_id=reviewer_id,
+        )
+    return tool_response(result)
+
+
+def _legacy_build_ncs_derived_learning_plans(
+    major_code: str | None = "02",
+    middle_code: str | None = "02",
+    small_code: str | None = "02",
+    sub_code: str | None = None,
+    sub_codes: list[str] | None = None,
+    review_status: str = "reviewed",
+) -> dict[str, Any]:
+    """Create trusted NCS-derived education-plan rows for units without official study-module links."""
+    with open_db() as conn:
+        result = ncs_ref_build_derived_plans(
+            conn,
+            major_code=major_code,
+            middle_code=middle_code,
+            small_code=small_code,
+            sub_code=sub_code,
+            sub_codes=sub_codes,
+            review_status=review_status,
+        )
+    return tool_response(result)
+
+
+def _legacy_build_report_training_courses(
+    document_id: int | None = None,
+    major_code: str = "02",
+    middle_code: str = "02",
+    small_code: str = "02",
+    sub_code: str | None = None,
+    sub_codes: list[str] | None = None,
+    review_status: str = "reviewed",
+) -> dict[str, Any]:
+    """Extract report education/training course candidates and link them to NCS ontology concepts."""
+    with open_db() as conn:
+        result = ncs_ref_build_report_training_courses(
+            conn,
+            document_id=document_id,
+            major_code=major_code,
+            middle_code=middle_code,
+            small_code=small_code,
+            sub_code=sub_code,
+            sub_codes=sub_codes or ["01", "02"],
+            review_status=review_status,
+        )
+    return tool_response(result)
+
+
+def _legacy_recommend_education_by_concepts(
+    concepts: list[str] | None = None,
+    query: str | None = None,
+    trust_mode: str = "trusted",
+    limit: int = 5,
+    save: bool = True,
+) -> dict[str, Any]:
+    """Recommend learning modules or NCS-derived plans from ontology concept names."""
+    with open_db() as conn:
+        result = ncs_ref_recommend_by_concepts(
+            conn,
+            concepts=concepts,
+            query=query,
+            trust_mode=trust_mode,
+            limit=limit,
+            save=save,
+        )
+    return tool_response(result)
+
+
+@mcp.tool()
+def recommend_task_transitions(
+    criteria_id: int | None = None,
+    query: str | None = None,
+    unit_code: str | None = None,
+    mode: str = "all",
+    limit: int = 10,
+    evidence_limit: int = 12,
+) -> dict[str, Any]:
+    """Recommend nearby NCS tasks for upskilling/reskilling from atomic KSA ontology links."""
+    with open_db() as conn:
+        result = db_recommend_task_transitions(
+            conn,
+            criteria_id=criteria_id,
+            query=query,
+            unit_code=unit_code,
+            mode=mode,
+            limit=limit,
+            evidence_limit=evidence_limit,
+        )
+    return tool_response(
+        result,
+        audit={
+            "data_sources": [
+                "task_similarity_links",
+                "task_ksa_concept_relations",
+                "ksa_atomic_items",
+                "ontology_concepts",
+            ],
+            "generated_at": now_utc(),
+        },
+    )
 
 
 def insert_review_audit(
@@ -1266,6 +2546,32 @@ def insert_review_audit(
     )
 
 
+REVIEWABLE_LINK_STATUSES = {
+    "human_reviewed",
+    "reviewed",
+    "accepted",
+    "rejected",
+    "candidate",
+    "candidate_auto",
+    "auto_linked",
+    "review_required",
+}
+
+
+def normalize_review_link_status(review_status: str) -> str | None:
+    status = " ".join(str(review_status or "").strip().split())
+    return status if status in REVIEWABLE_LINK_STATUSES else None
+
+
+def normalize_optional_confidence(confidence_score: float | None) -> float | None:
+    if confidence_score is None:
+        return None
+    value = float(confidence_score)
+    if value < 0 or value > 1:
+        raise ValueError("confidence_score must be between 0 and 1")
+    return value
+
+
 def concept_with_aliases(conn, concept_id: int) -> dict[str, Any] | None:
     row = conn.execute(
         """
@@ -1289,7 +2595,6 @@ def concept_with_aliases(conn, concept_id: int) -> dict[str, Any] | None:
     return {**row_to_dict(row), "aliases": rows_to_dicts(aliases)}
 
 
-@mcp.tool()
 def search_ontology_concepts(
     query: str | None = None,
     concept_type: str | None = None,
@@ -1505,8 +2810,7 @@ def get_concept_evidence(concept_id: int, limit: int = 20) -> dict[str, Any]:
     )
 
 
-@mcp.tool()
-def review_sqf_ncs_match(
+def _legacy_review_sqf_ncs_match(
     match_id: int,
     new_status: str,
     reviewer_id: str = "mcp",
@@ -1602,6 +2906,224 @@ def review_sqf_ncs_match(
         },
         audit={
             "data_sources": ["sqf_ncs_matches", "review_audit_log"],
+            "generated_at": now_utc(),
+            "reviewer_id": reviewer_id,
+        },
+    )
+
+
+@mcp.tool()
+def review_learning_module_ncs_link(
+    link_id: int,
+    review_status: str,
+    reviewer_id: str = "mcp",
+    notes: str = "",
+    confidence_score: float | None = None,
+) -> dict[str, Any]:
+    """Human-review one learning-module to NCS unit link for trusted recommendations."""
+    with open_db() as conn:
+        result = ncs_ref_review_module_link(
+            conn,
+            link_id=link_id,
+            review_status=review_status,
+            reviewer_id=reviewer_id,
+            notes=notes,
+            confidence_score=confidence_score,
+        )
+    return tool_response(result)
+
+
+@mcp.tool()
+def review_training_goal_concept_link(
+    link_id: int,
+    review_status: str,
+    reviewer_id: str = "mcp",
+    notes: str = "",
+    confidence_score: float | None = None,
+) -> dict[str, Any]:
+    """Human-review one training-goal to KSA concept link used by ranking."""
+    status = normalize_review_link_status(review_status)
+    if status is None:
+        return error_response(
+            "unsupported_review_status",
+            review_status=review_status,
+            allowed=sorted(REVIEWABLE_LINK_STATUSES),
+        )
+    try:
+        confidence = normalize_optional_confidence(confidence_score)
+    except ValueError as exc:
+        return error_response("invalid_tool_parameters", message=str(exc))
+    with open_db() as conn:
+        row = conn.execute(
+            """
+            SELECT l.*, c.compe_unit_name AS course_name, oc.concept_name, oc.concept_type
+            FROM training_goal_concept_links l
+            JOIN ncs_training_courses c ON c.training_course_id = l.training_course_id
+            JOIN ontology_concepts oc ON oc.concept_id = l.concept_id
+            WHERE l.link_id = ?
+            """,
+            (link_id,),
+        ).fetchone()
+        if row is None:
+            return error_response("training_goal_concept_link_not_found", link_id=link_id)
+        timestamp = now_utc()
+        if confidence is None:
+            conn.execute(
+                """
+                UPDATE training_goal_concept_links
+                SET review_status = ?,
+                    updated_at = ?
+                WHERE link_id = ?
+                """,
+                (status, timestamp, link_id),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE training_goal_concept_links
+                SET review_status = ?,
+                    confidence_score = ?,
+                    updated_at = ?
+                WHERE link_id = ?
+                """,
+                (status, confidence, timestamp, link_id),
+            )
+        insert_review_audit(
+            conn,
+            entity_type="training_goal_concept_link",
+            entity_id=str(link_id),
+            action="review_training_goal_concept_link",
+            previous_status=row["review_status"],
+            new_status=status,
+            reviewer_id=reviewer_id,
+            notes=notes,
+        )
+        updated = conn.execute(
+            """
+            SELECT l.*, c.compe_unit_name AS course_name, oc.concept_name, oc.concept_type
+            FROM training_goal_concept_links l
+            JOIN ncs_training_courses c ON c.training_course_id = l.training_course_id
+            JOIN ontology_concepts oc ON oc.concept_id = l.concept_id
+            WHERE l.link_id = ?
+            """,
+            (link_id,),
+        ).fetchone()
+        conn.commit()
+    return tool_response(
+        {
+            "link_id": link_id,
+            "previous_status": row["review_status"],
+            "new_status": status,
+            "link_usable_for_recommendation": status != "rejected",
+            "trusted_for_recommendation": status in {"human_reviewed", "reviewed", "accepted"},
+            "link": row_to_dict(updated),
+        },
+        audit={
+            "data_sources": ["training_goal_concept_links", "review_audit_log"],
+            "generated_at": now_utc(),
+            "reviewer_id": reviewer_id,
+        },
+    )
+
+
+@mcp.tool()
+def review_task_ksa_concept_relation(
+    relation_id: int,
+    review_status: str,
+    reviewer_id: str = "mcp",
+    notes: str = "",
+    confidence_score: float | None = None,
+) -> dict[str, Any]:
+    """Human-review one task-KSA concept relation used by transition reasoning."""
+    status = normalize_review_link_status(review_status)
+    if status is None:
+        return error_response(
+            "unsupported_review_status",
+            review_status=review_status,
+            allowed=sorted(REVIEWABLE_LINK_STATUSES),
+        )
+    try:
+        confidence = normalize_optional_confidence(confidence_score)
+    except ValueError as exc:
+        return error_response("invalid_tool_parameters", message=str(exc))
+    with open_db() as conn:
+        row = conn.execute(
+            """
+            SELECT r.*,
+                   sc.concept_name AS source_concept_name,
+                   tc.concept_name AS target_concept_name,
+                   pc.criteria_text_raw,
+                   ce.unit_code,
+                   ce.element_name_raw
+            FROM task_ksa_concept_relations r
+            JOIN ontology_concepts sc ON sc.concept_id = r.source_concept_id
+            JOIN ontology_concepts tc ON tc.concept_id = r.target_concept_id
+            JOIN performance_criteria pc ON pc.criteria_id = r.criteria_id
+            JOIN competency_elements ce ON ce.element_id = r.element_id
+            WHERE r.relation_id = ?
+            """,
+            (relation_id,),
+        ).fetchone()
+        if row is None:
+            return error_response("task_ksa_concept_relation_not_found", relation_id=relation_id)
+        if confidence is None:
+            conn.execute(
+                """
+                UPDATE task_ksa_concept_relations
+                SET review_status = ?
+                WHERE relation_id = ?
+                """,
+                (status, relation_id),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE task_ksa_concept_relations
+                SET review_status = ?,
+                    confidence_score = ?
+                WHERE relation_id = ?
+                """,
+                (status, confidence, relation_id),
+            )
+        insert_review_audit(
+            conn,
+            entity_type="task_ksa_concept_relation",
+            entity_id=str(relation_id),
+            action="review_task_ksa_concept_relation",
+            previous_status=row["review_status"],
+            new_status=status,
+            reviewer_id=reviewer_id,
+            notes=notes,
+        )
+        updated = conn.execute(
+            """
+            SELECT r.*,
+                   sc.concept_name AS source_concept_name,
+                   tc.concept_name AS target_concept_name,
+                   pc.criteria_text_raw,
+                   ce.unit_code,
+                   ce.element_name_raw
+            FROM task_ksa_concept_relations r
+            JOIN ontology_concepts sc ON sc.concept_id = r.source_concept_id
+            JOIN ontology_concepts tc ON tc.concept_id = r.target_concept_id
+            JOIN performance_criteria pc ON pc.criteria_id = r.criteria_id
+            JOIN competency_elements ce ON ce.element_id = r.element_id
+            WHERE r.relation_id = ?
+            """,
+            (relation_id,),
+        ).fetchone()
+        conn.commit()
+    return tool_response(
+        {
+            "relation_id": relation_id,
+            "previous_status": row["review_status"],
+            "new_status": status,
+            "relation_usable_for_transition": status != "rejected",
+            "trusted_for_transition": status in {"human_reviewed", "reviewed", "accepted"},
+            "relation": row_to_dict(updated),
+        },
+        audit={
+            "data_sources": ["task_ksa_concept_relations", "review_audit_log"],
             "generated_at": now_utc(),
             "reviewer_id": reviewer_id,
         },
@@ -1719,14 +3241,12 @@ def review_ontology_concept(
     )
 
 
-@mcp.tool()
-def get_sqf_ontology_summary() -> dict[str, Any]:
+def _legacy_get_sqf_ontology_summary() -> dict[str, Any]:
     """Return counts for the normalized SQF ontology and preprocessed document layer."""
     return tool_response(sqf_model_summary(load_settings().db_path))
 
 
-@mcp.tool()
-def search_sqf_document_chunks(
+def _legacy_search_sqf_document_chunks(
     query: str,
     ontology_tag: str | None = None,
     limit: int = 10,
@@ -1776,8 +3296,7 @@ def search_sqf_document_chunks(
     })
 
 
-@mcp.tool()
-def search_sqf_precision_matches(
+def _legacy_search_sqf_precision_matches(
     query: str | None = None,
     source_key: str | None = None,
     min_score: float = 9.0,
@@ -1844,8 +3363,7 @@ def search_sqf_precision_matches(
     })
 
 
-@mcp.tool()
-def get_sqf_ontology_job_level(source_key: str) -> dict[str, Any]:
+def _legacy_get_sqf_ontology_job_level(source_key: str) -> dict[str, Any]:
     """Return normalized SQF job-level ontology node, recognition evidence, and document links."""
     with open_db() as conn:
         job_level = conn.execute(
@@ -1911,8 +3429,136 @@ def get_sqf_ontology_job_level(source_key: str) -> dict[str, Any]:
     })
 
 
-def main() -> None:
-    mcp.run("stdio")
+# Backward-compatible direct-call aliases. These names are intentionally not
+# decorated as MCP tools.
+compare_raw_refined = _legacy_compare_raw_refined
+get_api_join_status = _legacy_get_api_join_status
+get_sqf_duties = _legacy_get_sqf_duties
+search_sqf_jobs = _legacy_search_sqf_jobs
+get_sqf_job_level = _legacy_get_sqf_job_level
+build_sqf_ncs_mapping_candidates = _legacy_build_sqf_ncs_mapping_candidates
+map_sqf_to_ncs = _legacy_map_sqf_to_ncs
+analyze_gap = _legacy_analyze_gap
+recommend_next_ncs_units = _legacy_recommend_next_ncs_units
+explain_mapping = _legacy_explain_mapping
+search_learning_modules = _legacy_search_learning_modules
+get_learning_module = _legacy_get_learning_module
+prepare_ontology_review_queue = _legacy_prepare_ontology_review_queue
+collect_qualification_items = _legacy_collect_qualification_items
+collect_job_base_competencies = _legacy_collect_job_base_competencies
+get_learning_path_for_sqf_job = _legacy_get_learning_path_for_sqf_job
+recommend_education_for_duty = _legacy_recommend_education_for_duty
+explain_education_recommendation = _legacy_explain_education_recommendation
+import_ncs_reference_html = _legacy_import_ncs_reference_html
+import_ncs_reference_docx = _legacy_import_ncs_reference_docx
+extract_ncs_reference_entities = _legacy_extract_ncs_reference_entities
+link_reference_entities_to_ncs = _legacy_link_reference_entities_to_ncs
+recommend_learning_modules_by_ncs = _legacy_recommend_learning_modules_by_ncs
+review_exact_learning_module_name_links = _legacy_review_exact_learning_module_name_links
+build_ncs_derived_learning_plans = _legacy_build_ncs_derived_learning_plans
+build_report_training_courses = _legacy_build_report_training_courses
+recommend_education_by_concepts = _legacy_recommend_education_by_concepts
+review_sqf_ncs_match = _legacy_review_sqf_ncs_match
+get_sqf_ontology_summary = _legacy_get_sqf_ontology_summary
+search_sqf_document_chunks = _legacy_search_sqf_document_chunks
+search_sqf_precision_matches = _legacy_search_sqf_precision_matches
+get_sqf_ontology_job_level = _legacy_get_sqf_ontology_job_level
+
+
+NCS_EXECUTABLE_TOOL_HANDLERS = {
+    "ncs_search": ncs_search,
+    "ncs_unit_detail": ncs_unit_detail,
+    "ncs_training": ncs_training,
+    "ncs_analysis": ncs_analysis,
+    "recommend_training_for_task": recommend_training_for_task,
+    "recommend_training_transition": recommend_training_transition,
+    "recommend_task_transitions": recommend_task_transitions,
+    "get_concept_evidence": get_concept_evidence,
+}
+
+
+def current_mcp_tool_surface() -> dict[str, Any]:
+    tool_manager = getattr(mcp, "_tool_manager", None)
+    tools = getattr(tool_manager, "_tools", None)
+    names = sorted(tools) if isinstance(tools, dict) else []
+    name_set = set(names)
+    operator_enabled = load_settings().operator_tools_enabled
+    configured_tools = tool_registry.mcp_tools_for_mode(operator_tools_enabled=operator_enabled)
+    return {
+        "user_tools": sorted(tool_registry.USER_MCP_TOOLS & name_set),
+        "operator_tools": sorted(tool_registry.OPERATOR_MCP_TOOLS & name_set),
+        "operator_tools_enabled": operator_enabled,
+        "hidden_operator_tools": sorted(tool_registry.OPERATOR_MCP_TOOLS - name_set),
+        "legacy_tools_present": sorted(tool_registry.LEGACY_MCP_TOOLS & name_set),
+        "unexpected_tools": sorted(name_set - configured_tools),
+        "all_tools": names,
+    }
+
+
+def remove_inactive_mcp_tools() -> None:
+    tool_manager = getattr(mcp, "_tool_manager", None)
+    tools = getattr(tool_manager, "_tools", None)
+    if isinstance(tools, dict):
+        for name in tool_registry.LEGACY_MCP_TOOLS:
+            tools.pop(name, None)
+        if not load_settings().operator_tools_enabled:
+            for name in tool_registry.OPERATOR_MCP_TOOLS:
+                tools.pop(name, None)
+
+
+remove_inactive_mcp_tools()
+
+
+def configure_transport(
+    *,
+    transport: str,
+    host: str | None = None,
+    port: int | None = None,
+    stateful_http: bool = False,
+    json_response: bool | None = None,
+) -> None:
+    global CURRENT_TRANSPORT
+    CURRENT_TRANSPORT = transport
+    if host:
+        mcp.settings.host = host
+    if port is not None:
+        mcp.settings.port = port
+    if transport == "streamable-http":
+        mcp.settings.stateless_http = not stateful_http
+        mcp.settings.json_response = True if json_response is None else bool(json_response)
+    elif json_response is not None:
+        mcp.settings.json_response = bool(json_response)
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Run the NCS MCP server.")
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "sse", "streamable-http"],
+        default="stdio",
+        help="MCP transport. Defaults to stdio for local clients.",
+    )
+    parser.add_argument("--host", default=None, help="HTTP host for sse or streamable-http transports.")
+    parser.add_argument("--port", type=int, default=None, help="HTTP port for sse or streamable-http transports.")
+    parser.add_argument(
+        "--stateful-http",
+        action="store_true",
+        help="Use stateful streamable HTTP sessions. Default streamable-http mode is stateless.",
+    )
+    parser.add_argument(
+        "--no-json-response",
+        action="store_true",
+        help="Disable JSON responses in streamable-http mode.",
+    )
+    args = parser.parse_args(argv)
+    configure_transport(
+        transport=args.transport,
+        host=args.host,
+        port=args.port,
+        stateful_http=args.stateful_http,
+        json_response=False if args.no_json_response else None,
+    )
+    mcp.run(args.transport)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,252 @@
+{
+  "hidden_legacy_tools": [
+    "analyze_gap",
+    "build_ncs_derived_learning_plans",
+    "build_report_training_courses",
+    "build_sqf_ncs_mapping_candidates",
+    "build_training_course_ontology_links",
+    "collect_job_base_competencies",
+    "collect_qualification_items",
+    "compare_raw_refined",
+    "explain_mapping",
+    "extract_ncs_reference_entities",
+    "get_api_join_status",
+    "get_career_path_summary",
+    "get_competency_units",
+    "get_element_detail",
+    "get_ksa",
+    "get_learning_module",
+    "get_learning_path_for_sqf_job",
+    "get_performance_criteria",
+    "get_qualification_error_report",
+    "get_sqf_duties",
+    "get_sqf_job_level",
+    "get_sqf_ontology_job_level",
+    "get_sqf_ontology_summary",
+    "get_training_course",
+    "get_unit_structure",
+    "import_career_paths",
+    "import_ncs_reference_docx",
+    "import_ncs_reference_html",
+    "link_reference_entities_to_ncs",
+    "list_classifications",
+    "map_sqf_to_ncs",
+    "prepare_ontology_review_queue",
+    "query_job_base_competencies",
+    "query_qualification_items",
+    "recommend_education_by_concepts",
+    "recommend_education_for_duty",
+    "recommend_learning_modules_by_ncs",
+    "recommend_next_ncs_units",
+    "resolve_ncs_query_scope",
+    "retry_qualification_errors",
+    "review_exact_learning_module_name_links",
+    "review_sqf_ncs_match",
+    "search_job_base_competencies",
+    "search_learning_modules",
+    "search_ncs",
+    "search_ncs_reference_chunks",
+    "search_ncs_units",
+    "search_qualification_items",
+    "search_sqf_document_chunks",
+    "search_sqf_jobs",
+    "search_sqf_precision_matches",
+    "search_training_courses"
+  ],
+  "name": "ncs-mcp",
+  "operator_tools_available": [
+    "get_quality_issues",
+    "review_learning_module_ncs_link",
+    "review_ontology_concept",
+    "review_task_ksa_concept_relation",
+    "review_training_goal_concept_link"
+  ],
+  "policy": {
+    "active_scope": "NCS-centered training recommendation",
+    "legacy_scope": "SQF and NCS learning modules are hidden reference paths.",
+    "meta_execution": "Only read-only user tools are executable through ncs_execute_tool.",
+    "operator_tools": "Hidden by default; enable with NCS_MCP_ENABLE_OPERATOR_TOOLS=1 before server start.",
+    "recommendation_meta_calls_default_compact_true": true,
+    "recommendation_meta_calls_force_save_false": true
+  },
+  "surface": {
+    "active_tool_count": 10,
+    "legacy_hidden_tool_count": 52,
+    "mode": "public",
+    "operator_tool_count": 0,
+    "operator_tool_count_available": 5,
+    "user_tool_count": 10
+  },
+  "tools": [
+    {
+      "aliases": [
+        "concept",
+        "KSA evidence",
+        "ontology evidence"
+      ],
+      "categories": [
+        "evidence_analysis"
+      ],
+      "description": "Return source KSA, criteria, relation, and recommendation evidence for one ontology concept.",
+      "executable_via_meta": true,
+      "meta_compact_default": false,
+      "meta_save_forced_false": false,
+      "name": "get_concept_evidence",
+      "role": "user"
+    },
+    {
+      "aliases": [
+        "career path",
+        "qualification",
+        "job base",
+        "ontology",
+        "evidence"
+      ],
+      "categories": [
+        "evidence_analysis"
+      ],
+      "description": "Read career path, qualification, job-base, or ontology evidence.",
+      "executable_via_meta": true,
+      "meta_compact_default": false,
+      "meta_save_forced_false": false,
+      "name": "ncs_analysis",
+      "role": "user"
+    },
+    {
+      "aliases": [
+        "discover",
+        "tool catalog",
+        "help",
+        "what can this MCP do"
+      ],
+      "categories": [
+        "tool_discovery"
+      ],
+      "description": "Find the right compact NCS MCP tool for a user intent.",
+      "executable_via_meta": false,
+      "meta_compact_default": false,
+      "meta_save_forced_false": false,
+      "name": "ncs_discover_tools",
+      "role": "user"
+    },
+    {
+      "aliases": [
+        "execute",
+        "run tool",
+        "meta tool"
+      ],
+      "categories": [
+        "tool_discovery"
+      ],
+      "description": "Execute a discovered read-only user tool by name and params.",
+      "executable_via_meta": false,
+      "meta_compact_default": false,
+      "meta_save_forced_false": false,
+      "name": "ncs_execute_tool",
+      "role": "user"
+    },
+    {
+      "aliases": [
+        "search",
+        "classification",
+        "unit",
+        "criteria",
+        "KSA"
+      ],
+      "categories": [
+        "ncs_structure_search"
+      ],
+      "description": "Search NCS classifications, units, elements, criteria, and KSA records.",
+      "executable_via_meta": true,
+      "meta_compact_default": false,
+      "meta_save_forced_false": false,
+      "name": "ncs_search",
+      "role": "user"
+    },
+    {
+      "aliases": [
+        "training",
+        "course",
+        "훈련",
+        "교육"
+      ],
+      "categories": [
+        "training_courses"
+      ],
+      "description": "Search cached NCS training courses or return one course by id.",
+      "executable_via_meta": true,
+      "meta_compact_default": false,
+      "meta_save_forced_false": false,
+      "name": "ncs_training",
+      "role": "user"
+    },
+    {
+      "aliases": [
+        "unit detail",
+        "competency unit",
+        "elements",
+        "criteria"
+      ],
+      "categories": [
+        "ncs_structure_search"
+      ],
+      "description": "Return one NCS competency unit with selected criteria, KSA, training, and qualification evidence.",
+      "executable_via_meta": true,
+      "meta_compact_default": false,
+      "meta_save_forced_false": false,
+      "name": "ncs_unit_detail",
+      "role": "user"
+    },
+    {
+      "aliases": [
+        "task transition",
+        "similar task",
+        "transferability"
+      ],
+      "categories": [
+        "career_transition"
+      ],
+      "description": "Recommend nearby NCS tasks from task/KSA similarity.",
+      "executable_via_meta": true,
+      "meta_compact_default": false,
+      "meta_save_forced_false": false,
+      "name": "recommend_task_transitions",
+      "role": "user"
+    },
+    {
+      "aliases": [
+        "task training recommendation",
+        "upskilling",
+        "reskilling"
+      ],
+      "categories": [
+        "training_courses"
+      ],
+      "description": "Recommend training courses for a current NCS task from KSA evidence.",
+      "executable_via_meta": true,
+      "meta_compact_default": true,
+      "meta_save_forced_false": true,
+      "name": "recommend_training_for_task",
+      "role": "user"
+    },
+    {
+      "aliases": [
+        "transition",
+        "career move",
+        "gap training",
+        "직무 전환"
+      ],
+      "categories": [
+        "career_transition",
+        "training_courses"
+      ],
+      "description": "Recommend training for moving from one NCS scope or task query to another.",
+      "executable_via_meta": true,
+      "meta_compact_default": true,
+      "meta_save_forced_false": true,
+      "name": "recommend_training_transition",
+      "role": "user"
+    }
+  ],
+  "version": "0.1.0"
+}

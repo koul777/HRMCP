@@ -8,6 +8,7 @@ if __package__ in {None, ""}:  # pragma: no cover - direct script support
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 from ncs_mcp.config import load_settings
@@ -30,6 +31,45 @@ RULE_ISSUE_TYPES = [
 ]
 
 TYPO_PATTERNS = ["자가가", "조진", "요견"]
+TYPO_FALSE_POSITIVE_SUBSTRINGS = [
+    "자가가구",
+    "보조진행자",
+    "구조진동해석",
+]
+CRITERIA_STANDARD_ENDINGS = (
+    "수 있다",
+    "수있다",
+    "수 있어야 한다",
+    "수있어야 한다",
+    "알고 있다",
+    "인지하고 있다",
+    "파악하고 있다",
+    "이해하고 있다",
+    "한다",
+    "된다",
+    "받는다",
+    "있어야 한다",
+    "하여야 한다",
+)
+
+
+def is_typo_false_positive(text: str | None) -> bool:
+    value = text or ""
+    return any(allowed in value for allowed in TYPO_FALSE_POSITIVE_SUBSTRINGS)
+
+
+def effective_text(raw_text: str | None, refined_text: str | None = None) -> str:
+    refined = (refined_text or "").strip()
+    if refined:
+        return refined
+    return raw_text or ""
+
+
+def is_standard_criteria_expression(text: str | None) -> bool:
+    normalized = re.sub(r"\s+", " ", text or "").strip().rstrip(".")
+    if not normalized:
+        return False
+    return any(normalized.endswith(ending) for ending in CRITERIA_STANDARD_ENDINGS)
 
 
 def run_quality_checks(db_path: Path, reports_dir: Path) -> dict[str, int]:
@@ -121,82 +161,101 @@ def run_quality_checks(db_path: Path, reports_dir: Path) -> dict[str, int]:
             counts["duplicate_text"] += 1
 
     double_space_targets = [
-        ("element", "competency_elements", "element_id", "element_name_raw"),
-        ("criteria", "performance_criteria", "criteria_id", "criteria_text_raw"),
-        ("ksa", "ksa_items", "ksa_id", "ksa_text_raw"),
+        ("element", "competency_elements", "element_id", "element_name_raw", "element_name_refined"),
+        ("criteria", "performance_criteria", "criteria_id", "criteria_text_raw", "criteria_text_refined"),
+        ("ksa", "ksa_items", "ksa_id", "ksa_text_raw", "ksa_text_refined"),
     ]
-    for target_type, table, id_col, text_col in double_space_targets:
+    for target_type, table, id_col, text_col, refined_col in double_space_targets:
         rows = conn.execute(
-            f"SELECT {id_col} AS target_id, {text_col} AS value FROM {table} WHERE {text_col} LIKE '%  %'"
+            f"""
+            SELECT {id_col} AS target_id, {text_col} AS raw_value, {refined_col} AS refined_value
+            FROM {table}
+            WHERE {text_col} LIKE '%  %' OR {refined_col} LIKE '%  %'
+            """
         ).fetchall()
         for row in rows:
+            value = effective_text(row["raw_value"], row["refined_value"])
+            if "  " not in value:
+                continue
             insert_quality_issue(
                 conn,
                 target_type=target_type,
                 target_id=row["target_id"],
                 issue_type="double_space",
                 severity="info",
-                issue_detail=f"이중 공백 포함: {row['value']}",
+                issue_detail=f"이중 공백 포함: {value}",
                 suggested_action="정제본에서 공백을 정규화한다.",
             )
             counts["double_space"] += 1
 
     rows = conn.execute(
         """
-        SELECT criteria_id, criteria_text_raw
+        SELECT criteria_id, criteria_text_raw, criteria_text_refined
         FROM performance_criteria
-        WHERE criteria_text_raw NOT LIKE '%할 수 있다%'
         """
     ).fetchall()
     for row in rows:
+        value = effective_text(row["criteria_text_raw"], row["criteria_text_refined"])
+        if is_standard_criteria_expression(value):
+            continue
         insert_quality_issue(
             conn,
             target_type="criteria",
             target_id=row["criteria_id"],
             issue_type="criteria_format_issue",
             severity="warning",
-            issue_detail=f"수행준거 표준 표현 확인 필요: {row['criteria_text_raw']}",
+            issue_detail=f"수행준거 표준 표현 확인 필요: {value}",
             suggested_action="'할 수 있다' 수행문 형태인지 검토한다.",
         )
         counts["criteria_format_issue"] += 1
 
     rows = conn.execute(
         """
-        SELECT criteria_id, criteria_text_raw
+        SELECT criteria_id, criteria_text_raw, criteria_text_refined
         FROM performance_criteria
-        WHERE criteria_text_raw != '' AND SUBSTR(criteria_text_raw, -1) != '.'
+        WHERE criteria_text_raw != ''
         """
     ).fetchall()
     for row in rows:
+        value = effective_text(row["criteria_text_raw"], row["criteria_text_refined"])
+        if not value or value[-1] == ".":
+            continue
         insert_quality_issue(
             conn,
             target_type="criteria",
             target_id=row["criteria_id"],
             issue_type="criteria_format_issue",
             severity="info",
-            issue_detail=f"마침표 누락 가능성: {row['criteria_text_raw']}",
+            issue_detail=f"마침표 누락 가능성: {value}",
             suggested_action="원문 유지 후 정제본에서 문장부호 보정 여부를 검토한다.",
         )
         counts["criteria_format_issue"] += 1
 
     for pattern in TYPO_PATTERNS:
-        for target_type, table, id_col, text_col in [
-            ("element", "competency_elements", "element_id", "element_name_raw"),
-            ("criteria", "performance_criteria", "criteria_id", "criteria_text_raw"),
-            ("ksa", "ksa_items", "ksa_id", "ksa_text_raw"),
+        for target_type, table, id_col, text_col, refined_col in [
+            ("element", "competency_elements", "element_id", "element_name_raw", "element_name_refined"),
+            ("criteria", "performance_criteria", "criteria_id", "criteria_text_raw", "criteria_text_refined"),
+            ("ksa", "ksa_items", "ksa_id", "ksa_text_raw", "ksa_text_refined"),
         ]:
             rows = conn.execute(
-                f"SELECT {id_col} AS target_id, {text_col} AS value FROM {table} WHERE {text_col} LIKE ?",
-                (f"%{pattern}%",),
+                f"""
+                SELECT {id_col} AS target_id, {text_col} AS raw_value, {refined_col} AS refined_value
+                FROM {table}
+                WHERE {text_col} LIKE ? OR {refined_col} LIKE ?
+                """,
+                (f"%{pattern}%", f"%{pattern}%"),
             ).fetchall()
             for row in rows:
+                value = effective_text(row["raw_value"], row["refined_value"])
+                if pattern not in value or is_typo_false_positive(value):
+                    continue
                 insert_quality_issue(
                     conn,
                     target_type=target_type,
                     target_id=row["target_id"],
                     issue_type="suspected_typo",
                     severity="warning",
-                    issue_detail=f"의심 문자열 '{pattern}' 포함: {row['value']}",
+                    issue_detail=f"의심 문자열 '{pattern}' 포함: {value}",
                     suggested_action="원문과 정제본을 병행 보관하고 수동 검토한다.",
                 )
                 counts["suspected_typo"] += 1
@@ -268,4 +327,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

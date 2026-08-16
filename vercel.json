@@ -1,0 +1,35 @@
+{
+  "version": 2,
+  "functions": {
+    "api/index.py": {
+      "maxDuration": 30,
+      "includeFiles": "{api/**/*.py,api/ncs_interview_serving_release.db,src/**/*.py,requirements.txt,pyproject.toml}"
+    }
+  },
+  "env": {
+    "NCS_MCP_READ_ONLY": "1",
+    "NCS_MCP_ENABLE_OPERATOR_TOOLS": "0",
+    "NCS_MCP_DISABLE_DNS_REBINDING_PROTECTION": "1",
+    "NCS_MCP_STREAMABLE_HTTP_PATH": "/mcp",
+    "NCS_MCP_MAX_CONCURRENT_RECOMMENDATIONS": "2",
+    "NCS_DB_PATH": "/tmp/ncs_interview_serving.db"
+  },
+  "routes": [
+    {
+      "src": "^/api/mcp/?$",
+      "dest": "api/index.py"
+    },
+    {
+      "src": "^/api/mcp/(.+)$",
+      "dest": "api/index.py"
+    },
+    {
+      "src": "^/api/health/?$",
+      "dest": "api/index.py"
+    },
+    {
+      "src": "^/api/ready/?$",
+      "dest": "api/index.py"
+    }
+  ]
+}

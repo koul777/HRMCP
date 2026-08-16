@@ -1,27 +1,71 @@
 # Repository Guidelines
 
-## 프로젝트 지도
+## 프로젝트 목표
 
-이 저장소는 NCS정보망 Excel DB를 SQLite로 정규화하고, API 기준정보로 검증·보강한 뒤 MCP 서버로 노출하는 프로젝트다. 처음 작업할 때는 아래 문서를 순서대로 본다.
+이 저장소는 NCS 정보망 Excel DB, NCS 기준정보 API, NCS 훈련정보 API, NCS 경력개발경로 CSV, 능력단위별 자격 종목 API, 직업기초능력 API를 SQLite로 정규화하고 MCP 서버로 노출하는 프로젝트다. 최종 목표는 단순 검색기가 아니라 **NCS 기반 HR Ontology와 교육 추천 시스템**이다.
+
+현재 활성 제품 범위는 NCS 중심이다. SQF와 NCS 학습모듈 흐름은 과거 호환/참조 코드와 데이터로만 취급하며, 활성 추천 경로의 기본 근거로 사용하지 않는다.
+
+핵심 방향은 다음과 같다.
+
+- 원천 NCS DB와 API 응답을 보존하면서 별도 온톨로지 테이블에 구조화한다.
+- KSA를 원문 문자열 덩어리로만 쓰지 않고 원자 KSA 후보와 대표 개념으로 전처리한다.
+- 수행준거를 과업 단위로 보고, 과업 수행에 필요한 지식/기술/태도 관계를 만든다.
+- 과업 간 KSA 유사도와 전이 가능성을 계산해 업스킬링/리스킬링 추천 근거로 사용한다.
+- 훈련정보 API의 능력단위명칭, 능력단위분류번호, 능력단위수준, 훈련목표, 훈련시간, 훈련시설, 훈련방법은 단순 속성이 아니라 NCS 과업/KSA와 연결된 추천 근거 관계로 승격한다.
+- 추천 결과는 NCS 능력단위, 능력단위요소, 수행준거, KSA, 훈련과정, 경력개발경로, 자격, 직업기초능력 근거를 함께 반환한다.
+
+## 현재 활성 데이터 축
+
+- NCS DB: `classifications`, `competency_units`, `competency_elements`, `performance_criteria`, `ksa_items`
+- KSA 온톨로지: `ksa_atomic_items`, `ontology_concepts`, `ontology_concept_aliases`, `ksa_concept_links`, `ksa_atomic_concept_links`, `criteria_concept_links`
+- 과업/KSA 관계: `task_ksa_concept_relations`, `ontology_concept_relations`, `task_similarity_links`
+- 훈련정보 API: `ncs_training_courses`, `ncs_training_course_unit_links`, `ncs_training_course_concept_links`, `ncs_training_course_element_links`, `training_goal_concept_links`, `training_delivery_relations`
+- 경력개발경로 CSV: `ncs_career_paths`
+- 능력단위별 자격 종목 API: `ncs_qualification_items`, `ncs_unit_qualification_links`
+- 직업기초능력 API: `ncs_job_base_competencies`, `ncs_job_base_factors`, `ncs_unit_job_base_links`
+- 질의/평가 보강: `ncs_query_aliases`, `training_transition_gold_scenarios`
+
+## 전체 수집 범위 원칙
+
+API 관련 작업은 smoke test, 디버깅, 단건 조회를 제외하면 특정 02 분야에 고정하지 않는다. 운영 전처리, 추천 근거 구축, 평가 데이터 생성은 항상 전체 NCS 범위를 대상으로 한다.
+
+전체 수집 명령의 기준은 다음과 같다.
+
+```powershell
+python scripts\ncs_harness.py collect-training-courses --all-majors --num-of-rows 500
+python scripts\ncs_harness.py collect-job-base --all-majors --num-of-rows 500
+python scripts\ncs_harness.py collect-qualification-items --all-units
+```
+
+학습모듈 API를 레거시 참조 목적으로 다시 사용할 때도 단일 분야가 아니라 전체 대분류 조회를 기준으로 한다.
+
+```powershell
+python scripts\ncs_harness.py collect-study-modules --all-majors
+```
+
+코드에서는 `major_code="02"` 같은 기본값을 운영 수집 로직에 넣지 않는다. 02 분야는 쿼리 예시, smoke test, API 연결 확인 용도로만 허용한다. 전체 수집은 DB의 `available_major_codes` 또는 전체 `competency_units`를 순회해야 한다.
+
+능력단위별 자격 API는 `ncs_qualification_collection_status`에 unit별 `collected`, `empty`, `error` 상태를 기록한다. 기본 수집은 완료/빈 데이터 unit을 건너뛰며 이어서 실행한다. 강제 재수집이 필요할 때만 `--refresh`를 사용한다. 이 API의 `numOfRows`는 최대 50으로 제한한다. 실패 unit 재시도는 `retry-qualification-errors`를 사용하며, 기본적으로 `next_retry_at`이 지난 항목만 조회한다.
+
+## 처음 확인할 문서
+
+처음 작업할 때는 아래 문서를 우선 확인한다.
 
 - `ARCHITECTURE.md`: 데이터 소스, 스키마, 불변조건.
 - `docs/HARNESS_ENGINEERING.md`: 실행 하네스와 검증 루프.
 - `docs/NCS_MCP_PRD.md`: 제품 요구사항과 배경.
-- `docs/NCS_SQF_PROJECT_SYSTEM.md`: PRD 기반 전체 프로젝트 체계와 최종 MCP 발전 로드맵.
-- `docs/NCS_SQF_PURPOSE_FROM_SOURCE.md`: `미래 교육 품질, NCS에서 길을 찾다.pdf`에서 추출한 NCS-SQF 연결 취지.
-- `docs/NCS_SQF_ONTOLOGY.md`: NCS-SQF 온톨로지, 매핑, 추천 설계.
-- `docs/NCS_SQF_HARNESS_ENGINEERING.md`: NCS-SQF 경영지원 MVP 하네스와 검증 루프.
+- `docs/NCS_SQF_PROJECT_SYSTEM.md`: PRD 기반 전체 프로젝트 체계와 MCP 발전 로드맵. SQF 내용은 현재 활성 범위와 분리해서 읽는다.
+- `docs/NCS_SQF_ONTOLOGY.md`: 과거 NCS-SQF 온톨로지 설계. 현재는 NCS HR 온톨로지 원칙을 우선한다.
 - `docs/NCS_SQF_HANDOFF.md`: SQLite DB, schema, data dictionary, sample query 전달 패키지.
-- `docs/SQF_SQLITE_ONTOLOGY_SYSTEM.md`: SQF API, 자료실 보고서, OCR/HWP 전처리, JSON-LD 산출 체계.
-- `docs/CHATGPT_PRO_PROGRAM_BRIEF.md`: ChatGPT Pro에게 프로젝트를 정확히 전달하기 위한 설명서.
 - `reports/*.md`: 최근 전처리, 품질진단, API 보강 결과.
 
 ## 주요 디렉터리
 
 - `src/ncs_mcp/`: 전처리, DB 스키마, API 수집, 품질진단, MCP 서버 코드.
 - `tests/`: 단위 테스트.
-- `scripts/`: 에이전트와 개발자가 반복 실행하는 하네스.
-- `data/raw/`: 원천 Excel 파일. 대용량/민감 데이터는 커밋하지 않는다.
+- `scripts/`: 반복 실행하는 하네스.
+- `data/raw/`: 원천 Excel/API/문서 자료. 대용량/민감 데이터는 커밋하지 않는다.
 - `data/processed/`: 생성 SQLite DB.
 - `reports/`: 생성 리포트.
 
@@ -30,88 +74,105 @@
 저장소 루트에서 실행한다.
 
 ```powershell
-$env:PYTHONPATH="C:\Workplace\NCS_MCP\src"
+$env:PYTHONPATH="C:\workspace\NCS_MCP\src"
 python scripts\ncs_harness.py inspect
 python scripts\ncs_harness.py lint
 python scripts\ncs_harness.py smoke
-python scripts\ncs_harness.py dashboard
 python -m unittest discover -s tests -v
 ```
 
-전처리와 API 보강은 하네스를 통해 선택 실행한다.
+NCS 전체 온톨로지 전처리와 KSA/과업/훈련 관계 구축은 아래 순서로 실행한다.
 
 ```powershell
-python scripts\ncs_harness.py pipeline --preprocess --reset --quality --smoke
-python scripts\ncs_harness.py pipeline --api-standards --api-subd --smoke
-python scripts\ncs_harness.py pipeline --api-elements-hr --smoke
-python scripts\ncs_harness.py pipeline --api-sqf --sqf-major-code 02
-python scripts\ncs_harness.py collect-sqf-library --download --timeout 60
-python scripts\ncs_harness.py build-sqf-sqlite-model
-python scripts\ncs_harness.py preprocess-sqf-documents --ocr-empty --ocr-lang kor+eng --ocr-dpi 160
-python scripts\ncs_harness.py build-sqf-precision-matches --min-score 9 --max-matches-per-chunk 8
-python scripts\ncs_harness.py build-sqf-mappings --all-sqf --duty-limit 5000 --limit-per-duty 10
+python scripts\ncs_harness.py preprocess-ncs-ontology --atomic-ksa
+python scripts\ncs_harness.py preprocess-ncs-ontology --task-ksa-relations
+python scripts\ncs_harness.py preprocess-ncs-ontology --task-similarity
+python scripts\ncs_harness.py preprocess-ncs-ontology --training-course-links
+```
+
+스키마, 온톨로지, 추천 로직을 바꾼 뒤에는 아래도 확인한다.
+
+```powershell
 python scripts\ncs_harness.py ontology validate
-python scripts\ncs_harness.py ontology export-jsonld --out exports\ncs_sqf_ontology.jsonld
-python scripts\ncs_harness.py export-package
+python scripts\ncs_harness.py ontology export-jsonld --out exports\ncs_hr_ontology.jsonld
 ```
 
-로컬 정책/개념 PDF는 다음처럼 온톨로지 원천으로 먼저 등록한다.
+추천과 API 보강 확인에 자주 쓰는 명령은 다음과 같다.
 
 ```powershell
-python scripts\ncs_harness.py import-ontology-source --input "<local-pdf>" --title "<title>" --role framework_reference
-python scripts\ncs_harness.py preprocess-sqf-documents --only-unprocessed --ocr-empty --ocr-lang kor+eng --ocr-dpi 160
+python scripts\ncs_harness.py recommend-training-transition --current-query "노무관리" --target-query "인사기획" --limit 5
+python scripts\ncs_harness.py qualification-summary
+python scripts\ncs_harness.py job-base-summary
 ```
 
-## 학습모듈과 보고서 보강 원칙
+## NCS KSA 온톨로지 원칙
 
-교육 추천은 API 원천을 우선하지만, API가 모든 능력단위의 학습모듈을 충분히 반환한다고 가정하지 않는다. 학습모듈 API의 기본 항목은 `결과코드`, `결과메시지`, `대분류코드`, `대분류코드명`, `중분류코드`, `중분류코드명`, `소분류코드`, `소분류코드명`, `세분류코드`, `세분류코드명`, `학습모듈번호`, `학습모듈명`, `학습모듈내용`이다. API 응답 코드가 성공이어도 특정 `modulNm` 질의가 `002 empty data`이거나 내용이 빈약할 수 있다.
+이 프로젝트에서 KSA는 단순 문자열이 아니라 과업 수행 역량의 후보 노드다. 원천은 절대 덮어쓰지 않고 전처리 산출물은 별도 테이블에 저장한다.
 
-처리 우선순위는 아래 순서를 따른다.
+불변조건:
 
-1. 학습모듈 API에서 정확한 `학습모듈번호`와 `학습모듈명`이 있으면 `ncs_learning_modules`에 원천 API 행으로 저장한다.
-2. API에 없지만 공식 NCS 학습모듈 PDF가 있으면 `role = ncs_learning_module`로 등록하고, `학습모듈의 개요`에서 목표, 선수학습, 내용체계, 핵심 용어를 추출해 `ncs_learning_modules`를 보강한다.
-3. NCS 활용패키지 PDF는 `role = ncs_learning_package`로 등록하고, 수행준거, KSA, 자가진단, 직무기술서 근거로 사용한다. 정확한 학습모듈번호가 없으면 공식 학습모듈 행으로 가장하지 않는다.
-4. SQF 보고서와 개발 매뉴얼은 `role = sqf_report` 또는 `framework_reference`로 등록하고, SQF 직무수준과 NCS 능력단위의 필수/선택 관계 근거로 사용한다.
-5. 그래도 직접 학습모듈이 없으면 NCS 능력단위, 수행준거, KSA를 학습목표로 변환해 `NCS-derived education plan`으로 추천한다.
+- `ksa_items.ksa_text_raw`는 수정하지 않는다.
+- KSA 원문을 자동으로 `ontology_concepts.definition`에 복사하지 않는다.
+- 정의가 없으면 `definition_status='missing'`으로 둔다.
+- 사람이 정의를 작성한 경우에만 `definition_status='defined'`, `review_status='human_reviewed'`로 표시한다.
+- 동일 개념 통합은 원문 삭제가 아니라 대표 개념, 별칭, 링크 재연결로 처리한다.
+- 개념 관계는 문자열 덮어쓰기가 아니라 구조화 테이블에 저장한다.
 
-자료가 방대하므로 전체 파일을 무차별로 넣지 않는다. 대상 범위, API 공백, 추천 실패 케이스를 기준으로 공식 학습모듈 PDF, NCS 활용패키지, SQF 보고서를 자산 단위로 순차 등록한다. 다만 운영형 v1에서는 대상 SQF/NCS 범위의 공식 보고서와 학습모듈 PDF가 모두 `extracted` 상태가 되어야 한다.
+KSA 전처리 계층:
 
-로컬 학습모듈 PDF를 넣을 때는 파일명 또는 본문에서 `LM0202020101_19v2` 같은 안정적인 학습모듈번호를 추출한다. 현재 NCS DB의 능력단위 코드가 `0202020101_23v3`처럼 더 최신이면 기본 코드(`0202020101`)로 연결하되, 원래 PDF 버전은 `source_payload`와 `evidence_text`에 보존한다. 연결은 `learning_module_unit_links`에 저장하고 `link_method = local_pdf_unit_code`, 높은 confidence를 사용한다.
+- `ksa_items`: Excel 원천 KSA. 변경 금지.
+- `ksa_atomic_items`: KSA 원문을 줄바꿈, 불릿, 번호 등으로 분해한 원자 KSA 후보.
+- `ontology_concepts`: 지식/기술/태도 대표 개념 노드.
+- `ontology_concept_aliases`: 동일 개념 별칭.
+- `ksa_concept_links`: 원천 KSA와 대표 개념의 링크.
+- `ksa_atomic_concept_links`: 원자 KSA와 대표 개념의 링크.
+- `criteria_concept_links`: 수행준거와 개념의 링크.
 
-같은 PDF가 `(1)`, `(2)`, `(3)`처럼 중복으로 있으면 내용 해시로 같은 원천인지 확인하고 중복 등록하지 않는다. 원문 PDF와 API 원천 필드는 덮어쓰지 않고, 로컬 PDF에서 추출한 보강값은 `source_payload`에 출처, 문서 ID, 해시, 추출 위치를 남긴다.
+## 과업 수행 KSA 관계
 
-권장 명령 예시는 다음과 같다.
+수행준거는 과업을 판단하는 최소 실행 단위로 본다. 같은 수행준거를 수행하기 위해 함께 요구되는 KSA는 다음 관계로 저장한다.
 
-```powershell
-python scripts\ncs_harness.py query-study-modules --major-code 02 --module-name "인사기획"
-python scripts\ncs_harness.py import-ontology-source --input "<LM...pdf>" --title "NCS 학습모듈 - <능력단위명>" --role ncs_learning_module
-python scripts\ncs_harness.py import-ontology-source --input "<NCS-package.pdf>" --title "NCS 활용패키지 - <직무명>" --role ncs_learning_package
-python scripts\ncs_harness.py import-ontology-source --input "<SQF-report.pdf>" --title "SQF 보고서 - <분야명>" --role sqf_report
-python scripts\ncs_harness.py preprocess-sqf-documents --only-unprocessed --chunk-chars 2400 --overlap-chars 250 --ocr-empty --ocr-lang kor+eng --ocr-dpi 160
-```
+- `knowledge_enables_skill`: 특정 지식이 과업 수행 기술을 가능하게 한다.
+- `attitude_supports_skill`: 특정 태도가 과업 수행 기술을 뒷받침한다.
+- `knowledge_informs_attitude`: 특정 지식이 과업 수행 태도 형성에 영향을 준다.
+- `co_required_in_element`: 같은 능력단위요소 안에서 함께 요구된다.
 
-## NCS-SQF 온톨로지 작업 원칙
+관계 근거는 `task_ksa_concept_relations`에 수행준거, 능력단위요소, 원자 KSA, confidence, evidence를 함께 저장한다. 전체 그래프 조회를 위해 요약 관계는 `ontology_concept_relations`에도 반영한다.
 
-이 프로젝트의 다음 핵심 목표는 NCS 상세 역량 그래프와 SQF 산업별 직무 그래프를 연결해, 사용자가 원하는 업무를 물었을 때 근거가 추적되는 교육 추천을 제공하는 것이다. PDF 요약의 원칙처럼 값 나열보다 관계 중심 그래프를 우선한다. 1차 MVP 범위는 SQF `02 > 경영관리 > 경영지원`과 NCS `02 경영·회계·사무`다.
+## 훈련 추천 원칙
 
-온톨로지 작업은 아래 순서로 진행한다.
+추천은 단순히 질의어와 훈련명 문자열을 맞추는 방식이 아니다. 질의는 NCS 대분류, 중분류, 소분류, 세분류, 능력단위, 능력단위요소, 수행준거를 위에서 아래로 확인해 범위를 잡고, 그 범위 안의 KSA와 과업 근거로 내려간다.
 
-1. `inspect`로 DB, API 키, 기존 수집 상태를 확인한다.
-2. SQF API는 먼저 한 대분류만 샘플 수집한다. 예: `--api-sqf --sqf-major-code 02`.
-3. 실제 응답 구조와 필드 충실도를 확인한 뒤 전체 수집한다. SQF `/openapi26`은 성공 코드가 `000`, 빈 데이터 코드가 `002`일 수 있다.
-4. `ncs_lclas_cd = classifications.major_code`는 확정 연결로 사용한다.
-5. SQF 직무와 NCS 세분류/능력단위/요소/KSA 연결은 별도 매핑 객체에 관계, 점수, 방식, 근거, 버전을 저장한다.
-6. 추천 결과는 항상 `SQF 직무`, `NCS 능력단위`, `KSA/수행준거`, `교육훈련/자격/경력`, `매칭 근거`를 함께 반환해야 한다.
+추천 결과는 아래 근거를 함께 사용한다.
 
-KQF/SQF 취지는 다음처럼 해석한다. KQF는 NCS 등을 바탕으로 학력, 자격, 현장경력, 교육훈련 이수 결과를 상호 연계하는 국가 수준 체계다. SQF는 산업별 현장에서 통용되는 직무를 도출·표준화하고, 직무수행에 필요한 능력을 구조화하여 교육훈련-학위-자격-현장경력을 연결하는 산업별 골격이다. 따라서 이 저장소의 온톨로지는 PDF 텍스트 검색기가 아니라 직무수준, 직무역량, 능력단위, 학습결과, 경력이동 근거를 잇는 materialized graph여야 한다.
+- 현재 직무와 목표 직무의 공통 KSA: 전이 가능한 역량.
+- 목표 직무에만 강한 KSA: 부족 역량.
+- 훈련목표가 부족 KSA와 수행준거를 얼마나 직접 커버하는지.
+- 능력단위요소 단위로 훈련과정이 무엇을 커버하는지.
+- 훈련시간 대비 KSA/과업 커버 밀도.
+- 훈련방법이 지식 중심, 기술 중심, 실습 중심 중 어디에 가까운지.
+- 훈련시설이 실제 수행 환경과 맞는지.
+- 능력단위수준과 경력개발경로 단계가 현재 수준 대비 적절한지.
+- 관련 자격 종목이 직무 전환의 보조 근거가 되는지.
+- 직업기초능력의 공통점과 부족점이 전환 난이도 설명에 기여하는지.
 
-SQF의 `dutyEduTrain`, `dutyQualf`, `dutyCarr`는 일부 산업에만 채워져 있으므로, 교육 추천은 이 필드만으로 만들지 않는다. 비어 있는 경우 NCS 능력단위와 KSA를 학습 목표로 변환해 보완 추천한다.
+추천 점수는 관계 강도를 구분한다. `training_goal_concept_text` 직접 매칭을 가장 강하게 보고, `training_goal_concept_token` 토큰 매칭은 그보다 낮게 보며, `training_goal_element_implied_concept` 요소 기반 추론은 보조 근거로 본다. `unit_ksa_concept_inherited` 능력단위 상속 링크는 후보 확장용 보조 근거이며 단독으로 추천 상위에 올리지 않는다. 범용 KSA는 개념 특이도 가중치를 낮춰 여러 직무에 과잉 연결되지 않게 한다.
 
-공식 인정·평가와 추천·갭분석은 분리한다. 이 저장소의 1차 목표는 공식 판정이 아니라 NCS-SQF 연결 지식그래프 기반의 역량 탐색, 교육 추천, 부족역량 설명이다. `sameAs` 단정은 피하고 `requires`, `closeMatch`, `partiallyCovers`, `evidenceSource`, `confidence`, `version`을 사용한다.
+추천은 공식 자격 인정이나 법적 적격성 판단이 아니라 교육훈련 안내다. 자격/직무 인정 판단과 교육 추천 판단은 분리한다.
 
-## 코딩 규칙
+## 학습모듈과 SQF 처리 원칙
 
-Python 3, 4칸 들여쓰기, `snake_case`를 사용한다. 데이터 변환은 명시적인 함수와 SQL로 처리하고, 임의 문자열 파싱을 남발하지 않는다. API 데이터는 원천 Excel을 덮어쓰는 용도가 아니라 검증·보강용이다.
+현재 활성 추천 경로에서는 SQF와 NCS 학습모듈을 기본 근거로 사용하지 않는다. 기존 테이블, 테스트, 문서는 과거 호환성과 참조 용도로 남아 있을 수 있다.
+
+새 기능을 구현할 때는 기본적으로 다음 우선순위를 따른다.
+
+1. NCS 원천 DB와 KSA/과업 온톨로지.
+2. 훈련정보 API의 과정, 목표, 시간, 시설, 방법, 능력단위 링크.
+3. 경력개발경로 CSV.
+4. 능력단위별 자격 종목 API.
+5. 직업기초능력 API.
+
+SQF나 학습모듈을 다시 활성화하려면 사용자 요구가 명확해야 하며, 공식 인정/평가와 추천/갭분석을 분리해야 한다.
 
 ## 테스트 기준
 
@@ -123,27 +184,15 @@ python scripts\ncs_harness.py lint
 python scripts\ncs_harness.py smoke
 ```
 
-스키마, 전처리 중복 제거, API 파서, MCP 응답 구조를 바꾸면 관련 테스트를 추가한다.
-
-온톨로지 작업을 바꾸면 추가로 아래를 확인한다.
+온톨로지나 추천 근거 테이블을 바꾸면 추가로 아래를 확인한다.
 
 ```powershell
 python scripts\ncs_harness.py ontology validate
-python scripts\ncs_harness.py ontology export-jsonld --out exports\ncs_sqf_ontology.jsonld
 ```
-
-온톨로지 완료 기준:
-
-- 모든 SQF 문서 자산이 `extracted` 상태다.
-- SQF API 원천 행과 `sqf_job_levels_normalized` 수가 일치한다.
-- `sqf_ncs_matches`에는 전체 SQF 범위 후보가 생성되어 있다.
-- `sqf_chunk_job_level_matches`에는 보고서/OCR/HWP 근거 후보가 생성되어 있다.
-- MCP의 `analyze_gap`, `recommend_next_ncs_units`, `recommend_education_for_duty`, `search_sqf_precision_matches`가 샘플 DB에서 응답한다.
-- JSON-LD export가 생성된다.
 
 ## 보안
 
-`.env`는 비공개다. `NCS_SERVICE_KEY`와 `NCS_SQF_SERVICE_KEY`를 출력하거나 커밋하지 않는다. 생성 DB와 리포트는 재생성 가능한 산출물로 취급한다.
+`.env`는 비공개다. `NCS_SERVICE_KEY`, `NCS_TRAINING_COURSE_SERVICE_KEY`, `NCS_QUALIFICATION_SERVICE_KEY`, `NCS_JOB_BASE_SERVICE_KEY`를 출력하거나 커밋하지 않는다. 생성 DB와 리포트는 재생성 가능한 산출물로 취급한다.
 
 ## 수작업 정제
 
@@ -153,50 +202,4 @@ python scripts\ncs_harness.py ontology export-jsonld --out exports\ncs_sqf_ontol
 python scripts\ncs_dashboard.py --host 127.0.0.1 --port 8765
 ```
 
-비개발 사용자는 저장소 루트의 `run_dashboard.bat`를 더블클릭한다. 대시보드는 온톨로지 준비 전처리 워크벤치로 사용한다. 단계별 진행률, 잔여 작업, 전처리 완료/미처리/실패 항목 리스트, API 매칭 상태, 품질 이슈, 수작업 정제 입력을 함께 제공한다.
-
-원문 필드는 수정하지 않는다. 사람이 보정한 값은 refined 계열 필드에 저장하고 `review_status='human_reviewed'`로 표시한다.
-
-## 온톨로지 구축 방향
-
-이 프로젝트의 최종 목표는 단순한 KSA 텍스트 정제가 아니라 `NCS -> 능력단위 -> 능력단위요소 -> 수행준거 -> 지식/기술/태도 -> 개념 정의 -> 개념 관계`까지 연결되는 NCS 기반 HR Ontology 구축이다. 이후 "온톨로지", "KSA 정제", "지식기술태도", "개념 정의", "관계 연결" 작업 지시가 나오면 항상 이 방향을 우선한다.
-
-KSA 행은 단순 문자열이 아니라 온톨로지 후보 노드다. `ksa_items`는 원천 데이터를 보존하고, 온톨로지 작업은 별도 테이블에 저장한다.
-
-- `ontology_concepts`: 대표 개념명, 개념 유형(`knowledge`, `skill`, `attitude`), 정의, 정의 작성 상태, 관계 연결 상태, 검토 상태.
-- `ontology_concept_aliases`: 동일 개념의 별칭. 예: `직업정보론`, `직업 정보론`, `직업정보 이론`.
-- `ontology_concept_relations`: 상위 개념, 하위 개념, 관련 개념 관계.
-- `ksa_concept_links`: 원천 KSA 행과 대표 개념 노드의 연결.
-- `criteria_concept_links`: 수행준거와 온톨로지 개념의 연결.
-
-KSA 상세 화면이나 저장 로직을 바꿀 때는 아래 필드를 분리해서 다룬다.
-
-- KSA 유형: 지식 / 기술 / 태도.
-- KSA 원문: Excel 원천 문자열. 수정하지 않는다.
-- 대표 개념명: 사람이 표준화하는 개념명.
-- 개념 정의: 온톨로지 노드의 정의. KSA 원문을 자동 복사해 정의로 취급하지 않는다.
-- 별칭: 같은 개념으로 통합할 표현.
-- 상위 개념 / 하위 개념 / 관련 개념: `ontology_concept_relations`에 저장한다.
-- 관련 수행준거 / 관련 능력단위요소 / 관련 능력단위: 원천 링크와 온톨로지 링크로 추적한다.
-
-## 온톨로지 대시보드 원칙
-
-대시보드는 "데이터 전처리 현황판"이 아니라 "온톨로지 구축 관리 시스템"으로 발전시킨다. UI를 바꿀 때는 분류 선택과 아래 내용이 항상 같은 범위로 연동되어야 한다.
-
-- 대분류, 중분류, 소분류, 세분류를 클릭하면 그 선택 범위 기준으로 모든 현황이 바뀐다.
-- 온톨로지 준비 단계, 작업 카드, 품질 이슈, KSA 개념 목록은 같은 선택 범위 필터를 공유한다.
-- 지식/기술/태도별 온톨로지 구축 현황을 보여준다.
-- 최소 집계 항목은 전체 개념 수, 정의 작성 완료, 정의 미작성, 관계 연결 완료, 관계 미연결, 검토 완료다.
-- 온톨로지 작업 워크벤치에는 지식/기술/태도별 `정의 미작성`, `관계 미연결`, `중복 후보`, `검토 완료` 작업 대상을 클릭해서 볼 수 있어야 한다.
-- KSA는 납작한 목록보다 `능력단위 -> 능력단위요소 -> 수행준거 -> KSA(지식/기술/태도)` 트리 안에서 보는 화면을 우선한다.
-
-## 온톨로지 작업 불변조건
-
-- 원천 Excel 필드와 `ksa_items.ksa_text_raw`는 수정하지 않는다.
-- KSA 원문이 짧거나 단어 하나여도 그것을 그대로 "정의"로 저장하지 않는다.
-- 정의가 없으면 빈 정의로 표시하고, `definition_status='missing'` 상태로 둔다.
-- 사람이 정의를 작성하면 `ontology_concepts.definition`에 저장하고 `definition_status='defined'`, `review_status='human_reviewed'`로 표시한다.
-- 대표 개념명 변경은 원천 KSA 변경이 아니라 `ontology_concepts.concept_name` 및 `ksa_concept_links` 변경으로 처리한다.
-- 동일 개념 통합은 원문 삭제가 아니라 대표 개념 + 별칭 + 링크 재연결로 처리한다.
-- 개념 관계는 문자열 덮어쓰기가 아니라 `ontology_concept_relations`에 구조적으로 저장한다.
-- 수행준거와 개념의 연결은 `criteria_concept_links`에 저장한다.
+원문 필드는 수정하지 않는다. 사람이 보정한 값은 refined 계열 필드 또는 온톨로지 대표 개념/정의/관계 테이블에 저장하고 `review_status='human_reviewed'`로 표시한다.
