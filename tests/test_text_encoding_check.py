@@ -35,10 +35,9 @@ class TextEncodingCheckTests(unittest.TestCase):
             path.write_text(
                 json.dumps(
                     {
-                        "surface": {"active_tool_count": 11},
+                        "surface": {"active_tool_count": 7},
                         "tools": [
                             {"name": "ncs_training", "aliases": ["training"]},
-                            {"name": "recommend_training_transition", "aliases": ["transition"]},
                         ],
                     },
                     ensure_ascii=False,
@@ -49,12 +48,26 @@ class TextEncodingCheckTests(unittest.TestCase):
             issues = check_text_encoding.check_contract(path)
 
         self.assertTrue(any("ncs_training aliases do not include '훈련'" in issue for issue in issues))
-        self.assertTrue(
-            any(
-                "recommend_training_transition aliases do not include '직무 전환'" in issue
-                for issue in issues
+
+    def test_check_contract_requires_public_active_tool_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "contract.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "surface": {"active_tool_count": 11},
+                        "tools": [
+                            {"name": "ncs_training", "aliases": ["훈련", "교육"]},
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
             )
-        )
+
+            issues = check_text_encoding.check_contract(path)
+
+        self.assertTrue(any("active_tool_count is not 7" in issue for issue in issues))
 
     def test_main_returns_nonzero_for_missing_expected_text(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

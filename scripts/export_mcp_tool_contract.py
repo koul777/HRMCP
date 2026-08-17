@@ -16,13 +16,20 @@ from ncs_mcp import tool_registry
 from ncs_mcp.query_router import ROUTE_CONTRACT_SCHEMA, ROUTE_FINGERPRINT_VERSION, ROUTE_PATTERNS
 
 
-def build_contract(*, include_operator_tools: bool = False) -> dict[str, Any]:
+def build_contract(
+    *,
+    include_operator_tools: bool = False,
+    include_advanced_tools: bool = False,
+) -> dict[str, Any]:
     category_by_tool: dict[str, list[str]] = {}
     for category, tool_names in tool_registry.NCS_TOOL_CATEGORIES.items():
         for tool_name in tool_names:
             category_by_tool.setdefault(tool_name, []).append(category)
 
-    active_tools = tool_registry.mcp_tools_for_mode(operator_tools_enabled=include_operator_tools)
+    active_tools = tool_registry.mcp_tools_for_mode(
+        operator_tools_enabled=include_operator_tools,
+        advanced_tools_enabled=include_advanced_tools,
+    )
     tools = []
     for tool_name in sorted(active_tools):
         profile = tool_registry.NCS_TOOL_PROFILES.get(tool_name, {})
@@ -50,6 +57,8 @@ def build_contract(*, include_operator_tools: bool = False) -> dict[str, Any]:
             "user_tool_count": len(tool_registry.USER_MCP_TOOLS & active_tools),
             "operator_tool_count": len(tool_registry.OPERATOR_MCP_TOOLS & active_tools),
             "operator_tool_count_available": len(tool_registry.OPERATOR_MCP_TOOLS),
+            "advanced_tool_count": len(tool_registry.ADVANCED_MCP_TOOLS & active_tools),
+            "advanced_tool_count_available": len(tool_registry.ADVANCED_MCP_TOOLS),
             "legacy_hidden_tool_count": len(tool_registry.LEGACY_MCP_TOOLS),
         },
         "policy": {
@@ -57,6 +66,11 @@ def build_contract(*, include_operator_tools: bool = False) -> dict[str, Any]:
             "legacy_scope": "SQF and NCS learning modules are hidden reference paths.",
             "meta_execution": "Only read-only user tools are executable through ncs_execute_tool.",
             "operator_tools": "Hidden by default; enable with NCS_MCP_ENABLE_OPERATOR_TOOLS=1 before server start.",
+            "advanced_tools": (
+                "Ontology / education-integration / transition tools are hidden by default "
+                "for the public release; enable with NCS_MCP_ENABLE_ADVANCED_TOOLS=1 before "
+                "server start once they are stabilized."
+            ),
             "recommendation_meta_calls_force_save_false": True,
             "recommendation_meta_calls_default_compact_true": True,
             "query_routing": (
@@ -92,6 +106,7 @@ def build_contract(*, include_operator_tools: bool = False) -> dict[str, Any]:
         },
         "tools": tools,
         "operator_tools_available": sorted(tool_registry.OPERATOR_MCP_TOOLS),
+        "advanced_tools_available": sorted(tool_registry.ADVANCED_MCP_TOOLS),
         "hidden_legacy_tools": sorted(tool_registry.LEGACY_MCP_TOOLS),
     }
 
@@ -105,6 +120,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Export the admin/operator surface instead of the default public surface.",
     )
+    parser.add_argument(
+        "--include-advanced-tools",
+        action="store_true",
+        help="Include advanced ontology/education-integration/transition tools in the export.",
+    )
     args = parser.parse_args(argv)
 
     out_path = Path(args.out)
@@ -112,7 +132,10 @@ def main(argv: list[str] | None = None) -> int:
         out_path = ROOT / out_path
     contract_text = (
         json.dumps(
-            build_contract(include_operator_tools=args.include_operator_tools),
+            build_contract(
+                include_operator_tools=args.include_operator_tools,
+                include_advanced_tools=args.include_advanced_tools,
+            ),
             ensure_ascii=False,
             indent=2,
             sort_keys=True,

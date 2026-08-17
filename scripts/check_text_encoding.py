@@ -49,10 +49,8 @@ def check_contract(path: Path) -> list[str]:
     }
     if "훈련" not in aliases_by_tool.get("ncs_training", []):
         issues.append(f"{path}: ncs_training aliases do not include '훈련'")
-    if "직무 전환" not in aliases_by_tool.get("recommend_training_transition", []):
-        issues.append(f"{path}: recommend_training_transition aliases do not include '직무 전환'")
-    if payload.get("surface", {}).get("active_tool_count") != 11:
-        issues.append(f"{path}: public active_tool_count is not 11")
+    if payload.get("surface", {}).get("active_tool_count") != 7:
+        issues.append(f"{path}: public active_tool_count is not 7")
     return issues
 
 

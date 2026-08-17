@@ -129,6 +129,10 @@ REQUIRED_RELEASE_GATES = HUMAN_REVIEW_GATES | {
 }
 
 
+# Stable public tools that must always be exposed. Advanced ontology /
+# education-integration / transition tools (plan_ncs_education_path,
+# recommend_training_transition, recommend_task_transitions, get_concept_evidence)
+# are hidden by default for the public release and are therefore not required here.
 REQUIRED_PUBLIC_TOOLS = {
     "ncs_discover_tools",
     "ncs_execute_tool",
@@ -137,10 +141,6 @@ REQUIRED_PUBLIC_TOOLS = {
     "ncs_training",
     "ncs_analysis",
     "recommend_training_for_task",
-    "recommend_training_transition",
-    "plan_ncs_education_path",
-    "recommend_task_transitions",
-    "get_concept_evidence",
 }
 
 
@@ -3414,6 +3414,7 @@ def build_mcp_contract_checks(contract: dict[str, Any]) -> list[dict[str, Any]]:
     tools = contract.get("tools") or []
     tool_names = {str(tool.get("name")) for tool in tools if isinstance(tool, dict)}
     operator_tools = set(contract.get("operator_tools_available") or [])
+    advanced_tools = set(contract.get("advanced_tools_available") or [])
     active_tool_count = int(surface.get("active_tool_count") or 0)
     operator_tool_count = int(surface.get("operator_tool_count") or 0)
     missing_public = sorted(REQUIRED_PUBLIC_TOOLS - tool_names)
@@ -3427,7 +3428,7 @@ def build_mcp_contract_checks(contract: dict[str, Any]) -> list[dict[str, Any]]:
     missing_scenarios = sorted(set(REQUIRED_QUERY_ROUTER_SCENARIOS) - set(scenario_by_name))
     scenario_failures: list[str] = []
     route_integrity_failures: list[str] = []
-    known_tools = tool_names | operator_tools
+    known_tools = tool_names | operator_tools | advanced_tools
     if router.get("schema") != "ncs_query_route_v1":
         route_integrity_failures.append(f"schema={router.get('schema') or 'missing'}")
     if router.get("fingerprint_version") != "route-fingerprint-v1":

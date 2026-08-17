@@ -38,3 +38,9 @@ ci-smoke*/
 api/ncs_interview_serving_release.db
 api/*.db
 api/ncs_interview_db.zip
+
+# Deploy staging artifacts (not used by the Vercel function; excluded via
+# .vercelignore) must not be committed — they exceed GitHub's file size limit.
+deploy/vercel_mcp_app/api/ncs_interview_db.zip
+deploy/**/*.zip
+deploy/**/*.db

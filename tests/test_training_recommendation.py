@@ -8010,12 +8010,17 @@ class TrainingRecommendationTests(unittest.TestCase):
 
                 tools = getattr(getattr(server.mcp, "_tool_manager", None), "_tools", {})
                 surface = server.current_mcp_tool_surface()
-                self.assertLessEqual(len(tools), 11)
-                self.assertEqual(set(surface["all_tools"]), tool_registry.ACTIVE_MCP_TOOLS)
-                self.assertEqual(set(surface["user_tools"]), tool_registry.USER_MCP_TOOLS)
+                # Advanced ontology / education-integration / transition tools are
+                # hidden from the public surface by default.
+                public_tools = tool_registry.USER_MCP_TOOLS - tool_registry.ADVANCED_MCP_TOOLS
+                self.assertLessEqual(len(tools), 7)
+                self.assertEqual(set(surface["all_tools"]), public_tools)
+                self.assertEqual(set(surface["user_tools"]), public_tools)
                 self.assertEqual(surface["operator_tools"], [])
                 self.assertFalse(surface["operator_tools_enabled"])
+                self.assertFalse(surface["advanced_tools_enabled"])
                 self.assertEqual(set(surface["hidden_operator_tools"]), tool_registry.OPERATOR_MCP_TOOLS)
+                self.assertEqual(set(surface["hidden_advanced_tools"]), tool_registry.ADVANCED_MCP_TOOLS)
                 self.assertIn("ncs_discover_tools", tools)
                 self.assertIn("ncs_execute_tool", tools)
                 self.assertIn("ncs_search", tools)
@@ -8023,21 +8028,21 @@ class TrainingRecommendationTests(unittest.TestCase):
                 self.assertIn("ncs_training", tools)
                 self.assertIn("ncs_analysis", tools)
                 self.assertIn("recommend_training_for_task", tools)
-                self.assertIn("recommend_training_transition", tools)
-                self.assertIn("plan_ncs_education_path", tools)
-                self.assertIn("recommend_task_transitions", tools)
-                self.assertIn("get_concept_evidence", tools)
+                self.assertNotIn("recommend_training_transition", tools)
+                self.assertNotIn("plan_ncs_education_path", tools)
+                self.assertNotIn("recommend_task_transitions", tools)
+                self.assertNotIn("get_concept_evidence", tools)
                 self.assertNotIn("get_quality_issues", tools)
                 self.assertNotIn("review_training_goal_concept_link", tools)
                 self.assertNotIn("review_task_ksa_concept_relation", tools)
                 self.assertNotIn("review_learning_module_ncs_link", tools)
                 self.assertNotIn("review_ontology_concept", tools)
-                self.assertEqual(len(tools), 11)
+                self.assertEqual(len(tools), 7)
                 self.assertIn("ncs_discover_tools", surface["user_tools"])
                 self.assertIn("ncs_execute_tool", surface["user_tools"])
                 self.assertIn("ncs_search", surface["user_tools"])
-                self.assertIn("recommend_training_transition", surface["user_tools"])
-                self.assertIn("plan_ncs_education_path", surface["user_tools"])
+                self.assertNotIn("recommend_training_transition", surface["user_tools"])
+                self.assertNotIn("plan_ncs_education_path", surface["user_tools"])
                 self.assertEqual(surface["legacy_tools_present"], [])
                 self.assertEqual(surface["unexpected_tools"], [])
                 self.assertNotIn("search_training_courses", tools)
@@ -8298,9 +8303,11 @@ class TrainingRecommendationTests(unittest.TestCase):
             for category in discovery["data"]["matched_categories"]
             for tool in category["tools"]
         ]
-        self.assertIn("recommend_training_transition", discovered_names)
-        self.assertIn("plan_ncs_education_path", discovered_names)
-        self.assertEqual(discovery["data"]["query_route"]["tool"], "recommend_training_transition")
+        # Advanced ontology/transition tools are hidden by default, so discovery
+        # surfaces only the stable core training tools.
+        self.assertIn("recommend_training_for_task", discovered_names)
+        self.assertNotIn("recommend_training_transition", discovered_names)
+        self.assertNotIn("plan_ncs_education_path", discovered_names)
         self.assertIn("route_fingerprint", discovery["data"]["query_route"])
         self.assertIn("guard_flags", discovery["data"]["query_route"])
         self.assertTrue(execute_result["ok"])
@@ -8737,9 +8744,50 @@ class TrainingRecommendationTests(unittest.TestCase):
 
         self.assertTrue(payload["operator_enabled"])
         self.assertEqual(payload["operator_count"], 5)
-        self.assertEqual(payload["exposed_count"], 16)
+        # 7 core user tools + 5 operator tools; advanced tools stay hidden.
+        self.assertEqual(payload["exposed_count"], 12)
         self.assertEqual(payload["legacy_count"], 0)
         self.assertEqual(payload["unexpected_count"], 0)
+
+    def test_advanced_tools_are_exposed_when_enabled_before_import(self) -> None:
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(SRC)
+        env["NCS_MCP_ENABLE_ADVANCED_TOOLS"] = "1"
+        env.pop("NCS_MCP_ENABLE_OPERATOR_TOOLS", None)
+        script = (
+            "import json; "
+            "from ncs_mcp import server; "
+            "surface=server.current_mcp_tool_surface(); "
+            "print(json.dumps({"
+            "'advanced_enabled': surface['advanced_tools_enabled'], "
+            "'hidden_advanced_count': len(surface['hidden_advanced_tools']), "
+            "'exposed_count': len(surface['all_tools']), "
+            "'all_tools': surface['all_tools'], "
+            "'unexpected_count': len(surface['unexpected_tools'])"
+            "}))"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=str(ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        payload = json.loads(completed.stdout)
+
+        self.assertTrue(payload["advanced_enabled"])
+        self.assertEqual(payload["hidden_advanced_count"], 0)
+        # 7 core user tools + 4 advanced tools; operator tools stay hidden.
+        self.assertEqual(payload["exposed_count"], 11)
+        self.assertEqual(payload["unexpected_count"], 0)
+        for name in (
+            "plan_ncs_education_path",
+            "recommend_training_transition",
+            "recommend_task_transitions",
+            "get_concept_evidence",
+        ):
+            self.assertIn(name, payload["all_tools"])
 
     def test_ncs_ready_route_fails_when_database_missing(self) -> None:
         from ncs_mcp import server

@@ -743,6 +743,10 @@ def ncs_discover_tools(intent: str = "") -> dict[str, Any]:
             "hidden_operator_note": (
                 "Review/operator tools are hidden unless NCS_MCP_ENABLE_OPERATOR_TOOLS=1 is set before server start."
             ),
+            "hidden_advanced_note": (
+                "Advanced ontology/education-integration/transition tools are hidden unless "
+                "NCS_MCP_ENABLE_ADVANCED_TOOLS=1 is set before server start."
+            ),
             "hidden_legacy_note": "SQF and learning-module legacy tools are not part of the active recommendation path.",
         },
         audit={
@@ -823,11 +827,25 @@ def ncs_execute_tool(tool_name: str, params: dict[str, Any] | None = None) -> di
     """Execute a read-only user NCS MCP tool discovered by ncs_discover_tools."""
     if tool_name in {"ncs_discover_tools", "ncs_execute_tool"}:
         return error_response("meta_tool_recursion_blocked", tool_name=tool_name)
-    if tool_name not in tool_registry.NCS_EXECUTABLE_TOOL_NAMES:
+    advanced_enabled = bool(getattr(load_settings(), "advanced_tools_enabled", False))
+    executable_tools = tool_registry.executable_tool_names_for_mode(
+        advanced_tools_enabled=advanced_enabled
+    )
+    if tool_name not in executable_tools:
+        if tool_name in tool_registry.ADVANCED_MCP_TOOLS:
+            return error_response(
+                "tool_disabled",
+                tool_name=tool_name,
+                executable_tools=sorted(executable_tools),
+                note=(
+                    "Advanced ontology/education-integration tools are disabled on this "
+                    "deployment. Set NCS_MCP_ENABLE_ADVANCED_TOOLS=1 to enable them."
+                ),
+            )
         return error_response(
             "tool_not_executable_via_meta",
             tool_name=tool_name,
-            executable_tools=sorted(tool_registry.NCS_EXECUTABLE_TOOL_NAMES),
+            executable_tools=sorted(executable_tools),
             note="Operator/review tools and hidden legacy tools are blocked from ncs_execute_tool.",
         )
     tool_params = dict(params or {})
@@ -2931,7 +2949,11 @@ def current_mcp_tool_surface() -> dict[str, Any]:
     operator_requested = bool(settings.operator_tools_enabled)
     read_only_mode = bool(getattr(settings, "read_only_mode", False))
     operator_enabled = operator_requested and not read_only_mode
-    configured_tools = tool_registry.mcp_tools_for_mode(operator_tools_enabled=operator_enabled)
+    advanced_enabled = bool(getattr(settings, "advanced_tools_enabled", False))
+    configured_tools = tool_registry.mcp_tools_for_mode(
+        operator_tools_enabled=operator_enabled,
+        advanced_tools_enabled=advanced_enabled,
+    )
     return {
         "user_tools": sorted(tool_registry.USER_MCP_TOOLS & name_set),
         "operator_tools": sorted(tool_registry.OPERATOR_MCP_TOOLS & name_set),
@@ -2939,6 +2961,8 @@ def current_mcp_tool_surface() -> dict[str, Any]:
         "operator_tools_requested": operator_requested,
         "operator_tools_blocked_by_read_only": operator_requested and read_only_mode,
         "hidden_operator_tools": sorted(tool_registry.OPERATOR_MCP_TOOLS - name_set),
+        "advanced_tools_enabled": advanced_enabled,
+        "hidden_advanced_tools": sorted(tool_registry.ADVANCED_MCP_TOOLS - name_set),
         "legacy_tools_present": sorted(tool_registry.LEGACY_MCP_TOOLS & name_set),
         "unexpected_tools": sorted(name_set - configured_tools),
         "all_tools": names,
@@ -2957,6 +2981,9 @@ def remove_inactive_mcp_tools() -> None:
         )
         if not operator_enabled:
             for name in tool_registry.OPERATOR_MCP_TOOLS:
+                tools.pop(name, None)
+        if not bool(getattr(settings, "advanced_tools_enabled", False)):
+            for name in tool_registry.ADVANCED_MCP_TOOLS:
                 tools.pop(name, None)
 
 

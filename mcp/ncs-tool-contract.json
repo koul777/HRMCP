@@ -1,4 +1,10 @@
 {
+  "advanced_tools_available": [
+    "get_concept_evidence",
+    "plan_ncs_education_path",
+    "recommend_task_transitions",
+    "recommend_training_transition"
+  ],
   "hidden_legacy_tools": [
     "analyze_gap",
     "build_ncs_derived_learning_plans",
@@ -63,6 +69,7 @@
   ],
   "policy": {
     "active_scope": "NCS-centered training recommendation",
+    "advanced_tools": "Ontology / education-integration / transition tools are hidden by default for the public release; enable with NCS_MCP_ENABLE_ADVANCED_TOOLS=1 before server start once they are stabilized.",
     "legacy_scope": "SQF and NCS learning modules are hidden reference paths.",
     "meta_execution": "Only read-only user tools are executable through ncs_execute_tool.",
     "operator_tools": "Hidden by default; enable with NCS_MCP_ENABLE_OPERATOR_TOOLS=1 before server start.",
@@ -87,7 +94,7 @@
           "get_concept_evidence",
           "ncs_analysis"
         ],
-        "public_executable": true,
+        "public_executable": false,
         "required_params": [
           "current_query",
           "target_query"
@@ -106,7 +113,7 @@
           "recommend_task_transitions",
           "recommend_training_for_task"
         ],
-        "public_executable": true,
+        "public_executable": false,
         "required_params": [
           "current_query",
           "target_query"
@@ -141,7 +148,7 @@
         "pipeline": [
           "recommend_training_for_task"
         ],
-        "public_executable": true,
+        "public_executable": false,
         "required_params": [
           "query"
         ],
@@ -190,30 +197,16 @@
     "schema": "ncs_query_route_v1"
   },
   "surface": {
-    "active_tool_count": 11,
+    "active_tool_count": 7,
+    "advanced_tool_count": 0,
+    "advanced_tool_count_available": 4,
     "legacy_hidden_tool_count": 52,
     "mode": "public",
     "operator_tool_count": 0,
     "operator_tool_count_available": 5,
-    "user_tool_count": 11
+    "user_tool_count": 7
   },
   "tools": [
-    {
-      "aliases": [
-        "concept",
-        "KSA evidence",
-        "ontology evidence"
-      ],
-      "categories": [
-        "evidence_analysis"
-      ],
-      "description": "Return source KSA, criteria, relation, and recommendation evidence for one ontology concept.",
-      "executable_via_meta": true,
-      "meta_compact_default": false,
-      "meta_save_forced_false": false,
-      "name": "get_concept_evidence",
-      "role": "user"
-    },
     {
       "aliases": [
         "career path",
@@ -319,45 +312,6 @@
     },
     {
       "aliases": [
-        "education plan",
-        "curriculum",
-        "training path",
-        "AI-HR plan",
-        "training system matrix",
-        "교육체계",
-        "교육계획",
-        "훈련체계도"
-      ],
-      "categories": [
-        "career_transition",
-        "education_planning",
-        "training_courses"
-      ],
-      "description": "Build a compact NCS education-system plan for a task or career transition, including training_system_summary, training_system_matrix, required/reference classification, KSA evidence, preferred facility constraints, and level/hour/method/facility fit.",
-      "executable_via_meta": true,
-      "meta_compact_default": false,
-      "meta_save_forced_false": true,
-      "name": "plan_ncs_education_path",
-      "role": "user"
-    },
-    {
-      "aliases": [
-        "task transition",
-        "similar task",
-        "transferability"
-      ],
-      "categories": [
-        "career_transition"
-      ],
-      "description": "Recommend nearby NCS tasks from task/KSA similarity.",
-      "executable_via_meta": true,
-      "meta_compact_default": false,
-      "meta_save_forced_false": false,
-      "name": "recommend_task_transitions",
-      "role": "user"
-    },
-    {
-      "aliases": [
         "task training recommendation",
         "upskilling",
         "reskilling"
@@ -371,25 +325,6 @@
       "meta_compact_default": true,
       "meta_save_forced_false": true,
       "name": "recommend_training_for_task",
-      "role": "user"
-    },
-    {
-      "aliases": [
-        "transition",
-        "career move",
-        "gap training",
-        "직무 전환"
-      ],
-      "categories": [
-        "career_transition",
-        "education_planning",
-        "training_courses"
-      ],
-      "description": "Recommend training for moving from one NCS scope or task query to another.",
-      "executable_via_meta": true,
-      "meta_compact_default": true,
-      "meta_save_forced_false": true,
-      "name": "recommend_training_transition",
       "role": "user"
     }
   ],
