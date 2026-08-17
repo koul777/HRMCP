@@ -1,12 +1,8 @@
 <div align="center">
 
-<video src="https://github.com/koul777/HRMCP/raw/main/docs/hrmcp_promo.mp4" poster="docs/images/promo_poster.jpg" controls muted width="820"></video>
+[![HRMCP 소개 영상](docs/hrmcp_promo.gif)](https://github.com/koul777/HRMCP/raw/main/docs/hrmcp_promo.mp4)
 
-https://github.com/koul777/HRMCP/raw/main/docs/hrmcp_promo.mp4
-
-[![HRMCP 소개 영상](docs/images/promo_poster.jpg)](https://github.com/koul777/HRMCP/raw/main/docs/hrmcp_promo.mp4)
-
-**🎬 [HRMCP 소개 영상 재생하기](https://github.com/koul777/HRMCP/raw/main/docs/hrmcp_promo.mp4)** — 위 영상이 보이지 않으면 클릭하세요
+**🎬 [고화질 영상(MP4)으로 보기](https://github.com/koul777/HRMCP/raw/main/docs/hrmcp_promo.mp4)** — 위 미리보기를 클릭하면 재생됩니다
 
 </div>
 
