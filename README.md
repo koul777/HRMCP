@@ -1,250 +1,183 @@
-# HRMCP
+# HRMCP — NCS 기반 HR 실무용 MCP
 
-HRMCP (NCS-based HR MCP) normalizes Korean National Competency Standards (NCS)
-source data and public API responses into a SQLite knowledge graph, then exposes
-that graph through MCP tools for HR ontology search, job-description
-(채용 직무 설명자료) drafting, and education/training recommendations.
+> **HR 실무에서 NCS를 활용하는 가장 빠른 길.**
+> 채용 직무에 맞는 NCS 분류부터 능력단위 → 능력단위요소 → 수행준거 → 지식(K)·기술(S)·태도(A)까지,
+> 사람이 일일이 찾아 정리하던 정보를 이제 AI가 구조화된 NCS 데이터베이스에서 직접 조회해 활용합니다.
 
-> Naming note: "HRMCP" is the product/display name and MCP connection label.
-> Internal Python identifiers (the `ncs_mcp` package, `ncs_*` tool names) are
-> unchanged for compatibility.
+---
 
-The active product scope is NCS-centered. SQF and NCS learning-module flows may
-remain in historical tables or compatibility code, but they are legacy/reference
-surfaces unless an operator explicitly reactivates them.
+## 🎬 홍보 영상
 
-Recommendations are education-planning guidance, not official qualification,
-licensing, hiring, legal, or compliance decisions.
+<!--
+  아래 링크와 썸네일을 실제 홍보 영상 주소로 교체하세요.
+  · YouTube 예시:  [![HRMCP 소개 영상](영상썸네일이미지_URL)](https://youtu.be/영상ID)
+  · 파일 업로드 시: docs/images/ 아래에 썸네일을 넣고 아래 경로를 바꾸면 됩니다.
+-->
 
-## Publication Status
+[![HRMCP 소개 영상 — 준비 중](https://img.shields.io/badge/▶%20HRMCP%20소개%20영상-준비%20중-E23B3B?style=for-the-badge)](#-홍보-영상)
 
-This repository can be published as a private or draft developer preview when
-lint, smoke, unit tests, dashboard verification, and release-readiness evidence
-are current. Do not describe it as a stable public release until
-`release_ready=true` in the active release-readiness report.
+> 📌 홍보 영상은 준비되는 대로 이 자리에 게시됩니다. (영상 URL이 나오면 위 배지를 클릭 가능한 썸네일로 교체)
 
-CI enforces encoding, unit, lint, and smoke checks. The source-boundary audit is
-available as a `workflow_dispatch` deployment gate and must be run with
-`enforce_source_boundary=true` before pushing or sharing a source-only preview
-branch. Dashboard verification and release-readiness evidence are manual
-release gates that must be regenerated and attached or linked from the private
-preview note before sharing the preview.
+---
 
-Known non-preview blockers must be disclosed in preview notes: pending human
-review for ontology concepts, training-goal links, and task-KSA relations;
-qualification collection coverage below the release target; and any provenance
-reconfirmation packet that still requires a human decision.
+## 🚀 HRMCP를 공개합니다
 
-## What It Does
+HR 실무에서 NCS를 활용하려면 생각보다 많은 시간과 손이 필요합니다. 채용 직무에 적합한 NCS
+분류를 찾고, **능력단위 → 능력단위요소 → 수행준거 → 지식(K)·기술(S)·태도(A)** 를 하나씩 확인한
+뒤 다시 정리해야 하기 때문입니다.
 
-- Preserves NCS hierarchy, competency units, elements, performance criteria, and
-  raw KSA rows from source files.
-- Builds KSA/task ontology tables without overwriting source KSA text.
-- Links training-course goals, hours, methods, facilities, and NCS unit evidence
-  to task/KSA recommendation evidence.
-- Supports career-transition and task-based training recommendations with
-  compact evidence summaries.
-- Adds supporting evidence from NCS career paths, qualification-item APIs, and
-  job-base competency APIs.
-- Exposes a small MCP tool surface for NCS structure search, ontology lookup,
-  training-course search, and AI-HR education-path planning.
-- Includes a separate read-only institutional chat reference UI/API that routes
-  natural-language requests to public tools and blocks operator workflows.
+HRMCP는 이러한 NCS 데이터를 구조화해, ChatGPT가 필요한 정보를 직접 조회하고 HR 업무에
+활용할 수 있도록 만든 **HR 실무용 MCP** 입니다. 쉽게 말하면, 사람이 NCS 사이트에서 일일이
+찾고 정리하던 정보를 이제는 AI가 **구조화된 NCS 데이터베이스**에서 직접 찾아 활용할 수 있도록
+만든 것입니다.
 
-## Data Flow
+> 이름 안내: "HRMCP"는 제품/표시 이름이자 MCP 연결 라벨입니다. 내부 파이썬 식별자
+> (`ncs_mcp` 패키지, `ncs_*` 도구 이름)는 호환성을 위해 그대로 유지됩니다.
 
-```text
-NCS Excel/source data
-  -> classifications
-  -> competency_units
-  -> competency_elements
-  -> performance_criteria
-  -> ksa_items
+---
 
-KSA ontology preprocessing
-  -> ksa_atomic_items
-  -> ontology_concepts
-  -> ksa_concept_links
-  -> criteria_concept_links
-  -> task_ksa_concept_relations
-  -> task_similarity_links
+## 🧱 핵심은 데이터 전처리입니다
 
-Training-course API
-  -> ncs_training_courses
-  -> ncs_training_course_unit_links
-  -> ncs_training_course_concept_links
-  -> ncs_training_course_element_links
-  -> training_goal_concept_links
-  -> training_delivery_relations
+이번 공개까지 약 한 달 동안 NCS 원천 데이터를 정리하고 전처리했습니다. 현재 배포 데이터
+기준으로 아래 규모의 데이터를 서로 연결해 **AI가 조회할 수 있는 관계형 구조**로 재구성했습니다.
 
-MCP / harness
-  -> query routing
-  -> KSA gap and transfer analysis
-  -> training recommendation with evidence
-```
+| 구분 | 규모 |
+| --- | --- |
+| 능력단위 | **13,435개** |
+| 능력단위요소 | **47,620개** |
+| 수행준거 | **196,658개** |
+| 지식·기술·태도(KSA) | **57만 건 이상** |
 
-## Quick Start In 5 Steps
+공개 서버에는 이 핵심 전처리 결과를 유지한 **경량화 DB**가 탑재돼 있습니다. 일부 직무나
+데이터를 샘플로 넣은 것이 아니라, **직무기술서·면접·교육훈련 설계에 필요한 핵심 NCS 데이터는
+그대로 유지**하고, 공개 서비스에 불필요한 확장·운영 테이블만 덜어냈습니다.
 
-Run commands from the repository root.
+사용자는 **HTTPS 주소 하나만 연결**하면 되지만, 그 뒤에서는 한 달 동안 구조화한 NCS 데이터가
+AI의 검색과 결과물 작성을 뒷받침합니다.
 
-1. Create and activate a Python 3.11+ environment.
+---
 
-```powershell
-cd C:\workspace\NCS_MCP
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-```
+## 💡 HRMCP로 할 수 있는 일
 
-2. Install the package in editable mode.
+- **구조화된 면접 질문 설계** — 채용공고와 직무기술서를 바탕으로 행동면접 질문, 추가 질문,
+  평가요소를 설계할 수 있습니다.
+- **NCS 기반 직무기술서 작성** — 채용 직무에 적합한 NCS 분류와 능력단위를 찾아 직무기술서를
+  작성할 수 있습니다.
+- **교육훈련 계획 수립** — 직무별 지식·기술·태도를 분석해 교육과정, 학습목표, 교육내용을
+  설계할 수 있습니다.
 
-```powershell
-python -m pip install -e .
-```
+> ℹ️ HRMCP의 결과물은 **교육·업무 설계를 돕는 참고 자료**이며, 공식 자격·채용·법적·규정 판단을
+> 대체하지 않습니다.
 
-3. Create local configuration.
+---
 
-```powershell
-Copy-Item .env.example .env
-```
+## 🔧 사용 방법 (ChatGPT 연결)
 
-Edit `.env` so paths point to your local NCS source file and generated SQLite
-database:
+> 아래 이미지는 ChatGPT Pro 화면 기준입니다. 예시 화면에서는 플러그인 이름을 `rmcp`로
+> 만들었지만, 이름은 **HRMCP** 또는 본인이 사용하기 편한 이름으로 지정하면 됩니다.
 
-```text
-NCS_EXCEL_PATH=C:/workspace/NCS_MCP/data/raw/ncs_info_network_db_2026_02.xlsx
-NCS_DB_PATH=C:/workspace/NCS_MCP/data/processed/ncs.db
-NCS_SERVICE_KEY=<your_data_go_kr_service_key>
-NCS_TRAINING_COURSE_SERVICE_KEY=<your_ncs_training_course_data_go_kr_service_key>
-NCS_QUALIFICATION_SERVICE_KEY=<your_ncs_qualification_item_data_go_kr_service_key>
-NCS_JOB_BASE_SERVICE_KEY=<your_ncs_job_base_competency_data_go_kr_service_key>
-NCS_MCP_ENABLE_OPERATOR_TOOLS=0
-NCS_MCP_READ_ONLY=1
-NCS_MCP_MAX_CONCURRENT_RECOMMENDATIONS=2
-NCS_MCP_RECOMMENDATION_QUEUE_TIMEOUT_SECONDS=30
-NCS_API_BASE_URL=https://apis.data.go.kr/B490007/hrdkapi
-NCS_API_TIMEOUT_SECONDS=30
-```
+### 1️⃣ 왼쪽 아래 프로필을 클릭합니다
 
-4. Provide source data or a prepared SQLite DB.
+![프로필 클릭](docs/images/setup/0_1.jpg)
 
-Large source files and generated DBs are not part of the normal source package.
-For a local run, place your NCS Excel/source files under `data/raw` and generate
-`data/processed/ncs.db`, or mount/copy a prepared DB to the path configured by
-`NCS_DB_PATH`. For a GitHub developer preview, keep generated SQLite databases
-out of the source commit; if a prepared DB is needed, publish it as a controlled
-private LFS/artifact handoff with the retrieval path documented in the preview
-note.
+### 2️⃣ 메뉴에서 설정으로 이동합니다
 
-Common preprocessing commands:
+![설정 클릭](docs/images/setup/0_2.jpg)
 
-```powershell
-$env:PYTHONPATH="C:\workspace\NCS_MCP\src"
-python scripts\ncs_harness.py inspect
-python scripts\ncs_harness.py preprocess-ncs-ontology --atomic-ksa
-python scripts\ncs_harness.py preprocess-ncs-ontology --task-ksa-relations
-python scripts\ncs_harness.py preprocess-ncs-ontology --task-similarity
-python scripts\ncs_harness.py preprocess-ncs-ontology --training-course-links
-```
+### 3️⃣ 설정 → 플러그인으로 이동한 뒤, 목록을 아래로 내립니다
 
-5. Verify and run the MCP server.
+![플러그인 이동](docs/images/setup/0_3.jpg)
 
-```powershell
-$env:PYTHONPATH="C:\workspace\NCS_MCP\src"
-python scripts\ncs_harness.py lint
-python scripts\ncs_harness.py smoke
-python -m unittest discover -s tests -v
-python scripts\ncs_harness.py ontology validate
-python scripts\benchmark_chatbot_readiness.py --db data\processed\ncs.db --out reports\institutional_chatbot_readiness_benchmark.json --markdown-out reports\institutional_chatbot_readiness_benchmark.md --current-query "HR manager" --target-query "HR planning"
-```
+### 4️⃣ 목록 맨 아래의 개발자 모드를 클릭합니다
 
-STDIO mode:
+![개발자 모드 진입](docs/images/setup/0_4.jpg)
 
-```powershell
-.\run_ncs_mcp_stdio.cmd
-```
+### 5️⃣ 개발자 모드를 ON으로 변경합니다
 
-The STDIO launcher respects an existing `NCS_DB_PATH`; set it to a separately
-mounted or handed-off SQLite DB when the generated DB is not inside the checkout.
+![개발자 모드 ON](docs/images/setup/0_5.jpg)
 
-HTTP mode:
+### 6️⃣ 왼쪽 메뉴에서 플러그인을 선택합니다
 
-```powershell
-.\run_ncs_mcp_http.cmd
-```
+![플러그인 메뉴](docs/images/setup/1.jpg)
 
-Default HTTP endpoints:
+### 7️⃣ 오른쪽 위의 `+` 버튼을 클릭합니다
 
-- MCP: `http://127.0.0.1:8766/mcp`
-- Health: `http://127.0.0.1:8766/health`
-- Readiness: `http://127.0.0.1:8766/ready`
+![플러그인 추가 버튼](docs/images/setup/1_1.jpg)
 
-The launchers default to read-only SQLite serving and suppress the operator MCP
-surface. A hardened loopback-only container example is available at
-`deploy/compose.internal.yml`; identity, TLS, and user-level authorization
-still belong at the institution gateway described in
-`docs/INSTITUTIONAL_CHATBOT_SELF_HOST_GUIDE.md`.
-Non-loopback HTTP binding is rejected unless `--allow-remote-bind` is supplied
-directly, or `NCS_MCP_ALLOW_REMOTE_BIND=1` is set for the Windows HTTP launcher.
-That explicit opt-in does not provide authentication or TLS.
+### 8️⃣ 새 플러그인 정보를 입력합니다
 
-### Vercel MCP/ChatGPT quick run
+- **이름:** `HRMCP` 또는 본인이 사용하기 편한 이름
+- **연결 방식:** `서버 URL`
+  - **서버 URL:** 아래 HTTPS MCP 주소를 그대로 복사해 붙여넣기
 
-Vercel has now been wired as a serverless Streamable-HTTP surface, so ChatGPT 연결은
-주소 한 줄(`/api/mcp`)만 넣으면 됩니다. 전체 배포 가이드는
-`docs/README_VERCEL_HTTPS.md` 를 참고하세요.
+    ```text
+    https://ncs-mcp-bridge-mini2.vercel.app/api/mcp
+    ```
 
-- `vercel.json` defines the function entrypoint (`api/index.py`).
-- `api/mcp.py` exports `app` (ASGI) from `ncs_mcp.server` and bootstraps the
-  serving DB.
-- The serving DB (~117 MB) is **not committed**; it is published as a GitHub
-  Release asset and fetched at runtime via `NCS_DB_URL`.
+- **인증 방식:** `인증 없음` 선택 (드롭다운의 `∨`를 클릭해 선택)
 
-1. Prepare serving DB (**GitHub Release 방식, 권장**):
-   - 릴리스: <https://github.com/koul777/HRMCP/releases/tag/ncs-serving-2026-02>
-   - 자산 다운로드 URL을 `NCS_DB_URL`로 지정하면 배포 런타임에서 자동 다운로드:
+![새 플러그인 정보 입력](docs/images/setup/1_2.jpg)
 
-     ```text
-     https://github.com/koul777/HRMCP/releases/download/ncs-serving-2026-02/ncs_interview_serving_release.db
-     ```
+### 9️⃣ 안내사항 확인란에 체크한 뒤 만들기를 클릭합니다
 
-   - 새 슬라이스를 만들려면 `scripts/export_interview_serving_db.py` 로 export 후
-     `gh release create ...` 로 자산을 올립니다 (`docs/README_VERCEL_HTTPS.md` 3~4단계).
-2. Set read-only, public MCP defaults in Vercel environment
-   (`NCS_DB_URL` 만 추가로 등록):
+![안내 체크 후 만들기](docs/images/setup/1_3.jpg)
+
+### 🔟 연결하기를 누르면 설정이 완료됩니다
+
+![연결하기](docs/images/setup/1_4.jpg)
+
+---
+
+## 💬 사용 예시
+
+연결 후 채팅창에서 등록한 이름 앞에 `@`를 붙여 선택하면 됩니다. 예를 들어 플러그인 이름을
+`HRMCP`로 만들었다면 `@HRMCP`와 같이 사용합니다.
+
+![@ 로 플러그인 선택](docs/images/setup/1_5.jpg)
+
+**① 구조화된 면접 질문 만들기**
 
 ```text
-NCS_MCP_READ_ONLY=1
-NCS_MCP_ENABLE_OPERATOR_TOOLS=0
-NCS_MCP_DISABLE_DNS_REBINDING_PROTECTION=1
-NCS_MCP_STREAMABLE_HTTP_PATH=/mcp
-NCS_MCP_MAX_CONCURRENT_RECOMMENDATIONS=2
-NCS_DB_PATH=/tmp/ncs_interview_serving.db
-NCS_DB_URL=https://github.com/koul777/HRMCP/releases/download/ncs-serving-2026-02/ncs_interview_serving_release.db
+@HRMCP 첨부한 채용공고와 직무기술서를 참고해 구조화된 행동면접 질문 10개를 작성해줘.
+각 질문별 평가요소, 추가 질문, 긍정·부정 행동지표도 함께 제시해줘.
 ```
 
-위 기본값 중 `NCS_DB_URL` 외에는 `vercel.json` 에 이미 포함돼 있습니다.
+![면접 질문 생성 결과](docs/images/setup/1_6.jpg)
 
-```powershell
-vercel env add NCS_DB_URL production
-# 위 Release 자산 URL 붙여넣기
-```
-
-3. Deploy via Vercel.
-
-```powershell
-vercel deploy --prod
-```
-
-4. Connect ChatGPT (or any remote MCP client) to this single MCP URL:
+**② 직무기술서 작성하기**
 
 ```text
-https://ncs-mcp-bridge-mini2.vercel.app/api/mcp
+@HRMCP 채용 직무에 적합한 NCS 분류와 능력단위를 찾아 NCS 기반 직무기술서를 작성해줘.
 ```
 
-ChatGPT/Custom GPT 에서는 아래 JSON의 `url`만 넣으면 바로 등록됩니다.
+**③ 교육훈련 계획 수립하기**
 
-For ChatGPT Custom GPT (Agent/Tools config), a minimum config payload is:
+```text
+@HRMCP 인사 직무의 능력단위와 지식·기술·태도를 분석해 교육훈련 계획과 과정별 학습목표를 설계해줘.
+```
+
+---
+
+## ⚠️ 이용 시 주의사항 (공개 테스트 단계)
+
+현재 HRMCP는 **공개 테스트 단계**입니다.
+
+- **개인정보, 지원자 정보, 기관 내부자료, 비공개 문서** 등 민감한 정보는 제외하고 사용해 주세요.
+- 결과물은 참고용이며, 공식 자격·채용·법적·규정 판단의 근거로 사용하지 마세요.
+- 서비스 안정성 및 데이터는 예고 없이 변경될 수 있습니다.
+
+---
+
+## 🧩 연결 정보 요약
+
+| 항목 | 값 |
+| --- | --- |
+| MCP 서버 URL | `https://ncs-mcp-bridge-mini2.vercel.app/api/mcp` |
+| 인증 | 없음 (Auth: None) |
+| 상태 확인(health) | `https://ncs-mcp-bridge-mini2.vercel.app/api/health` |
+| 준비 확인(ready) | `https://ncs-mcp-bridge-mini2.vercel.app/api/ready` |
+
+ChatGPT Custom GPT(Agent/Tools) 설정에서는 아래 JSON의 `url`만 넣으면 됩니다.
 
 ```json
 {
@@ -256,187 +189,98 @@ For ChatGPT Custom GPT (Agent/Tools config), a minimum config payload is:
 }
 ```
 
-Health/ready checks:
+---
+
+## 🗂️ HRMCP가 하는 일 (기술 개요)
+
+- NCS 계층 구조(분류·능력단위·능력단위요소·수행준거)와 원천 KSA 행을 원본 그대로 보존합니다.
+- 원천 KSA 텍스트를 덮어쓰지 않고 KSA/과업 온톨로지 테이블을 구축합니다.
+- 교육과정의 목표·시간·방법·시설과 NCS 단위 근거를 과업/KSA 추천 근거에 연결합니다.
+- 경력 전환 및 과업 기반 교육훈련 추천을 간결한 근거 요약과 함께 제공합니다.
+- NCS 경력경로, 자격항목 API, 직무기초능력 API에서 보조 근거를 추가합니다.
+- NCS 구조 검색, 온톨로지 조회, 교육과정 검색, AI-HR 교육경로 설계를 위한 MCP 도구를 노출합니다.
+- 자연어 요청을 공개 도구로 라우팅하고 운영자 워크플로를 차단하는 읽기 전용 기관 챗봇
+  참고 UI/API를 별도로 포함합니다.
+
+> 현재 제품 범위는 NCS 중심입니다. SQF 및 NCS 학습모듈 플로우는 과거 테이블이나 호환성
+> 코드에 남아 있을 수 있으나, 운영자가 명시적으로 다시 활성화하지 않는 한 레거시/참고
+> 영역입니다.
+
+### 데이터 흐름
 
 ```text
-https://ncs-mcp-bridge-mini2.vercel.app/api/health
-https://ncs-mcp-bridge-mini2.vercel.app/api/ready
+NCS Excel/원천 데이터
+  → 분류(classifications)
+  → 능력단위(competency_units)
+  → 능력단위요소(competency_elements)
+  → 수행준거(performance_criteria)
+  → 원천 KSA 행(raw KSA)
+  → KSA/과업 온톨로지 → 추천 근거(recommendation evidence)
 ```
 
-Reference chat mode:
+---
+
+## 🖥️ 셀프 호스팅 / 배포 (관리자용)
+
+### 로컬 실행 (읽기 전용 기본값)
+
+로컬 런처는 기본적으로 읽기 전용 SQLite 서빙으로 동작하며 운영자 MCP 도구를 감춥니다.
 
 ```powershell
-.\run_ncs_institutional_chat.cmd
+.\run_ncs_mcp_http.cmd     # 로컬 HTTP MCP 서버
+.\run_ncs_institutional_chat.cmd   # 기관 챗봇 참고 UI/API
 ```
 
-- Chat UI: `http://127.0.0.1:8780/`
-- Chat API: `http://127.0.0.1:8780/api/chat`
-- Readiness: `http://127.0.0.1:8780/ready`
+- 로컬 HTTP: `http://127.0.0.1:8766/mcp` / health `http://127.0.0.1:8766/health`
+- 참고 챗 UI: `http://127.0.0.1:8780/`
 
-The local reference chat requires read-only mode and disabled operator tools.
-For an institution gateway deployment, configure authenticated identity/group
-headers, Origin enforcement, and pseudonymous audit logging as documented in
-`docs/INSTITUTIONAL_CHATBOT_SELF_HOST_GUIDE.md`. The checked-in integration
-evidence template remains unverified until the institution supplies target-host
-SSO, TLS, privacy, backup, and operations evidence.
+기본적으로 루프백 외 바인딩은 거부됩니다. 강화된 컨테이너 예시는
+`deploy/compose.internal.yml`에 있으며, 신원·TLS·사용자 권한은 기관 게이트웨이
+(`docs/INSTITUTIONAL_CHATBOT_SELF_HOST_GUIDE.md`)에서 처리해야 합니다.
 
-## API Key Issuance
+### Vercel 배포 (Streamable HTTP)
 
-The NCS API keys are issued outside this repository. Use the Korean public data
-portal that hosts the HRDK/NCS APIs, apply for access to the required services,
-and copy the issued service keys into your local `.env`.
+ChatGPT 연결은 주소 한 줄(`/api/mcp`)만 넣으면 됩니다. 전체 배포 가이드는
+`docs/README_VERCEL_HTTPS.md`를 참고하세요.
 
-Required or commonly used keys:
+- `vercel.json`이 함수 진입점(`api/index.py`)을 정의합니다.
+- `api/mcp.py`가 `ncs_mcp.server`의 `app`(ASGI)을 export하고 서빙 DB를 부트스트랩합니다.
+- 서빙 DB(약 117MB)는 **커밋되지 않으며**, GitHub Release 자산으로 배포되어 런타임에
+  `NCS_DB_URL`로 다운로드됩니다.
+  - 릴리스: <https://github.com/koul777/HRMCP/releases/tag/ncs-serving-2026-02>
 
-- `NCS_SERVICE_KEY`: NCS reference API key.
-- `NCS_TRAINING_COURSE_SERVICE_KEY`: NCS training-course API key.
-- `NCS_QUALIFICATION_SERVICE_KEY`: NCS unit qualification-item API key.
-- `NCS_JOB_BASE_SERVICE_KEY`: NCS job-base competency API key.
-
-Operational notes:
-
-- Do not commit `.env`.
-- Do not paste real keys into reports, logs, issues, or screenshots.
-- Keep key values out of `/health`, `/ready`, and MCP responses; only key
-  presence booleans are safe to expose.
-- Some broad collection jobs are rate limited. Use guarded batch commands with
-  request delays, retry limits, and `--stop-after-rate-limit-errors`.
-
-## Collection Scope
-
-Production collection and preprocessing should cover the full NCS scope, not a
-single major code. Code `02` is acceptable only for examples, smoke tests, and
-API connectivity checks.
-
-```powershell
-python scripts\ncs_harness.py collect-training-courses --all-majors --num-of-rows 500
-python scripts\ncs_harness.py collect-job-base --all-majors --num-of-rows 500
-python scripts\ncs_harness.py qualification-retry-hygiene --ncs006-checkpoint-path reports\checkpoint_ncs006_element_api_status_<DATE>_current.json --out reports\qualification_retry_hygiene_<DATE>.json --markdown-out reports\qualification_retry_hygiene_<DATE>.md
-python scripts\ncs_harness.py qualification-coverage-plan --target-ratio 0.9 --batch-size 100 --ncs006-checkpoint-path reports\checkpoint_ncs006_element_api_status_<DATE>_current.json --out reports\qualification_collection_coverage_plan_<DATE>.json --markdown-out reports\qualification_collection_coverage_plan_<DATE>.md --csv-out reports\qualification_collection_coverage_plan_<DATE>.csv
-python scripts\ncs_harness.py agent-queue-status --queue reports\aihr_agent_queue_<DATE>.json --out reports\aihr_agent_queue_status_<DATE>.json --markdown-out reports\aihr_agent_queue_status_<DATE>.md
-python scripts\ncs_harness.py collect-qualification-items --all-units --limit-units 100 --num-of-rows 50 --max-pages 1 --request-delay 2 --max-retries 1 --retry-backoff-seconds 30 --stop-after-rate-limit-errors 3 --ncs006-checkpoint-path reports\checkpoint_ncs006_element_api_status_<DATE>_current.json
-```
-
-Qualification collection records unit-level status and is designed to resume.
-Run the final collection command only after the queue status shows the guarded
-item is operator-ready and there are no safety violations. Use `--refresh` only
-when deliberately recollecting completed or empty units.
-
-## Example Recommendation Commands
-
-```powershell
-python scripts\ncs_harness.py recommend-training-transition --current-query "labor management" --target-query "HR planning" --limit 5 --compact --no-save
-python scripts\ncs_harness.py recommend-training-for-task --query "recruitment" --limit 5 --compact --no-save
-python scripts\ncs_harness.py route-ncs-query "labor management to HR planning education path"
-```
-
-Recommendation ranking distinguishes stronger direct training-goal evidence from
-weaker token, element-implied, or inherited evidence. Broad/generic KSA links are
-down-weighted so they do not dominate specialized recommendations.
-
-## 직무기술서(NCS 기반 채용 직무 설명자료) 생성 방법
-
-채용 공고문을 입력하면, 이 MCP를 통해 NCS 근거로 교차 확인된 **채용 직무
-설명자료(직무기술서)** 를 표 형식으로 만들고 워드(.docx) 파일로 저장할 수
-있습니다. 별도의 "생성 전용" 도구가 있는 것이 아니라, 아래 읽기 도구들이
-반환한 NCS 근거를 정해진 템플릿에 채워 넣는 방식입니다.
-
-### 1) 연결
-
-먼저 이 MCP를 ChatGPT(또는 다른 MCP 클라이언트)에 연결합니다.
-
-- Vercel HTTPS: `https://ncs-mcp-bridge-mini2.vercel.app/api/mcp` (위 Vercel 섹션 참고)
-- 로컬 HTTP: `http://127.0.0.1:8766/mcp`
-
-### 2) 프롬프트
-
-공고문(PDF/텍스트)과 아래 지시를 함께 전달합니다.
+Vercel 환경변수 (아래 중 `NCS_DB_URL` 외에는 `vercel.json`에 이미 포함):
 
 ```text
-HRMCP 공고문을 보고 직무기술서를 만들어줘.
-아래 예시와 동일한 표 형식으로, NCS 분류체계 → 능력단위 → 직무수행내용
-→ 필요지식 → 필요기술 → 직무수행태도 → 필요자격 → 직업기초능력 →
-참고사이트 순서로 2페이지 표를 만들고 워드 파일로 저장해줘.
+NCS_MCP_READ_ONLY=1
+NCS_MCP_ENABLE_OPERATOR_TOOLS=0
+NCS_MCP_DISABLE_DNS_REBINDING_PROTECTION=1
+NCS_MCP_STREAMABLE_HTTP_PATH=/mcp
+NCS_MCP_MAX_CONCURRENT_RECOMMENDATIONS=2
+NCS_DB_PATH=/tmp/ncs_interview_serving.db
+NCS_DB_URL=https://github.com/koul777/HRMCP/releases/download/ncs-serving-2026-02/ncs_interview_serving_release.db
 ```
 
-### 3) 출력 템플릿
+```powershell
+vercel env add NCS_DB_URL production   # Release 자산 URL 붙여넣기
+vercel deploy --prod
+```
 
-`[NCS 기반 채용 직무 설명자료 : <채용분야>]` 제목의 2페이지 표.
+### API 키 발급
 
-| 항목 | 내용 | 채우는 NCS 근거 / 도구 |
-|------|------|------------------------|
-| 채용분야 | 공고의 직무명 | 공고문 + `ncs_search` |
-| 분류체계 | 대분류·중분류·소분류·세분류 | `ncs_search`(classifications) |
-| 능력단위 | 관련 NCS 능력단위 목록 | `ncs_search` scope=`unit`, `ncs_unit_detail` |
-| 직무수행내용 | 능력단위요소(수행 업무) | `ncs_unit_detail` include=`elements`(+`criteria`) |
-| 필요지식(K) | 요구 지식 | `ncs_unit_detail` include=`ksa` → K 항목 |
-| 필요기술(S) | 요구 기술 | `ncs_unit_detail` include=`ksa` → S 항목 |
-| 직무수행태도(A) | 요구 태도 | `ncs_unit_detail` include=`ksa` → A 항목 |
-| 필요자격 | 관련 국가자격 | `ncs_analysis` mode=`qualification` |
-| 직업기초능력 | NCS 10대 직업기초능력 | 능력단위 근거 + 표준 직업기초능력 |
-| 참고사이트 | 근거 출처 | NCS(ncs.go.kr), Work24 등 |
+NCS API 키는 이 저장소 외부에서 발급합니다. 공공데이터포털(HRDK/NCS API 호스팅)에서 필요한
+서비스에 접근을 신청하고, 발급된 서비스 키를 로컬 `.env`에 넣습니다.
 
-각 능력단위요소의 지식/기술/태도는 원문(raw KSA)을 보존해 채우고, 자격·훈련
-근거는 `ncs_analysis`(qualification) 및 `ncs_unit_detail` include=`qualification`
-/`training` 으로 교차 확인합니다.
+- `NCS_SERVICE_KEY` — NCS 참조 API 키
+- `NCS_TRAINING_COURSE_SERVICE_KEY` — NCS 교육과정 API 키
+- `NCS_QUALIFICATION_SERVICE_KEY` — NCS 단위 자격항목 API 키
+- `NCS_JOB_BASE_SERVICE_KEY` — NCS 직무기초능력 API 키
 
-### 4) 워드 파일 저장
+> `.env`는 커밋하지 마세요. 실제 키를 보고서·로그·이슈·스크린샷에 붙여넣지 마세요.
 
-클라이언트에게 위 표를 `NCS_기반_채용_직무_설명자료_<채용분야>.docx` 형식의
-워드 파일로 저장하도록 지시하면 됩니다. (예: `기능직(전기)` → 채용분야
-`기능직(전기)`, 대분류 `19.전기·전자` 등으로 채워진 2페이지 표.)
+---
 
-추천 결과·직무기술서는 교육/채용 실무 참고 자료이며, 공식 자격·채용·법적
-판단을 대체하지 않습니다.
+## 📄 라이선스 및 면책
 
-### 5) 예시 출력 — 기능직(전기)
-
-HRMCP를 연결한 뒤 `HRMCP 공고문을 보고 직무기술서를 만들어줘...` 로 요청하면
-아래와 같은 2페이지 표(`.docx`)가 생성됩니다.
-
-> **[NCS 기반 채용 직무 설명자료 : 기능직(전기)]**
-
-| 항목 | 내용 |
-|------|------|
-| **채용분야** | 전기 |
-| **분류체계** | **대분류** 19.전기·전자 / 23.환경·에너지·안전 / 05.법률·경찰·소방·교도·국방<br>**중분류** 01.전기 / 06.산업안전 / 02.소방방재<br>**소분류** 05.전기기기제작 · 06.전기설비설계·감리 / 01.산업안전관리 / 01.소방<br>**세분류** 03.전기기기유지보수 · 03.전기설비운영 / 02.전기안전관리 / 04.소방안전관리 |
-| **능력단위** | **(전기기기유지보수)** 유지관리계획 수립, 고장수리, 전력에너지절감, 전기기기 유지보수 관련 문서화, 법정검사수검, 작업자·작업현장 안전관리<br>**(전기설비운영)** 전기설비운영계획 수립, 수전·변전·비상발전기 운영, ATS·CTTS 점검, 계통연계·조명·전열·전동기설비 운영, 접지·피뢰설비 운영, 전기재해 예방, 배전·간선설비 운영, 보호계전기 점검, 감시제어·경보설비 운영, 수배전·동력설비 시퀀스 제어회로 점검<br>**(전기안전관리)** 전기작업·정전기·전기화재·방폭·감전 위험관리<br>**(소방안전관리)** 소방계획 수립, 소방안전 교육훈련·관리감독, 경보·피난·소화활동·방화시설 점검, 소방시설 점검행정·유지보수, 소화기구·수계/가스계 소화설비 점검 |
-| **직무수행내용** | **(전기기기유지보수)** 전기안전관리자 직무(산업통상자원부고시 제2022-128호) 수행, 수변전설비·발전기·분전반 운전·조작, 점검·기록·보존 관리, 유지보수, 사고(정전·감전) 응급조치 및 복구<br>**(전기기기 및 관련 시설물 관리)** 자동제어설비 조작·유지보수, 승강기설비 조작·유지보수<br>**(소방안전관리)** 소화활동설비·피난설비 조작·유지보수<br>**(기타 민원업무)** 각종 민원 A/S 처리 |
-| **필요지식(K)** | 전기도면(계통도) 지식, 한국전기설비규정(KEC), 화재안전기준(NFSC), 수전설비 구성형태, 전기기기 기본 작동원리, 자동화재탐지설비 이상유무 판별, 전기안전관리 법령, 전기기기 점검주기 등 |
-| **필요기술(S)** | 수변전설비 운전·조작 기술, 전기설비 점검·측정 기술, 자동제어설비 조작 기술, 소방시설 점검 기술, 사고 응급조치·복구 기술 등 |
-| **직무수행태도(A)** | 안전수칙 준수, 정확한 점검·기록, 책임감 있는 유지보수, 신속한 사고 대응 태도 등 |
-| **필요자격** | 전기기사/전기산업기사, 전기(산업)기사 기반 전기안전관리자 선임요건, 소방안전관리자(선택) 등 |
-| **직업기초능력** | 기술능력, 문제해결능력, 자기개발능력, 의사소통능력, 직업윤리(안전) 등 |
-| **참고사이트** | NCS(ncs.go.kr), Q-Net(q-net.or.kr), 국가법령정보센터(law.go.kr) 등 |
-
-> 위 표는 예시이며, 실제 값은 공고문과 HRMCP가 조회한 NCS 근거에 따라 채워집니다.
-> 필요지식·기술·태도(KSA)는 능력단위요소 원문을 보존해 채워집니다.
-
-## MCP Tool Surface
-
-The active public surface focuses on read-heavy NCS search and recommendation:
-
-- NCS structure and ontology lookup.
-- Training-course search and detail.
-- Task-based and transition-based training recommendations.
-- AI-HR education-path planning with `query_route`, `recommended_path`,
-  `training_system_matrix`, and guide-trace evidence.
-
-Operator and review tools are not part of the default public execution surface.
-Recommendation tools executed through meta execution must use no-save behavior.
-
-## Release And Operations References
-
-- Architecture: `ARCHITECTURE.md`
-- Vercel HTTPS deployment guide: `docs/README_VERCEL_HTTPS.md`
-- Interview serving DB policy: `docs/INTERVIEW_SERVING_DB.md`
-- Harness and validation: `docs/HARNESS_ENGINEERING.md`
-- MCP release checklist: `docs/MCP_RELEASE_CHECKLIST.md`
-- Productization strategy: `docs/AIHR_PRODUCTIZATION_STRATEGY.md`
-- Deployment runbook: `docs/AIHR_DEPLOYMENT_RUNBOOK.md`
-- Institutional chatbot self-host guide: `docs/INSTITUTIONAL_CHATBOT_SELF_HOST_GUIDE.md`
-
-The generated SQLite graph is a local prepared knowledge graph. Current full
-builds can be large, so Docker/internal deployments should mount
-`data/processed` as an external volume rather than copying DB files into an
-image.
+HRMCP의 추천·생성 결과는 교육·업무 설계를 돕는 참고 자료이며, 공식 자격·라이선스·채용·법적·규정
+판단이 아닙니다. NCS 원천 데이터의 권리는 원 저작권자(한국산업인력공단 등)에 있습니다.
