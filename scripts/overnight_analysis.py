@@ -35,6 +35,21 @@ def write_json(path: Path, payload: Any) -> None:
     )
 
 
+def csv_cell(value: Any) -> str:
+    if value is None:
+        text = ""
+    elif isinstance(value, bool):
+        text = str(value).lower()
+    elif isinstance(value, (dict, list)):
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    else:
+        text = str(value)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    if text[:1] in {"=", "+", "-", "@"} or text.lstrip()[:1] in {"=", "+", "-", "@"}:
+        return "'" + text
+    return text
+
+
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames: list[str] = []
@@ -46,7 +61,7 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
-            writer.writerow(row)
+            writer.writerow({field: csv_cell(row.get(field)) for field in fieldnames})
 
 
 def fetch_counts(conn) -> dict[str, int]:

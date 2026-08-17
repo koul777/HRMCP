@@ -150,7 +150,7 @@ class MvpWorkflowTests(unittest.TestCase):
             self.assertEqual(build_summary["scope_tag"], SCOPE_MANAGEMENT_SUPPORT_HR_MVP)
             self.assertEqual(review_summary["accepted"], 1)
             self.assertGreaterEqual(review_summary["rejected"], 1)
-            self.assertEqual(statuses["accepted"], 1)
+            self.assertEqual(statuses["policy_accepted"], 1)
             self.assertGreaterEqual(statuses["rejected"], 1)
             self.assertEqual(audit_count, review_summary["accepted"] + review_summary["rejected"])
 

@@ -1,0 +1,117 @@
+{
+  "schema": "institutional_chatbot_integration_evidence_v1",
+  "generated_at": "2000-01-01T00:00:00+00:00",
+  "template": true,
+  "verification_status": "unverified",
+  "report_only": true,
+  "status_update_allowed": false,
+  "db_writes": false,
+  "approval_claim": false,
+  "controls": {
+    "llm_gateway": {
+      "control_id": "llm_gateway",
+      "implemented": false,
+      "tested": false,
+      "verification_status": "unverified",
+      "owner": "",
+      "evidence_refs": [],
+      "repository_support_refs": [
+        "src/ncs_mcp/institutional_chat.py"
+      ]
+    },
+    "identity_access": {
+      "control_id": "identity_access",
+      "implemented": false,
+      "tested": false,
+      "verification_status": "unverified",
+      "owner": "",
+      "evidence_refs": [],
+      "repository_support_refs": [
+        "src/ncs_mcp/institutional_chat.py"
+      ]
+    },
+    "private_mcp_hosting": {
+      "control_id": "private_mcp_hosting",
+      "implemented": false,
+      "tested": false,
+      "verification_status": "unverified",
+      "owner": "",
+      "evidence_refs": [],
+      "repository_support_refs": [
+        "src/ncs_mcp/config.py",
+        "src/ncs_mcp/server.py",
+        "src/ncs_mcp/institutional_chat.py"
+      ]
+    },
+    "read_only_data_volume": {
+      "control_id": "read_only_data_volume",
+      "implemented": false,
+      "tested": false,
+      "verification_status": "unverified",
+      "owner": "",
+      "evidence_refs": [],
+      "repository_support_refs": [
+        "src/ncs_mcp/config.py",
+        "src/ncs_mcp/db.py",
+        "src/ncs_mcp/server.py",
+        "src/ncs_mcp/institutional_chat.py"
+      ]
+    },
+    "audit_logging": {
+      "control_id": "audit_logging",
+      "implemented": false,
+      "tested": false,
+      "verification_status": "unverified",
+      "owner": "",
+      "evidence_refs": [],
+      "repository_support_refs": [
+        "src/ncs_mcp/institutional_chat.py"
+      ]
+    },
+    "operator_separation": {
+      "control_id": "operator_separation",
+      "implemented": false,
+      "tested": false,
+      "verification_status": "unverified",
+      "owner": "",
+      "evidence_refs": [],
+      "repository_support_refs": [
+        "src/ncs_mcp/config.py",
+        "src/ncs_mcp/server.py",
+        "src/ncs_mcp/institutional_chat.py"
+      ]
+    },
+    "security_privacy": {
+      "control_id": "security_privacy",
+      "implemented": false,
+      "tested": false,
+      "verification_status": "unverified",
+      "owner": "",
+      "evidence_refs": [],
+      "repository_support_refs": []
+    },
+    "backup_restore_rollback": {
+      "control_id": "backup_restore_rollback",
+      "implemented": false,
+      "tested": false,
+      "verification_status": "unverified",
+      "owner": "",
+      "evidence_refs": [],
+      "repository_support_refs": []
+    },
+    "capacity_incident_response": {
+      "control_id": "capacity_incident_response",
+      "implemented": false,
+      "tested": false,
+      "verification_status": "unverified",
+      "owner": "",
+      "evidence_refs": [],
+      "repository_support_refs": [
+        "src/ncs_mcp/config.py",
+        "src/ncs_mcp/error_codes.py",
+        "src/ncs_mcp/server.py",
+        "src/ncs_mcp/institutional_chat.py"
+      ]
+    }
+  }
+}

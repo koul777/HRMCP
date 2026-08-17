@@ -1,0 +1,15 @@
+*
+!api/
+!api/*.py
+!src/
+!src/**
+!mcp/
+!mcp/**
+!tmp/ncs_interview_serving_release.db
+!requirements.txt
+!pyproject.toml
+!vercel.json
+!README.md
+!run_mcp_server.bat
+!run_ncs_mcp_http.cmd
+!run_ncs_mcp_stdio.cmd

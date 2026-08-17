@@ -6,17 +6,18 @@ build-backend = "setuptools.build_meta"
 name = "ncs-mcp"
 version = "0.1.0"
 description = "NCS structured knowledge database and MCP server"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-  "mcp",
-  "openpyxl",
-  "requests",
-  "python-dotenv",
-  "Pillow",
-  "PyMuPDF",
-  "pypdf",
-  "pytesseract",
-  "olefile",
+  "mcp>=1.26,<2",
+  "openpyxl>=3.1,<4",
+  "requests>=2.32,<3",
+  "python-dotenv>=1,<2",
+  "Pillow>=10,<13",
+  "PyMuPDF>=1.24,<2",
+  "pypdf>=5,<7",
+  "pytesseract>=0.3.10,<1",
+  "olefile>=0.47,<1",
 ]
 
 [tool.setuptools.packages.find]
@@ -24,3 +25,7 @@ where = ["src"]
 
 [project.scripts]
 ncs-mcp = "ncs_mcp.server:main"
+ncs-institutional-chat = "ncs_mcp.institutional_chat:main"
+
+[tool.vercel]
+entrypoint = "api.index:app"

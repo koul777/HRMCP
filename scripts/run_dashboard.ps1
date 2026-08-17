@@ -1,6 +1,11 @@
 param(
     [string]$HostAddress = "127.0.0.1",
     [int]$Port = 8765,
+    [string]$OpenPath = "/",
+    [string]$AihrReadinessJson = "",
+    [string]$AihrAgentQueueStatusJson = "",
+    [string]$AihrAgentQueueRunJson = "",
+    [switch]$AllowRemoteBind,
     [switch]$NoOpen,
     [switch]$Restart
 )
@@ -14,7 +19,15 @@ $DbPath = Join-Path $Root "data\processed\ncs.db"
 $Logs = Join-Path $Root "logs"
 $OutLog = Join-Path $Logs "dashboard.out.log"
 $ErrLog = Join-Path $Logs "dashboard.err.log"
-$Url = "http://$HostAddress`:$Port"
+$LoopbackHosts = @("127.0.0.1", "localhost", "::1")
+if (-not $AllowRemoteBind -and -not $LoopbackHosts.Contains($HostAddress.ToLowerInvariant())) {
+    throw "Refusing to bind dashboard to non-loopback host '$HostAddress' without -AllowRemoteBind. The dashboard includes operator write endpoints."
+}
+$BaseUrl = "http://$HostAddress`:$Port"
+if (-not $OpenPath.StartsWith("/")) {
+    $OpenPath = "/$OpenPath"
+}
+$Url = "$BaseUrl$OpenPath"
 
 function Get-ListeningProcessId {
     param([int]$LocalPort)
@@ -49,8 +62,25 @@ if ($Restart -and $existingPid) {
 }
 
 if (-not $existingPid) {
-    $python = (Get-Command python -ErrorAction Stop).Source
+    $venvPython = Join-Path $Root ".venv\Scripts\python.exe"
+    if (Test-Path $venvPython) {
+        $python = $venvPython
+    } else {
+        $python = (Get-Command python -ErrorAction Stop).Source
+    }
     $ArgsLine = "-u `"$Dashboard`" --host `"$HostAddress`" --port $Port --db-path `"$DbPath`""
+    if ($AihrReadinessJson) {
+        $ArgsLine += " --aihr-readiness-json `"$AihrReadinessJson`""
+    }
+    if ($AihrAgentQueueStatusJson) {
+        $ArgsLine += " --aihr-agent-queue-status-json `"$AihrAgentQueueStatusJson`""
+    }
+    if ($AihrAgentQueueRunJson) {
+        $ArgsLine += " --aihr-agent-queue-run-json `"$AihrAgentQueueRunJson`""
+    }
+    if ($AllowRemoteBind) {
+        $ArgsLine += " --allow-remote-bind"
+    }
     Start-Process `
         -FilePath $python `
         -ArgumentList $ArgsLine `
@@ -63,7 +93,7 @@ if (-not $existingPid) {
     for ($i = 0; $i -lt 20; $i++) {
         Start-Sleep -Milliseconds 500
         try {
-            Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 2 | Out-Null
+            Invoke-WebRequest -Uri $BaseUrl -UseBasicParsing -TimeoutSec 2 | Out-Null
             $ready = $true
             break
         } catch {

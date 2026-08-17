@@ -5,6 +5,23 @@ on:
     branches: ["main", "master"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      enforce_source_boundary:
+        description: "Run source-only deployment boundary gate"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      fail_on_lfs_history:
+        description: "Fail when Git LFS history contains source-boundary artifacts"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
 jobs:
   test:
@@ -24,9 +41,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e .
+          python -m pip check
 
       - name: Compile key modules
-        run: python -m py_compile src\ncs_mcp\server.py src\ncs_mcp\tool_registry.py src\ncs_mcp\error_codes.py src\ncs_mcp\helpers.py src\ncs_mcp\smoke_data.py scripts\ncs_harness.py scripts\mcp_stdio_smoke.py scripts\mcp_http_health_smoke.py scripts\export_mcp_tool_contract.py scripts\check_text_encoding.py scripts\release_readiness_report.py
+        run: python -m py_compile src\ncs_mcp\server.py src\ncs_mcp\institutional_chat.py src\ncs_mcp\tool_registry.py src\ncs_mcp\error_codes.py src\ncs_mcp\helpers.py src\ncs_mcp\smoke_data.py scripts\ncs_harness.py scripts\mcp_stdio_smoke.py scripts\mcp_http_health_smoke.py scripts\institutional_chat_smoke.py scripts\package_install_smoke.py scripts\prepare_serving_database.py scripts\benchmark_chatbot_readiness.py scripts\institutional_chatbot_readiness_report.py scripts\export_mcp_tool_contract.py scripts\check_text_encoding.py scripts\check_deployment_source_boundary.py scripts\build_deployment_source_manifest.py scripts\summarize_preview_release_evidence.py scripts\release_readiness_report.py
 
       - name: Check MCP tool contract
         run: python scripts\export_mcp_tool_contract.py --check --out mcp\ncs-tool-contract.json
@@ -34,17 +52,44 @@ jobs:
       - name: Check release text encoding
         run: python scripts\check_text_encoding.py
 
-      - name: Run focused unit tests
-        run: python -m unittest tests.test_http_client tests.test_training_recommendation tests.test_ncs_mcp tests.test_harness -v
+      - name: Prepare CI smoke DB
+        run: |
+          New-Item -ItemType Directory -Force ci-smoke | Out-Null
+          python -m ncs_mcp.smoke_data --out ci-smoke\ncs.db
+
+      - name: Run full unit tests
+        run: python -m unittest discover -s tests -v
+        env:
+          NCS_DB_PATH: ci-smoke\ncs.db
 
       - name: Run repository lint guard
         run: python scripts\ncs_harness.py lint
+
+      - name: Build deployment source manifest
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.enforce_source_boundary == 'true' }}
+        run: python scripts\build_deployment_source_manifest.py --json-out deployment_source_manifest_ci.json --markdown-out deployment_source_manifest_ci.md
+
+      - name: Check deployment source boundary
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.enforce_source_boundary == 'true' && inputs.fail_on_lfs_history != 'true' }}
+        run: python scripts\check_deployment_source_boundary.py --check-lfs-history --json-out deployment_source_boundary_ci.json --markdown-out deployment_source_boundary_ci.md
+
+      - name: Check first-publication source boundary
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.enforce_source_boundary == 'true' && inputs.fail_on_lfs_history == 'true' }}
+        run: python scripts\check_deployment_source_boundary.py --fail-on-lfs-history --json-out deployment_source_boundary_ci.json --markdown-out deployment_source_boundary_ci.md
+
+      - name: Run harness smoke
+        run: python scripts\ncs_harness.py smoke
+        env:
+          NCS_DB_PATH: ci-smoke\ncs.db
 
       - name: Run protocol-level STDIO smoke
         run: python scripts\mcp_stdio_smoke.py --timeout 20
 
       - name: Run HTTP health smoke
         run: python scripts\mcp_http_health_smoke.py --timeout 20
+
+      - name: Run institutional chat smoke
+        run: python scripts\institutional_chat_smoke.py --timeout-seconds 60
 
   docker:
     name: Docker build
@@ -63,10 +108,16 @@ jobs:
           mkdir -p docker-smoke
           docker run --rm -v "${PWD}/docker-smoke:/data" ncs-mcp:ci \
             python -m ncs_mcp.smoke_data --out /data/ncs.db
-          docker run -d --name ncs-mcp-ci -p 8777:8777 \
-            -v "${PWD}/docker-smoke:/data" \
+          docker run -d --name ncs-mcp-ci --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --tmpfs /tmp -p 127.0.0.1:8777:8777 \
+            -v "${PWD}/docker-smoke/ncs.db:/data/ncs.db:ro" \
             -e NCS_SERVICE_KEY=docker-smoke-secret \
+            -e NCS_MCP_HOST=0.0.0.0 \
             -e NCS_MCP_PORT=8777 \
+            -e NCS_MCP_ALLOW_REMOTE_BIND=1 \
+            -e NCS_MCP_READ_ONLY=1 \
+            -e NCS_MCP_ENABLE_OPERATOR_TOOLS=0 \
+            -e NCS_MCP_MAX_CONCURRENT_RECOMMENDATIONS=2 \
             ncs-mcp:ci
           trap 'docker rm -f ncs-mcp-ci >/dev/null 2>&1 || true' EXIT
           for i in {1..30}; do

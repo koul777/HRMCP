@@ -1,0 +1,10 @@
+mcp>=1.26,<2
+openpyxl>=3.1,<4
+requests>=2.32,<3
+python-dotenv>=1,<2
+Pillow>=10,<13
+PyMuPDF>=1.24,<2
+pypdf>=5,<7
+pytesseract>=0.3.10,<1
+olefile>=0.47,<1
+pytest>=7,<9

@@ -1,2 +1,5 @@
-data/processed/ncs.db filter=lfs diff=lfs merge=lfs -text
+data/raw/*.xls filter=lfs diff=lfs merge=lfs -text
+data/raw/*.xlsx filter=lfs diff=lfs merge=lfs -text
+data/processed/*.db filter=lfs diff=lfs merge=lfs -text
+data/processed/*.db-* filter=lfs diff=lfs merge=lfs -text
 data/ocr/tessdata/*.traineddata filter=lfs diff=lfs merge=lfs -text

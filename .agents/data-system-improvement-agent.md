@@ -32,6 +32,11 @@ Data targets:
 - `ncs_training_course_element_links`
 - `training_goal_concept_links`
 - `training_delivery_relations`
+- `ncs_reference_documents`
+- `ncs_reference_pages`
+- `ncs_reference_chunks`
+- `ncs_reference_entities`
+- `ncs_reference_entity_links`
 - `ncs_qualification_items`
 - `ncs_unit_qualification_links`
 - `ncs_job_base_competencies`
@@ -50,6 +55,11 @@ Rules:
 - Keep changes scoped and add tests proportional to risk.
 - Prefer additive/backward-compatible schema changes when schema work is unavoidable.
 - Qualification API collection must respect `ncs_qualification_collection_status`, skip completed/empty units by default, and use retry metadata for failed units.
+- Treat the 2026 HR NCS training-system guide as workflow/rubric evidence only. It is not source data, and report examples must not become canonical training data.
+- Active recommendation evidence should remain NCS HR ontology plus training API, career path, qualification, and job-base supporting evidence. SQF and study modules are not active recommendation evidence.
+- Data improvements should strengthen `job/scope -> task -> KSA -> training course` traceability, course-level delivery evidence, level/time/method fit, and reviewable evidence samples.
+- If changing AI-HR surfaces, preserve `recommended_path`, `training_system_matrix`, `task_ksa_basis`, `facility_constraint_fit`, `human_review`, `query_route`, and `training_system_guide_trace`.
+- Treat `human_review` as guidance only; do not write `human_reviewed`, `accepted`, or `reviewed` without explicit human input.
 
 Suggested workflow:
 1. Inspect current counts and quality issues.

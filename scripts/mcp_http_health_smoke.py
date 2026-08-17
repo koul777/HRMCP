@@ -56,6 +56,8 @@ def main(argv: list[str] | None = None) -> int:
     env["PYTHONPATH"] = str(SRC)
     env["NCS_DB_PATH"] = str(db_path)
     env["NCS_SERVICE_KEY"] = secret
+    env["NCS_MCP_READ_ONLY"] = "1"
+    env["NCS_MCP_MAX_CONCURRENT_RECOMMENDATIONS"] = "2"
     env.pop("NCS_MCP_ENABLE_OPERATOR_TOOLS", None)
 
     process = subprocess.Popen(
@@ -80,7 +82,12 @@ def main(argv: list[str] | None = None) -> int:
     ready_url = f"http://127.0.0.1:{port}/ready"
     deadline = time.monotonic() + args.timeout
     payload: dict[str, Any] | None = None
+    ready_payload: dict[str, Any] | None = None
     error = ""
+    report: dict[str, Any]
+    return_code = 1
+    server_stdout = ""
+    server_stderr = ""
     try:
         while time.monotonic() < deadline:
             if process.poll() is not None:
@@ -92,55 +99,48 @@ def main(argv: list[str] | None = None) -> int:
                 error = str(exc)
                 time.sleep(0.25)
         if payload is None:
-            stdout, stderr = process.communicate(timeout=3) if process.poll() is not None else ("", "")
-            print(
-                json.dumps(
-                    {
-                        "ok": False,
-                        "error": "health_timeout",
-                        "last_error": error,
-                        "returncode": process.poll(),
-                        "stdout_tail": stdout[-1000:],
-                        "stderr_tail": stderr[-1000:],
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                )
+            report = {
+                "ok": False,
+                "error": "health_timeout",
+                "last_error": error,
+                "returncode": process.poll(),
+            }
+        else:
+            ready_payload = fetch_json(ready_url, timeout=2)
+            response_text = json.dumps(
+                {"health": payload, "ready": ready_payload}, ensure_ascii=False
             )
-            return 1
-        payload_text = json.dumps(payload, ensure_ascii=False)
-        ready_payload = fetch_json(ready_url, timeout=2)
-        ok = (
-            payload.get("status") == "ok"
-            and payload.get("endpoint") == "/mcp"
-            and payload.get("tools", {}).get("exposed") == expected_tools
-            and payload.get("runtime", {}).get("database", {}).get("ready") is True
-            and ready_payload.get("status") == "ready"
-            and secret not in payload_text
-            and payload.get("runtime", {}).get("api_keys", {}).get("service_key_present") is True
-        )
-        print(
-            json.dumps(
-                {
-                    "ok": ok,
-                    "url": url,
-                    "status": payload.get("status"),
-                    "endpoint": payload.get("endpoint"),
-                    "tool_count": payload.get("tools", {}).get("exposed"),
-                    "expected_tool_count": expected_tools,
-                    "operator_tools_enabled": payload.get("runtime", {}).get("operator_tools_enabled"),
-                    "database_ready": payload.get("runtime", {}).get("database", {}).get("ready"),
-                    "ready_status": ready_payload.get("status"),
-                    "secret_leaked": secret in payload_text,
-                    "service_key_present": payload.get("runtime", {})
-                    .get("api_keys", {})
-                    .get("service_key_present"),
-                },
-                ensure_ascii=False,
-                indent=2,
+            response_secret_leaked = secret in response_text
+            ok = (
+                payload.get("status") == "ok"
+                and payload.get("endpoint") == "/mcp"
+                and payload.get("tools", {}).get("exposed") == expected_tools
+                and payload.get("runtime", {}).get("database", {}).get("ready") is True
+                and ready_payload.get("status") == "ready"
+                and payload.get("runtime", {}).get("read_only_mode") is True
+                and payload.get("runtime", {}).get("max_concurrent_recommendations") == 2
+                and not response_secret_leaked
+                and payload.get("runtime", {}).get("api_keys", {}).get("service_key_present") is True
             )
-        )
-        return 0 if ok else 1
+            report = {
+                "ok": ok,
+                "url": url,
+                "status": payload.get("status"),
+                "endpoint": payload.get("endpoint"),
+                "tool_count": payload.get("tools", {}).get("exposed"),
+                "expected_tool_count": expected_tools,
+                "operator_tools_enabled": payload.get("runtime", {}).get("operator_tools_enabled"),
+                "database_ready": payload.get("runtime", {}).get("database", {}).get("ready"),
+                "ready_status": ready_payload.get("status"),
+                "read_only_mode": payload.get("runtime", {}).get("read_only_mode"),
+                "max_concurrent_recommendations": payload.get("runtime", {}).get(
+                    "max_concurrent_recommendations"
+                ),
+                "response_secret_leaked": response_secret_leaked,
+                "service_key_present": payload.get("runtime", {})
+                .get("api_keys", {})
+                .get("service_key_present"),
+            }
     finally:
         if process.poll() is None:
             process.terminate()
@@ -149,7 +149,22 @@ def main(argv: list[str] | None = None) -> int:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
+        server_stdout, server_stderr = process.communicate()
         temp_dir.cleanup()
+
+    output_secret_leaked = secret in server_stdout or secret in server_stderr
+    report["output_secret_leaked"] = output_secret_leaked
+    report["secret_leaked"] = bool(
+        report.get("response_secret_leaked") or output_secret_leaked
+    )
+    if output_secret_leaked:
+        report["ok"] = False
+    if not report.get("ok"):
+        report["stdout_tail"] = server_stdout[-1000:].replace(secret, "[REDACTED]")
+        report["stderr_tail"] = server_stderr[-1000:].replace(secret, "[REDACTED]")
+    return_code = 0 if report.get("ok") else 1
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return return_code
 
 
 if __name__ == "__main__":

@@ -1,0 +1,30 @@
+services:
+  ncs-mcp:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: ncs-mcp:internal
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    environment:
+      NCS_DB_PATH: /data/ncs.db
+      NCS_MCP_HOST: 0.0.0.0
+      NCS_MCP_PORT: "8766"
+      NCS_MCP_ALLOW_REMOTE_BIND: "1"
+      NCS_MCP_READ_ONLY: "1"
+      NCS_MCP_ENABLE_OPERATOR_TOOLS: "0"
+      NCS_MCP_MAX_CONCURRENT_RECOMMENDATIONS: "2"
+      NCS_MCP_RECOMMENDATION_QUEUE_TIMEOUT_SECONDS: "30"
+    volumes:
+      - type: bind
+        source: ${NCS_DB_HOST_PATH:-../data/processed/ncs.db}
+        target: /data/ncs.db
+        read_only: true
+    ports:
+      - "127.0.0.1:${NCS_MCP_HOST_PORT:-8766}:8766"

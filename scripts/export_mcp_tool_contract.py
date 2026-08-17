@@ -13,6 +13,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from ncs_mcp import tool_registry
+from ncs_mcp.query_router import ROUTE_CONTRACT_SCHEMA, ROUTE_FINGERPRINT_VERSION, ROUTE_PATTERNS
 
 
 def build_contract(*, include_operator_tools: bool = False) -> dict[str, Any]:
@@ -58,6 +59,36 @@ def build_contract(*, include_operator_tools: bool = False) -> dict[str, Any]:
             "operator_tools": "Hidden by default; enable with NCS_MCP_ENABLE_OPERATOR_TOOLS=1 before server start.",
             "recommendation_meta_calls_force_save_false": True,
             "recommendation_meta_calls_default_compact_true": True,
+            "query_routing": (
+                "ncs_discover_tools returns a Law MCP-style query_route with scenario, "
+                "tool, params, required_params, missing_params, pipeline, risk_flags, "
+                "guard_flags, and a stable route_fingerprint."
+            ),
+            "route_integrity": (
+                "ncs_execute_tool accepts _route_query and optional _route_fingerprint, "
+                "recomputes the route, rejects mismatched fingerprints, and only executes "
+                "the routed primary tool or expected tool-chain tools."
+            ),
+        },
+        "query_router": {
+            "schema": ROUTE_CONTRACT_SCHEMA,
+            "fingerprint_version": ROUTE_FINGERPRINT_VERSION,
+            "scenario_count": len(ROUTE_PATTERNS),
+            "scenarios": [
+                {
+                    "scenario": pattern.scenario,
+                    "tool": pattern.tool,
+                    "required_params": list(pattern.required_params),
+                    "pipeline": list(pattern.pipeline),
+                    "requires_operator_surface": pattern.tool in tool_registry.OPERATOR_MCP_TOOLS,
+                    "public_executable": pattern.tool in active_tools,
+                    "expected_tool_chain": [
+                        pattern.tool,
+                        *[tool_name for tool_name in pattern.pipeline if tool_name != pattern.tool],
+                    ],
+                }
+                for pattern in ROUTE_PATTERNS
+            ],
         },
         "tools": tools,
         "operator_tools_available": sorted(tool_registry.OPERATOR_MCP_TOOLS),

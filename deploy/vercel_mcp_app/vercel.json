@@ -1,0 +1,32 @@
+{
+  "version": 2,
+  "env": {
+    "NCS_MCP_READ_ONLY": "1",
+    "NCS_MCP_ENABLE_OPERATOR_TOOLS": "0",
+    "NCS_MCP_DISABLE_DNS_REBINDING_PROTECTION": "1",
+    "NCS_MCP_STREAMABLE_HTTP_PATH": "/mcp"
+  },
+  "functions": {
+    "api/index.py": {
+      "maxDuration": 30
+    }
+  },
+  "routes": [
+    {
+      "src": "^/api/mcp/?$",
+      "dest": "api/index.py"
+    },
+    {
+      "src": "^/api/mcp/(.+)$",
+      "dest": "api/index.py"
+    },
+    {
+      "src": "^/api/health/?$",
+      "dest": "api/index.py"
+    },
+    {
+      "src": "^/api/ready/?$",
+      "dest": "api/index.py"
+    }
+  ]
+}

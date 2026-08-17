@@ -1,0 +1,63 @@
+services:
+  ncs-institutional-chat:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: ncs-mcp:institutional-chat
+    command:
+      - python
+      - -m
+      - ncs_mcp.institutional_chat
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8780"
+      - --allow-remote-bind
+      - --auth-mode
+      - gateway
+      - --audit-log
+      - /audit/events.jsonl
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    environment:
+      NCS_DB_PATH: /data/ncs.db
+      NCS_MCP_PORT: "8780"
+      NCS_MCP_READ_ONLY: "1"
+      NCS_MCP_ENABLE_OPERATOR_TOOLS: "0"
+      NCS_MCP_MAX_CONCURRENT_RECOMMENDATIONS: "2"
+      NCS_MCP_RECOMMENDATION_QUEUE_TIMEOUT_SECONDS: "30"
+      NCS_CHAT_AUTH_MODE: gateway
+      NCS_CHAT_ALLOWED_ORIGINS: ${NCS_CHAT_ALLOWED_ORIGINS:?set allowed origins}
+      NCS_CHAT_ALLOWED_GROUPS: ${NCS_CHAT_ALLOWED_GROUPS:-}
+      NCS_CHAT_GATEWAY_SECRET_FILE: /run/secrets/chat_gateway_secret
+      NCS_CHAT_AUDIT_HASH_SALT_FILE: /run/secrets/chat_audit_hash_salt
+      NCS_CHAT_MAX_HTTP_WORKERS: "32"
+      NCS_CHAT_REQUEST_SOCKET_TIMEOUT_SECONDS: "15"
+    secrets:
+      - chat_gateway_secret
+      - chat_audit_hash_salt
+    volumes:
+      - type: bind
+        source: ${NCS_DB_HOST_PATH:?set prepared database path}
+        target: /data/ncs.db
+        read_only: true
+      - type: volume
+        source: chat_audit
+        target: /audit
+    ports:
+      - "127.0.0.1:${NCS_CHAT_HOST_PORT:-8780}:8780"
+
+secrets:
+  chat_gateway_secret:
+    file: ${NCS_CHAT_GATEWAY_SECRET_FILE:?set gateway secret file}
+  chat_audit_hash_salt:
+    file: ${NCS_CHAT_AUDIT_HASH_SALT_FILE:?set audit hash salt file}
+
+volumes:
+  chat_audit:

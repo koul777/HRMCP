@@ -1,0 +1,1370 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>NCS 역량 지도</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f3f6fb;
+      --surface: #ffffff;
+      --surface-2: #edf2f8;
+      --ink: #152033;
+      --muted: #647187;
+      --line: #d6deea;
+      --line-strong: #aebbd0;
+      --brand: #1d4ed8;
+      --brand-ink: #ffffff;
+      --structure: #2563eb;
+      --knowledge: #7c3aed;
+      --skill: #0f766e;
+      --attitude: #b45309;
+      --course: #be185d;
+      --support: #475569;
+      --danger: #b42318;
+      --shadow: 0 14px 34px rgba(39, 54, 86, .10);
+      --node-shadow: 0 8px 18px rgba(25, 41, 76, .14);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        color-scheme: dark;
+        --bg: #0c1320;
+        --surface: #121c2d;
+        --surface-2: #19263a;
+        --ink: #eef4ff;
+        --muted: #a7b4c8;
+        --line: #2c3b52;
+        --line-strong: #50617a;
+        --brand: #8eb2ff;
+        --brand-ink: #0c1830;
+        --structure: #76a7ff;
+        --knowledge: #b49aff;
+        --skill: #62d5c6;
+        --attitude: #ffc46d;
+        --course: #ff8abd;
+        --support: #b2bfd1;
+        --danger: #ff9b91;
+        --shadow: 0 16px 38px rgba(0, 0, 0, .26);
+        --node-shadow: 0 8px 18px rgba(0, 0, 0, .3);
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 18% 12%, color-mix(in srgb, var(--brand) 8%, transparent), transparent 28rem),
+        var(--bg);
+      color: var(--ink);
+      font-family: "Pretendard", "Noto Sans KR", "Segoe UI", sans-serif;
+    }
+    button, input, a { font: inherit; }
+    button, a { -webkit-tap-highlight-color: transparent; }
+    button:focus-visible, input:focus-visible, a:focus-visible {
+      outline: 3px solid color-mix(in srgb, var(--brand) 60%, transparent);
+      outline-offset: 2px;
+    }
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+    .topbar {
+      display: grid;
+      grid-template-columns: minmax(210px, .7fr) minmax(320px, 1.7fr) auto;
+      gap: 18px;
+      align-items: center;
+      padding: 18px 24px;
+      background: color-mix(in srgb, var(--surface) 94%, transparent);
+      border-bottom: 1px solid var(--line);
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      backdrop-filter: blur(18px);
+    }
+    .brand { min-width: 0; }
+    .brand-kicker {
+      display: block;
+      color: var(--brand);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+    h1 { margin: 2px 0 0; font-size: clamp(20px, 2.4vw, 30px); line-height: 1.15; }
+    .search-form { display: flex; gap: 8px; min-width: 0; }
+    .search-form input {
+      width: 100%;
+      min-width: 0;
+      padding: 11px 14px;
+      color: var(--ink);
+      background: var(--surface-2);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+    }
+    .btn {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      color: var(--ink);
+      border-radius: 10px;
+      padding: 9px 12px;
+      cursor: pointer;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+    .btn:hover { border-color: var(--line-strong); background: var(--surface-2); }
+    .btn-primary { background: var(--brand); color: var(--brand-ink); border-color: var(--brand); font-weight: 700; }
+    .btn-primary:hover { background: color-mix(in srgb, var(--brand) 88%, var(--ink)); }
+    .top-actions { display: flex; gap: 8px; }
+    .shell {
+      display: grid;
+      grid-template-columns: 248px minmax(520px, 1fr) 310px;
+      gap: 14px;
+      max-width: 1920px;
+      margin: 0 auto;
+      padding: 14px;
+      align-items: start;
+    }
+    .panel {
+      background: color-mix(in srgb, var(--surface) 96%, transparent);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      box-shadow: var(--shadow);
+    }
+    .sidebar { padding: 16px; }
+    .sidebar h2, .sidebar h3 { margin: 0; }
+    .sidebar h2 { font-size: 17px; }
+    .sidebar h3 { font-size: 13px; margin-top: 20px; color: var(--muted); }
+    .subtitle { margin: 6px 0 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
+    .metric-row { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-top: 14px; }
+    .metric { padding: 10px; background: var(--surface-2); border-radius: 10px; }
+    .metric span { display: block; color: var(--muted); font-size: 11px; }
+    .metric strong { display: block; margin-top: 2px; font-size: 20px; }
+    .filter-list { display: grid; gap: 8px; margin-top: 10px; }
+    .filter {
+      display: grid;
+      grid-template-columns: auto 14px 1fr auto;
+      align-items: center;
+      gap: 8px;
+      min-height: 30px;
+      font-size: 13px;
+    }
+    .filter input { margin: 0; }
+    .swatch { width: 12px; height: 12px; border-radius: 4px; background: var(--structure); }
+    .swatch.knowledge { background: var(--knowledge); border-radius: 50%; }
+    .swatch.skill { background: var(--skill); transform: rotate(45deg); border-radius: 2px; }
+    .swatch.attitude { background: var(--attitude); clip-path: polygon(50% 0, 100% 100%, 0 100%); }
+    .swatch.course { background: var(--course); border-radius: 999px; }
+    .swatch.support { background: var(--support); }
+    .count { color: var(--muted); font-variant-numeric: tabular-nums; }
+    .edge-key { display: grid; gap: 9px; margin-top: 10px; font-size: 12px; color: var(--muted); }
+    .edge-key div { display: flex; align-items: center; gap: 8px; }
+    .edge-sample { width: 34px; height: 0; border-top: 2px solid var(--line-strong); }
+    .edge-sample.candidate { border-top-style: dashed; }
+    .edge-sample.supporting { border-top-style: dotted; }
+    .stage { overflow: hidden; min-height: 720px; }
+    .stage-toolbar {
+      min-height: 70px;
+      padding: 13px 16px;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      border-bottom: 1px solid var(--line);
+    }
+    .scope-label { min-width: 0; }
+    .scope-label strong, .scope-label span { display: block; }
+    .scope-label strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .scope-label span { margin-top: 3px; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .graph-tools { display: flex; gap: 6px; flex-wrap: wrap; }
+    .graph-tools .btn { padding: 6px 9px; min-width: 36px; }
+    .graph-wrap {
+      position: relative;
+      min-height: 650px;
+      background-color: #050914;
+      background-image:
+        radial-gradient(circle at 18% 22%, rgba(91, 124, 255, .18), transparent 30%),
+        radial-gradient(circle at 82% 70%, rgba(31, 209, 180, .12), transparent 34%),
+        radial-gradient(circle, rgba(255,255,255,.28) 0 1px, transparent 1.5px);
+      background-size: auto, auto, 44px 44px;
+      overflow: hidden;
+      touch-action: none;
+    }
+    .graph-3d { position: relative; z-index: 1; display: block; width: 100%; min-height: 650px; user-select: none; }
+    .graph-3d[hidden] { display: none; }
+    .graph-3d canvas { display: block; outline: none; }
+    .graph-fallback {
+      position: absolute;
+      inset: 0;
+      z-index: 3;
+      display: block;
+      width: 100%;
+      height: 100%;
+      min-height: 650px;
+      background: transparent;
+      user-select: none;
+      touch-action: none;
+    }
+    .graph-fallback[hidden] { display: none; }
+    .fallback-link {
+      fill: none;
+      stroke: rgba(151, 176, 229, .42);
+      stroke-width: 1.15;
+      vector-effect: non-scaling-stroke;
+    }
+    .fallback-link.candidate { stroke-dasharray: 6 6; opacity: .42; }
+    .fallback-link.supporting { stroke-dasharray: 2 6; opacity: .52; }
+    .fallback-link.active { stroke: #9fe7ff; stroke-width: 2.6; opacity: 1; }
+    .fallback-node { cursor: pointer; }
+    .fallback-node circle {
+      stroke: rgba(255,255,255,.82);
+      stroke-width: 1.25;
+      filter: drop-shadow(0 4px 8px rgba(0,0,0,.38));
+      transition: r .14s ease, opacity .14s ease;
+    }
+    .fallback-node text {
+      fill: #edf4ff;
+      font: 600 10px/1.2 "Pretendard", "Noto Sans KR", "Segoe UI", sans-serif;
+      paint-order: stroke;
+      stroke: rgba(5,9,20,.96);
+      stroke-width: 3px;
+      stroke-linejoin: round;
+      pointer-events: none;
+    }
+    .fallback-node.dim { opacity: .2; }
+    .fallback-node.selected circle { stroke: #ffffff; stroke-width: 3; }
+    .render-status {
+      position: absolute;
+      right: 14px;
+      bottom: 12px;
+      z-index: 5;
+      padding: 7px 10px;
+      border: 1px solid rgba(255,255,255,.14);
+      border-radius: 999px;
+      background: rgba(5,9,20,.78);
+      color: rgba(235,242,255,.82);
+      font-size: 11px;
+      pointer-events: none;
+      backdrop-filter: blur(10px);
+    }
+    .render-status[hidden] { display: none; }
+    .scene-tooltip {
+      max-width: 320px;
+      padding: 9px 11px !important;
+      border: 1px solid rgba(255,255,255,.18);
+      border-radius: 10px;
+      background: rgba(8,13,29,.92) !important;
+      box-shadow: 0 12px 36px rgba(0,0,0,.35);
+      color: #f4f7ff !important;
+      font: 600 12px/1.45 Inter, Pretendard, sans-serif !important;
+      backdrop-filter: blur(12px);
+    }
+    .lane-title { fill: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: .08em; }
+    .edge { fill: none; stroke: var(--line-strong); stroke-width: 1.25; opacity: .55; vector-effect: non-scaling-stroke; }
+    .edge[data-strength="candidate_relation"], .edge[data-strength="task_evidence"] { stroke-dasharray: 7 5; }
+    .edge[data-strength="supporting"], .edge[data-strength="inherited"] { stroke-dasharray: 2 6; opacity: .42; }
+    .edge.active { stroke: var(--brand); stroke-width: 2.6; opacity: .96; }
+    .edge.dim { opacity: .08; }
+    .edge-hit { fill: none; stroke: transparent; stroke-width: 13; cursor: pointer; vector-effect: non-scaling-stroke; }
+    .edge-hit:focus { stroke: var(--brand); stroke-width: 5; opacity: .72; outline: none; }
+    .graph-node {
+      width: 100%;
+      height: 100%;
+      border: 1px solid color-mix(in srgb, var(--node-color) 62%, var(--line));
+      border-left: 5px solid var(--node-color);
+      border-radius: 11px;
+      background: color-mix(in srgb, var(--surface) 92%, var(--node-color) 8%);
+      color: var(--ink);
+      padding: 7px 8px;
+      text-align: left;
+      cursor: pointer;
+      box-shadow: var(--node-shadow);
+      overflow: hidden;
+    }
+    .graph-node:hover { border-color: var(--node-color); transform: translateY(-1px); }
+    .graph-node.selected { outline: 3px solid color-mix(in srgb, var(--node-color) 42%, transparent); border-color: var(--node-color); }
+    .graph-node.dim { opacity: .22; filter: grayscale(.45); }
+    .graph-node .node-type { display: block; color: var(--node-color); font-size: 10px; font-weight: 800; letter-spacing: .08em; }
+    .graph-node .node-label { display: block; margin-top: 2px; font-size: 14px; line-height: 1.22; font-weight: 700; max-height: 2.44em; overflow: hidden; }
+    .node-structure { --node-color: var(--structure); }
+    .node-knowledge { --node-color: var(--knowledge); border-radius: 28px; }
+    .node-skill { --node-color: var(--skill); }
+    .node-attitude { --node-color: var(--attitude); clip-path: polygon(5% 0, 100% 0, 95% 100%, 0 100%); }
+    .node-course { --node-color: var(--course); border-radius: 16px; }
+    .node-support { --node-color: var(--support); border-style: dashed; }
+    .empty-state, .loading {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      padding: 30px;
+      text-align: center;
+      color: var(--muted);
+      background: color-mix(in srgb, var(--surface) 88%, transparent);
+      overflow: auto;
+      padding: 22px;
+      z-index: 7;
+    }
+    .empty-state[hidden], .loading[hidden] { display: none; }
+    .spinner { width: 34px; height: 34px; border: 3px solid var(--line); border-top-color: var(--brand); border-radius: 50%; animation: spin .75s linear infinite; margin: 0 auto 12px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+    .candidate-list { display: grid; gap: 8px; width: min(720px, 100%); }
+    .candidate {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--surface);
+      color: var(--ink);
+      padding: 12px;
+      text-align: left;
+      cursor: pointer;
+    }
+    .candidate:hover { border-color: var(--brand); }
+    .candidate strong, .candidate span { display: block; }
+    .candidate span { margin-top: 4px; color: var(--muted); font-size: 12px; }
+    .detail-panel { padding: 16px; min-height: 480px; }
+    .detail-type { color: var(--brand); font-size: 11px; font-weight: 800; letter-spacing: .1em; }
+    .detail-panel h2 { margin: 5px 0 0; font-size: 20px; line-height: 1.3; overflow-wrap: anywhere; }
+    .detail-panel > .btn-primary { width: 100%; margin-top: 14px; }
+    .orbit-hint {
+      position: absolute;
+      left: 14px;
+      bottom: 12px;
+      z-index: 2;
+      padding: 7px 10px;
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 999px;
+      background: rgba(5,9,20,.66);
+      color: rgba(231,238,255,.72);
+      font-size: 11px;
+      pointer-events: none;
+      backdrop-filter: blur(10px);
+    }
+    .detail-subtitle { color: var(--muted); font-size: 13px; line-height: 1.5; margin-top: 6px; }
+    .detail-section { margin-top: 18px; }
+    .detail-section h3 { margin: 0 0 8px; font-size: 12px; color: var(--muted); }
+    .property-list { display: grid; gap: 9px; margin: 0; }
+    .property-list div { border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+    .property-list dt { color: var(--muted); font-size: 11px; }
+    .property-list dd { margin: 3px 0 0; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+    .badge { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 999px; padding: 3px 8px; font-size: 11px; margin: 4px 4px 0 0; }
+    .notice { margin-top: 16px; padding: 10px; background: var(--surface-2); border-radius: 10px; color: var(--muted); font-size: 12px; line-height: 1.55; }
+    .notice.error { color: var(--danger); }
+    .list-view { display: none; padding: 16px; background: var(--surface); }
+    .list-view.visible { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; }
+    .list-node { border: 1px solid var(--line); background: var(--surface-2); color: var(--ink); border-radius: 10px; padding: 10px; text-align: left; cursor: pointer; }
+    .list-node strong, .list-node span { display: block; }
+    .list-node span { color: var(--muted); font-size: 11px; margin-top: 3px; }
+    .list-heading { grid-column: 1 / -1; margin: 8px 0 2px; color: var(--muted); font-size: 11px; letter-spacing: .12em; text-transform: uppercase; }
+    .list-edge { border-style: dashed; }
+    .footnote { max-width: 1920px; margin: 0 auto; padding: 0 18px 22px; color: var(--muted); font-size: 12px; line-height: 1.55; }
+    @media (max-width: 1500px) {
+      .shell { grid-template-columns: 220px minmax(500px, 1fr); }
+      .detail-panel { grid-column: 1 / -1; min-height: 0; }
+    }
+    @media (max-width: 1180px) {
+      .shell { grid-template-columns: 1fr; }
+      .sidebar, .detail-panel { min-height: 0; }
+      .graph-wrap, .graph-3d { min-height: 640px; }
+    }
+    @media (max-width: 700px) {
+      .topbar { position: static; grid-template-columns: 1fr; }
+      .top-actions { flex-wrap: wrap; }
+      .shell { grid-template-columns: 1fr; padding: 10px; }
+      .sidebar, .detail-panel { min-height: 0; }
+      .stage { min-height: 600px; }
+      .graph-wrap, .graph-3d { min-height: 520px; }
+      .list-view.visible { grid-template-columns: 1fr; gap: 8px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-kicker">NCS Evidence Graph</span>
+      <h1>NCS 역량 지도</h1>
+    </div>
+    <form id="searchForm" class="search-form" role="search">
+      <label for="query" class="sr-only">직무 또는 능력단위 검색</label>
+      <input id="query" name="q" autocomplete="off" placeholder="직무·능력단위명 또는 코드를 검색하세요">
+      <button class="btn btn-primary" type="submit">경로 찾기</button>
+    </form>
+    <div class="top-actions">
+      <button id="resetGraph" class="btn" type="button">전체 NCS</button>
+      <a class="btn" href="/">워크벤치</a>
+      <a id="planLink" class="btn" href="/aihr-training-system-builder">교육체계로 보기</a>
+    </div>
+  </header>
+
+  <main class="shell">
+    <aside class="panel sidebar" aria-label="그래프 필터">
+      <h2>근거 레이어</h2>
+      <p id="sidebarSubtitle" class="subtitle">NCS 전체 대분류에서 원하는 분야를 선택하세요.</p>
+      <div class="metric-row">
+        <div class="metric"><span>노드</span><strong id="nodeCount">0</strong></div>
+        <div class="metric"><span>관계</span><strong id="edgeCount">0</strong></div>
+      </div>
+
+      <h3>노드 유형</h3>
+      <div id="typeFilters" class="filter-list"></div>
+
+      <h3>관계 강도</h3>
+      <div class="filter-list">
+        <label class="filter"><input id="candidateEdges" type="checkbox"><span class="edge-sample candidate"></span><span>후보·추론 관계</span></label>
+        <label class="filter"><input id="supportEdges" type="checkbox" checked><span class="edge-sample supporting"></span><span>보조 근거</span></label>
+      </div>
+
+      <h3>선 읽는 법</h3>
+      <div class="edge-key">
+        <div><span class="edge-sample"></span>구조·직접 연결</div>
+        <div><span class="edge-sample candidate"></span>후보 또는 과업 근거</div>
+        <div><span class="edge-sample supporting"></span>보조·상속 근거</div>
+      </div>
+      <div id="truncation" class="notice" hidden></div>
+    </aside>
+
+    <section class="panel stage" aria-label="NCS 지식그래프">
+      <div class="stage-toolbar">
+        <div class="scope-label">
+          <strong id="scopeName">능력단위를 불러오는 중입니다</strong>
+          <span id="scopePath">NCS 분류 → 능력단위 → 과업 → KSA → 훈련과정</span>
+        </div>
+        <div class="graph-tools" aria-label="그래프 보기 도구">
+          <button id="zoomOut" class="btn" type="button" aria-label="축소">−</button>
+          <button id="fitView" class="btn" type="button">맞춤</button>
+          <button id="zoomIn" class="btn" type="button" aria-label="확대">＋</button>
+          <button id="toggleRenderer" class="btn" type="button">3D 호환 모드</button>
+          <button id="toggleList" class="btn" type="button" aria-pressed="false">목록</button>
+        </div>
+      </div>
+      <div id="graphWrap" class="graph-wrap">
+        <svg id="graphFallback" class="graph-fallback" role="application" aria-label="회전·확대 가능한 NCS 3D 호환 그래프" hidden></svg>
+        <div id="graph3d" class="graph-3d" role="application" aria-label="회전·확대 가능한 NCS 3D 지식그래프"></div>
+        <div class="orbit-hint">드래그 회전 · 휠 확대 · 노드 클릭</div>
+        <div id="renderStatus" class="render-status">3D 준비 중</div>
+        <div id="loading" class="loading"><div><div class="spinner"></div><strong>NCS 근거 경로를 구성하고 있습니다</strong></div></div>
+        <div id="emptyState" class="empty-state" hidden></div>
+      </div>
+      <div id="listView" class="list-view" aria-live="polite"></div>
+    </section>
+
+    <aside id="detailPanel" class="panel detail-panel" aria-live="polite">
+      <div class="detail-type">선택한 항목</div>
+      <h2>노드를 선택하세요</h2>
+      <p class="detail-subtitle">그래프의 노드나 선을 누르면 출처, 관계 방식, 검토 상태를 확인할 수 있습니다.</p>
+      <div class="notice">그래프의 연결은 교육훈련 탐색 근거이며 사람의 승인이나 공식 자격 판정이 아닙니다.</div>
+    </aside>
+  </main>
+
+  <footer id="warnings" class="footnote"></footer>
+
+  <script src="/assets/3d-force-graph-1.80.0.min.js"></script>
+  <script>
+  (() => {
+    'use strict';
+
+    const TYPE_META = {
+      overview: {label:'NCS 전체', group:'structure', short:'NCS'},
+      major: {label:'대분류', group:'structure', short:'대'},
+      middle: {label:'중분류', group:'structure', short:'중'},
+      small: {label:'소분류', group:'structure', short:'소'},
+      classification: {label:'세분류', group:'structure', short:'세'},
+      scope: {label:'NCS 범위', group:'structure', short:'범위'},
+      unit: {label:'능력단위', group:'structure', short:'단위'},
+      element: {label:'능력단위요소', group:'structure', short:'요소'},
+      task: {label:'수행준거·과업', group:'structure', short:'과업'},
+      knowledge: {label:'지식 K', group:'knowledge', short:'K'},
+      skill: {label:'기술 S', group:'skill', short:'S'},
+      attitude: {label:'태도 A', group:'attitude', short:'A'},
+      ksa: {label:'KSA 개념', group:'knowledge', short:'KSA'},
+      course: {label:'훈련과정', group:'course', short:'과정'},
+      qualification: {label:'자격 참고', group:'support', short:'자격'},
+      job_base: {label:'직업기초능력', group:'support', short:'기초'}
+    };
+    const PROP_LABELS = {
+      unit_code:'능력단위 코드', level:'수준', element_no:'요소 번호', element_code:'요소 코드',
+      criteria_no:'수행준거 번호', raw_text:'수행준거 원문', concept_type:'KSA 유형',
+      task_evidence_count:'과업 근거 수', definition:'사람 검토 정의', definition_state:'정의 상태',
+      hours:'훈련시간', methods:'훈련방법', facilities:'훈련시설', goal:'훈련목표',
+      role:'역할', official_recognition_claim:'공식 인정 주장', hierarchy:'NCS 분류',
+      major_count:'대분류 수', classification_count:'세분류 수', unit_count:'능력단위 수',
+      major_code:'대분류 코드', middle_code:'중분류 코드', small_code:'소분류 코드',
+      sub_code:'세분류 코드', classification_id:'세분류 ID', navigation:'탐색 방법',
+      expandable:'하위 탐색 가능'
+    };
+    const RELATION_LABELS = {
+      contains_major:'대분류', contains_middle:'중분류', contains_small:'소분류',
+      contains_classification:'세분류',
+      contains_unit:'분류에 포함', contains_element:'요소로 구성', defines_task:'수행준거',
+      task_requires_concept:'과업 수행에 필요', training_for_unit:'능력단위 훈련',
+      course_covers_concept:'과정이 KSA를 다룸', qualification_context:'관련 자격 참고',
+      job_base_context:'직업기초능력 참고'
+    };
+    const NODE_COLORS = {
+      overview:'#ffffff', major:'#6f8cff', middle:'#8b7cff', small:'#b06cff', classification:'#d76fe8',
+      scope:'#6f8cff', unit:'#4ba3ff', element:'#4fd1c5', task:'#69d2a8',
+      knowledge:'#ffca58', skill:'#ff7a72', attitude:'#bc8cff', ksa:'#ffca58',
+      course:'#36d6b3', qualification:'#91a3bd', job_base:'#91a3bd'
+    };
+
+    const els = {
+      form: document.getElementById('searchForm'), query: document.getElementById('query'),
+      graphWrap: document.getElementById('graphWrap'), graph3d: document.getElementById('graph3d'),
+      fallback: document.getElementById('graphFallback'), renderStatus: document.getElementById('renderStatus'),
+      loading: document.getElementById('loading'),
+      empty: document.getElementById('emptyState'), detail: document.getElementById('detailPanel'),
+      filters: document.getElementById('typeFilters'), nodeCount: document.getElementById('nodeCount'),
+      edgeCount: document.getElementById('edgeCount'), scopeName: document.getElementById('scopeName'),
+      scopePath: document.getElementById('scopePath'), truncation: document.getElementById('truncation'),
+      candidateEdges: document.getElementById('candidateEdges'), supportEdges: document.getElementById('supportEdges'),
+      list: document.getElementById('listView'), toggleList: document.getElementById('toggleList'),
+      zoomIn: document.getElementById('zoomIn'), zoomOut: document.getElementById('zoomOut'),
+      fit: document.getElementById('fitView'), warnings: document.getElementById('warnings'),
+      toggleRenderer: document.getElementById('toggleRenderer'),
+      planLink: document.getElementById('planLink'), resetGraph: document.getElementById('resetGraph'),
+      sidebarSubtitle: document.getElementById('sidebarSubtitle')
+    };
+    const state = {
+      data: null, selected: null, selectedKind: null, visibleTypes: new Set(),
+      listVisible: window.matchMedia('(max-width: 700px)').matches,
+      graph: null, rendererMode: '3d', renderCheckTimer: null, fallbackScale: 1,
+      fallbackYaw: -.38, fallbackPitch: -.18, fallbackDragging: false,
+      fallbackPointerX: 0, fallbackPointerY: 0, fallbackMoved: false,
+      fallbackFrame: null,
+      webglLossBound: false
+    };
+    els.toggleList.setAttribute('aria-pressed', String(state.listVisible));
+    els.toggleList.textContent = state.listVisible ? '그래프' : '목록';
+
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>'"]/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
+    }
+    function nodeMeta(type) { return TYPE_META[type] || {label:type, group:'structure', short:type}; }
+    function sourceText(source) { return source ? `${source.table} · ${source.key}` : '출처 없음'; }
+    function formatValue(value) {
+      if (Array.isArray(value)) {
+        return value.map(item => typeof item === 'object' ? `${item.code || ''} ${item.name || ''}`.trim() : String(item)).join(' → ');
+      }
+      if (typeof value === 'boolean') return value ? '예' : '아니오';
+      if (value && typeof value === 'object') return JSON.stringify(value, null, 2);
+      return String(value ?? '');
+    }
+
+    function apiUrl(params = {}) {
+      const search = new URLSearchParams();
+      if (params.q) search.set('q', params.q);
+      if (params.unit_code) search.set('unit_code', params.unit_code);
+      if (params.major_code) search.set('major_code', params.major_code);
+      if (params.classification_id) search.set('classification_id', params.classification_id);
+      search.set('max_nodes', params.major_code ? '120' : '72');
+      return '/api/ncs-knowledge-graph?' + search.toString();
+    }
+
+    async function loadGraph(params = {}) {
+      window.clearTimeout(state.renderCheckTimer);
+      els.graphWrap.hidden = false;
+      els.graph3d.hidden = true;
+      els.fallback.hidden = true;
+      els.renderStatus.hidden = true;
+      els.loading.hidden = false;
+      els.empty.hidden = true;
+      els.list.classList.remove('visible');
+      try {
+        const response = await fetch(apiUrl(params), {headers:{'Accept':'application/json'}});
+        const data = await response.json();
+        if (!response.ok || !data.ok) throw new Error(data.detail || data.error || '그래프를 불러오지 못했습니다.');
+        state.data = data;
+        state.selected = null;
+        state.selectedKind = null;
+        if (data.selection_required) {
+          showCandidates(data.candidates || []);
+          updateUrl({
+            q: params.q || data.query?.text || '',
+            classification_id: params.classification_id || data.query?.classification_id || ''
+          });
+          return;
+        }
+        state.visibleTypes = new Set((data.nodes || []).map(node => node.type));
+        renderAll();
+        updateUrl({
+          q: params.q || '',
+          unit_code: data.focus?.unit_code || params.unit_code || '',
+          major_code: data.mode === 'major_overview' ? data.focus?.major_code || params.major_code || '' : ''
+        });
+      } catch (error) {
+        showError(error instanceof Error ? error.message : String(error));
+      } finally {
+        els.loading.hidden = true;
+      }
+    }
+
+    function updateUrl(params) {
+      const url = new URL(location.href);
+      url.search = '';
+      if (params.q) url.searchParams.set('q', params.q);
+      if (params.unit_code) url.searchParams.set('unit_code', params.unit_code);
+      if (params.major_code) url.searchParams.set('major_code', params.major_code);
+      if (params.classification_id) url.searchParams.set('classification_id', params.classification_id);
+      history.replaceState(null, '', url);
+    }
+
+    function showCandidates(candidates) {
+      if (state.graph) state.graph.graphData({nodes:[], links:[]});
+      els.fallback.hidden = true;
+      els.graph3d.hidden = true;
+      els.renderStatus.hidden = true;
+      els.scopeName.textContent = '검색 결과를 선택하세요';
+      els.scopePath.textContent = `${candidates.length}개 능력단위 · 하나를 선택하면 과업·KSA·교육과정을 펼칩니다.`;
+      els.nodeCount.textContent = '0';
+      els.edgeCount.textContent = '0';
+      els.filters.replaceChildren();
+      els.empty.hidden = false;
+      const wrap = document.createElement('div');
+      wrap.className = 'candidate-list';
+      candidates.forEach(candidate => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'candidate';
+        button.innerHTML = `<strong>${escapeHtml(candidate.label)} · ${escapeHtml(candidate.unit_code)}</strong><span>${escapeHtml(candidate.hierarchy_label)}</span>`;
+        button.addEventListener('click', () => loadGraph({unit_code:candidate.unit_code}));
+        wrap.appendChild(button);
+      });
+      if (!candidates.length) wrap.textContent = '일치하는 능력단위가 없습니다.';
+      els.empty.replaceChildren(wrap);
+    }
+
+    function showError(message) {
+      if (state.graph) state.graph.graphData({nodes:[], links:[]});
+      els.fallback.hidden = true;
+      els.graph3d.hidden = true;
+      els.renderStatus.hidden = true;
+      els.empty.hidden = false;
+      els.empty.innerHTML = `<div><strong>그래프를 열 수 없습니다</strong><p>${escapeHtml(message)}</p></div>`;
+      els.scopeName.textContent = 'NCS 역량 지도';
+      els.scopePath.textContent = '로컬 NCS 데이터베이스 상태를 확인해 주세요.';
+    }
+
+    function renderAll() {
+      const data = state.data;
+      if (!data) return;
+      els.renderStatus.hidden = false;
+      els.empty.hidden = true;
+      els.scopeName.textContent = data.focus?.label || 'NCS 역량 지도';
+      els.scopePath.textContent = data.focus?.hierarchy_label || '';
+      els.query.value = data.query?.text || '';
+      els.planLink.href = '/aihr-training-system-builder?target_query=' + encodeURIComponent(data.focus?.label || '');
+      els.planLink.hidden = data.mode !== 'unit_detail';
+      els.sidebarSubtitle.textContent = data.mode === 'overview'
+        ? '현재 DB의 NCS 대분류 전체입니다. 노드를 선택해 분야 전체를 펼치세요.'
+        : data.mode === 'major_overview'
+          ? '중·소·세분류 전체입니다. 세분류를 선택해 능력단위로 들어가세요.'
+          : '능력단위의 요소·과업·KSA·훈련과정 근거를 3D로 탐색합니다.';
+      els.nodeCount.textContent = String(data.nodes.length);
+      els.edgeCount.textContent = String(data.edges.length);
+      renderFilters();
+      renderGraph();
+      renderList();
+      renderTruncation();
+      els.warnings.textContent = (data.warnings || []).join(' · ');
+      const focus = data.nodes.find(node => node.id === data.focus?.node_id) || data.nodes[0];
+      if (focus) selectNode(focus.id, false);
+    }
+
+    function renderFilters() {
+      els.filters.replaceChildren();
+      const counts = state.data?.facets?.node_types || {};
+      const order = ['overview','major','middle','small','classification','scope','unit','element','task','knowledge','skill','attitude','ksa','course','qualification','job_base'];
+      order.filter(type => counts[type]).forEach(type => {
+        const meta = nodeMeta(type);
+        const label = document.createElement('label');
+        label.className = 'filter';
+        label.innerHTML = `<input type="checkbox" data-type="${escapeHtml(type)}" checked><span class="swatch ${escapeHtml(meta.group)}"></span><span>${escapeHtml(meta.label)}</span><span class="count">${counts[type]}</span>`;
+        label.querySelector('input').addEventListener('change', event => {
+          if (event.target.checked) state.visibleTypes.add(type); else state.visibleTypes.delete(type);
+          renderGraph();
+          renderList();
+        });
+        els.filters.appendChild(label);
+      });
+    }
+
+    function renderTruncation() {
+      const truncation = state.data?.truncation;
+      if (!truncation?.truncated) {
+        els.truncation.hidden = true;
+        return;
+      }
+      const omissionLabels = {
+        element: '능력단위요소', task: '수행준거·과업', concept: 'KSA 개념',
+        course: '훈련과정', qualification: '자격 보조근거', job_base: '직업기초능력',
+        edge: '관계', 'edge:concept_relation': '개념 관계',
+        'edge:task_evidence': '과업 기반 KSA 관계',
+        'edge:course_concept': '과정–KSA 관계',
+        'edge:task_requires_concept': '과업–KSA 직접 관계'
+      };
+      const parts = Object.entries(truncation.omitted_by_type || {})
+        .map(([type, count]) => `${omissionLabels[type] || nodeMeta(type).label || type} ${count}`);
+      els.truncation.hidden = false;
+      els.truncation.textContent = `화면 상한으로 일부 관계를 접었습니다: ${parts.join(', ')}`;
+    }
+
+    function visibleNodes() {
+      return (state.data?.nodes || []).filter(node => state.visibleTypes.has(node.type));
+    }
+
+    function visibleEdges(nodeIds) {
+      return (state.data?.edges || []).filter(edge => {
+        if (!nodeIds.has(edge.source) || !nodeIds.has(edge.target)) return false;
+        if (!els.candidateEdges.checked && ['candidate_relation','task_evidence'].includes(edge.strength)) return false;
+        if (!els.supportEdges.checked && ['supporting','inherited'].includes(edge.strength)) return false;
+        return true;
+      });
+    }
+
+    function neighborsFor(id, edges) {
+      const set = new Set([id]);
+      edges.forEach(edge => {
+        if (edge.source === id) set.add(edge.target);
+        if (edge.target === id) set.add(edge.source);
+      });
+      return set;
+    }
+
+    function endpointId(value) {
+      return value && typeof value === 'object' ? value.id : value;
+    }
+
+    function nodeValue(node) {
+      const unitCount = Number(node.properties?.unit_count || 0);
+      const base = {overview:22, major:10, middle:7, small:5, classification:3.7, unit:9, scope:8, element:5, task:3.2, course:6, qualification:3.5, job_base:3.5}[node.type] || 3.5;
+      return base + (unitCount ? Math.min(Math.log10(unitCount + 1) * 2.2, 7) : 0);
+    }
+
+    function graphNodeColor(node) {
+      if (state.selectedKind !== 'node' || !state.selected) return NODE_COLORS[node.type] || '#8fa3c7';
+      if (node.id === state.selected) return '#ffffff';
+      const nodes = visibleNodes();
+      const nodeIds = new Set(nodes.map(item => item.id));
+      const edges = visibleEdges(nodeIds);
+      return neighborsFor(state.selected, edges).has(node.id)
+        ? NODE_COLORS[node.type] || '#8fa3c7'
+        : '#263047';
+    }
+
+    function graphLinkActive(link) {
+      const source = endpointId(link.source);
+      const target = endpointId(link.target);
+      if (state.selectedKind === 'edge') return link.id === state.selected;
+      if (state.selectedKind === 'node') return source === state.selected || target === state.selected;
+      return false;
+    }
+
+    function updateGraphAppearance() {
+      if (!els.fallback.hidden && state.data) {
+        const fallbackNodes = visibleNodes();
+        const fallbackIds = new Set(fallbackNodes.map(node => node.id));
+        renderFallback(fallbackNodes, visibleEdges(fallbackIds));
+      }
+      if (!state.graph || state.rendererMode === 'fallback') return;
+      state.graph
+        .nodeColor(graphNodeColor)
+        .linkColor(link => graphLinkActive(link) ? '#9fe7ff' : 'rgba(138, 158, 205, .42)')
+        .linkWidth(link => graphLinkActive(link) ? 2.6 : 0.75)
+        .linkOpacity(.72)
+        .linkDirectionalParticles(link => graphLinkActive(link) ? 4 : (state.data?.mode === 'overview' ? 1 : 0))
+        .linkDirectionalParticleWidth(link => graphLinkActive(link) ? 2.4 : 1.1)
+        .linkDirectionalParticleColor(() => '#7ce7ff');
+    }
+
+    function graphTooltip(node) {
+      const meta = nodeMeta(node.type);
+      const units = node.properties?.unit_count;
+      return `<strong>${escapeHtml(node.label)}</strong><br><span>${escapeHtml(meta.label)}${units !== undefined ? ` · ${escapeHtml(Number(units).toLocaleString('ko-KR'))}개 능력단위` : ''}</span>`;
+    }
+
+    const SVG_NS = 'http://www.w3.org/2000/svg';
+
+    function createSvgElement(name, attributes = {}) {
+      const element = document.createElementNS(SVG_NS, name);
+      Object.entries(attributes).forEach(([key, value]) => element.setAttribute(key, String(value)));
+      return element;
+    }
+
+    function compactLabel(value, maxLength = 17) {
+      const text = String(value || '');
+      return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+    }
+
+    function fallbackLevel(node) {
+      const overviewLevels = {overview:0, major:1};
+      const majorLevels = {major:0, middle:1, small:2, classification:3};
+      const detailLevels = {
+        scope:0, unit:1, element:2, task:3,
+        knowledge:4, skill:4, attitude:4, ksa:4,
+        course:5, qualification:5, job_base:5
+      };
+      const levels = state.data?.mode === 'overview'
+        ? overviewLevels
+        : state.data?.mode === 'major_overview' ? majorLevels : detailLevels;
+      return levels[node.type] ?? 6;
+    }
+
+    function fallbackPositions(nodes, width, height) {
+      const positions = new Map();
+      if (state.data?.mode === 'overview') {
+        const root = nodes.find(node => node.type === 'overview');
+        if (root) positions.set(root.id, {x:0, y:0, z:0});
+        const majors = nodes.filter(node => node.type === 'major')
+          .sort((a, b) => String(a.properties?.major_code || '').localeCompare(String(b.properties?.major_code || '')));
+        const radius = Math.max(155, Math.min(width, height) * .35);
+        const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+        majors.forEach((node, index) => {
+          const normalized = (index + .5) / Math.max(majors.length, 1);
+          const latitude = Math.acos(1 - 2 * normalized);
+          const longitude = goldenAngle * index;
+          positions.set(node.id, {
+            x:Math.sin(latitude) * Math.cos(longitude) * radius * 1.35,
+            y:Math.cos(latitude) * radius,
+            z:Math.sin(latitude) * Math.sin(longitude) * radius
+          });
+        });
+        return positions;
+      }
+
+      const groups = new Map();
+      nodes.forEach(node => {
+        const level = fallbackLevel(node);
+        if (!groups.has(level)) groups.set(level, []);
+        groups.get(level).push(node);
+      });
+      const levels = [...groups.keys()].sort((a, b) => a - b);
+      const left = -width * .42;
+      const right = width * .42;
+      const laneGap = levels.length > 1 ? (right - left) / (levels.length - 1) : 0;
+      levels.forEach((level, levelIndex) => {
+        const items = groups.get(level).sort((a, b) => String(a.label).localeCompare(String(b.label), 'ko'));
+        const rowsPerColumn = Math.max(1, Math.ceil(Math.sqrt(items.length * 1.8)));
+        const columns = Math.max(1, Math.ceil(items.length / rowsPerColumn));
+        const columnGap = Math.min(42, Math.max(24, laneGap / Math.max(columns + 1, 2)));
+        items.forEach((node, index) => {
+          const column = Math.floor(index / rowsPerColumn);
+          const row = index % rowsPerColumn;
+          const rowsInColumn = Math.min(rowsPerColumn, items.length - column * rowsPerColumn);
+          const x = left + laneGap * levelIndex + (column - (columns - 1) / 2) * columnGap;
+          const y = -height * .4 + height * .8 * (row + 1) / (rowsInColumn + 1);
+          const z = Math.sin((index + 1) * 2.17 + levelIndex * .71) * Math.min(145, Math.max(55, laneGap * .48));
+          positions.set(node.id, {x, y, z});
+        });
+      });
+      return positions;
+    }
+
+    function projectFallbackPoint(point, width, height) {
+      const cosYaw = Math.cos(state.fallbackYaw);
+      const sinYaw = Math.sin(state.fallbackYaw);
+      const cosPitch = Math.cos(state.fallbackPitch);
+      const sinPitch = Math.sin(state.fallbackPitch);
+      const rotatedX = point.x * cosYaw - point.z * sinYaw;
+      const yawZ = point.x * sinYaw + point.z * cosYaw;
+      const rotatedY = point.y * cosPitch - yawZ * sinPitch;
+      const rotatedZ = point.y * sinPitch + yawZ * cosPitch;
+      const cameraDistance = Math.max(width, height) * 1.55;
+      const perspective = cameraDistance / Math.max(cameraDistance * .32, cameraDistance + rotatedZ);
+      const zoom = 1 / Math.min(2.4, Math.max(.45, state.fallbackScale));
+      const scale = perspective * zoom;
+      return {
+        x:width / 2 + rotatedX * scale,
+        y:height / 2 + rotatedY * scale,
+        z:rotatedZ,
+        scale
+      };
+    }
+
+    function applyFallbackViewBox() {
+      const width = Number(els.fallback.dataset.baseWidth || 1000);
+      const height = Number(els.fallback.dataset.baseHeight || 650);
+      els.fallback.setAttribute('viewBox', `0 0 ${width} ${height}`);
+    }
+
+    function renderFallback(nodes, edges) {
+      const width = Math.max(els.graphWrap.clientWidth, 720);
+      const height = Math.max(els.graphWrap.clientHeight, 650);
+      const worldPositions = fallbackPositions(nodes, width, height);
+      const positions = new Map([...worldPositions.entries()].map(([id, point]) => [id, projectFallbackPoint(point, width, height)]));
+      const related = state.selectedKind === 'node' ? neighborsFor(state.selected, edges) : new Set();
+      const definitions = createSvgElement('defs');
+      const marker = createSvgElement('marker', {
+        id:'fallbackArrow', markerWidth:8, markerHeight:8, refX:7, refY:3.5,
+        orient:'auto', markerUnits:'strokeWidth'
+      });
+      marker.appendChild(createSvgElement('path', {d:'M0,0 L7,3.5 L0,7 z', fill:'rgba(174,205,255,.72)'}));
+      definitions.appendChild(marker);
+      const edgeLayer = createSvgElement('g', {'aria-hidden':'true'});
+      edges.forEach(edge => {
+        const source = positions.get(endpointId(edge.source));
+        const target = positions.get(endpointId(edge.target));
+        if (!source || !target) return;
+        const middleX = (source.x + target.x) / 2;
+        const active = graphLinkActive(edge);
+        const strengthClass = ['candidate_relation','task_evidence'].includes(edge.strength)
+          ? 'candidate' : ['supporting','inherited'].includes(edge.strength) ? 'supporting' : '';
+        const path = createSvgElement('path', {
+          d:`M ${source.x} ${source.y} C ${middleX} ${source.y}, ${middleX} ${target.y}, ${target.x} ${target.y}`,
+          class:`fallback-link ${strengthClass}${active ? ' active' : ''}`.trim(),
+          'marker-end':'url(#fallbackArrow)',
+          opacity:Math.max(.18, Math.min(.82, (source.scale + target.scale) * .32))
+        });
+        edgeLayer.appendChild(path);
+      });
+      const nodeLayer = createSvgElement('g');
+      const showLabels = nodes.length <= 64;
+      [...nodes].sort((a, b) => (positions.get(b.id)?.z || 0) - (positions.get(a.id)?.z || 0)).forEach(node => {
+        const point = positions.get(node.id);
+        if (!point) return;
+        const selected = state.selectedKind === 'node' && state.selected === node.id;
+        const dim = state.selectedKind === 'node' && !related.has(node.id);
+        const group = createSvgElement('g', {
+          class:`fallback-node${selected ? ' selected' : ''}${dim ? ' dim' : ''}`,
+          transform:`translate(${point.x} ${point.y})`, tabindex:0, role:'button',
+          'aria-label':`${nodeMeta(node.type).label} ${node.label}`
+        });
+        const radius = Math.max(5, Math.min(19, nodeValue(node) * .82 * point.scale));
+        group.appendChild(createSvgElement('circle', {
+          r:radius,
+          fill:NODE_COLORS[node.type] || '#8fa3c7',
+          'fill-opacity':Math.max(.58, Math.min(1, point.scale * .88))
+        }));
+        const title = createSvgElement('title');
+        title.textContent = `${nodeMeta(node.type).label} · ${node.label}`;
+        group.appendChild(title);
+        if (showLabels || selected || ['overview','major','scope','unit'].includes(node.type)) {
+          const label = createSvgElement('text', {x:radius + 5, y:3.5});
+          label.textContent = compactLabel(node.label);
+          group.appendChild(label);
+        }
+        group.addEventListener('click', event => {
+          event.stopPropagation();
+          if (!state.fallbackMoved) selectNode(node.id);
+        });
+        group.addEventListener('keydown', event => {
+          if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectNode(node.id); }
+        });
+        nodeLayer.appendChild(group);
+      });
+      els.fallback.replaceChildren(definitions, edgeLayer, nodeLayer);
+      els.fallback.dataset.baseWidth = String(width);
+      els.fallback.dataset.baseHeight = String(height);
+      applyFallbackViewBox();
+      els.fallback.onclick = event => {
+        if (event.target === els.fallback && !state.fallbackMoved) {
+          state.selected = null;
+          state.selectedKind = null;
+          renderFallback(nodes, edges);
+        }
+      };
+    }
+
+    function renderCurrentFallback() {
+      if (els.fallback.hidden || !state.data) return;
+      const nodes = visibleNodes();
+      const ids = new Set(nodes.map(node => node.id));
+      renderFallback(nodes, visibleEdges(ids));
+    }
+
+    function queueFallbackRender() {
+      if (state.fallbackFrame !== null) return;
+      state.fallbackFrame = window.requestAnimationFrame(() => {
+        state.fallbackFrame = null;
+        renderCurrentFallback();
+      });
+    }
+
+    function hasWebGLSupport() {
+      try {
+        const canvas = document.createElement('canvas');
+        const context = canvas.getContext('webgl2', {alpha:true}) || canvas.getContext('webgl', {alpha:true});
+        if (!context) return false;
+        context.getExtension('WEBGL_lose_context')?.loseContext();
+        return true;
+      } catch (_) {
+        return false;
+      }
+    }
+
+    function activateFallback(reason = '') {
+      window.clearTimeout(state.renderCheckTimer);
+      state.rendererMode = 'fallback';
+      state.graph?.pauseAnimation?.();
+      els.graph3d.hidden = true;
+      els.fallback.hidden = false;
+      els.toggleRenderer.textContent = 'WebGL 3D 재시도';
+      els.renderStatus.textContent = '3D 호환 · 드래그 회전';
+      els.renderStatus.title = reason;
+      const nodes = visibleNodes();
+      const ids = new Set(nodes.map(node => node.id));
+      renderFallback(nodes, visibleEdges(ids));
+    }
+
+    function verify3DRender() {
+      window.clearTimeout(state.renderCheckTimer);
+      state.renderCheckTimer = window.setTimeout(() => {
+        if (state.rendererMode !== '3d' || !state.graph) return;
+        try {
+          const renderer = state.graph.renderer();
+          const context = renderer?.getContext?.();
+          if (!renderer || !context || context.isContextLost()) throw new Error('WebGL context unavailable');
+          renderer.render(state.graph.scene(), state.graph.camera());
+          const renderInfo = renderer.info?.render;
+          if (!renderInfo || renderInfo.calls < 1 || renderInfo.triangles < 1) throw new Error('empty WebGL frame');
+          context.finish?.();
+          const sampleWidth = Math.min(context.drawingBufferWidth, 2048);
+          const sampleHeight = Math.min(context.drawingBufferHeight, 1400);
+          const startX = Math.max(0, Math.floor((context.drawingBufferWidth - sampleWidth) / 2));
+          const startY = Math.max(0, Math.floor((context.drawingBufferHeight - sampleHeight) / 2));
+          const pixels = new Uint8Array(sampleWidth * sampleHeight * 4);
+          context.readPixels(startX, startY, sampleWidth, sampleHeight, context.RGBA, context.UNSIGNED_BYTE, pixels);
+          let visiblePixels = 0;
+          for (let index = 0; index < pixels.length; index += 4) {
+            if (pixels[index + 3] > 6 && pixels[index] + pixels[index + 1] + pixels[index + 2] > 18) {
+              visiblePixels += 1;
+              if (visiblePixels >= 24) break;
+            }
+          }
+          if (visiblePixels < 24) throw new Error('blank WebGL canvas');
+          els.fallback.hidden = true;
+          els.graph3d.hidden = false;
+          els.renderStatus.textContent = '3D WebGL';
+          els.renderStatus.title = '';
+          els.toggleRenderer.textContent = '3D 호환 모드';
+        } catch (error) {
+          activateFallback(`3D 렌더링 실패: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }, 1100);
+    }
+
+    function renderGraph() {
+      if (!window.ForceGraph3D) {
+        activateFallback('3D 렌더러 자산을 불러오지 못해 3D 호환 렌더러로 전환했습니다.');
+        return;
+      }
+      const nodes = visibleNodes();
+      const nodeIds = new Set(nodes.map(node => node.id));
+      const edges = visibleEdges(nodeIds);
+      const graphNodes = nodes.map(node => ({...node, val:nodeValue(node)}));
+      const graphLinks = edges.map(edge => ({...edge, source:edge.source, target:edge.target}));
+
+      if (state.rendererMode === 'fallback') {
+        els.fallback.hidden = false;
+        renderFallback(nodes, edges);
+        els.nodeCount.textContent = String(nodes.length);
+        els.edgeCount.textContent = String(edges.length);
+        return;
+      }
+
+      renderFallback(nodes, edges);
+      els.fallback.hidden = false;
+      els.graph3d.hidden = false;
+      els.renderStatus.textContent = '3D 확인 중';
+      if (!hasWebGLSupport()) {
+        activateFallback('이 브라우저에서 WebGL을 사용할 수 없어 3D 호환 렌더러로 전환했습니다.');
+        return;
+      }
+
+      try {
+        if (!state.graph) {
+          state.graph = new window.ForceGraph3D(els.graph3d, {
+            controlType:'orbit',
+            rendererConfig:{antialias:true, alpha:true, preserveDrawingBuffer:true, powerPreference:'high-performance'}
+          })
+          .backgroundColor('rgba(0,0,0,0)')
+          .showNavInfo(false)
+          .nodeRelSize(4.6)
+          .nodeResolution(14)
+          .nodeOpacity(.94)
+          .nodeLabel(graphTooltip)
+          .linkLabel(link => escapeHtml(link.label || RELATION_LABELS[link.type] || link.type))
+          .linkDirectionalArrowLength(3.2)
+          .linkDirectionalArrowRelPos(.88)
+          .enableNodeDrag(true)
+          .warmupTicks(45)
+          .cooldownTicks(160)
+          .onNodeClick(node => selectNode(node.id))
+          .onLinkClick(link => selectEdge(link.id))
+          .onBackgroundClick(() => {
+            state.selected = null;
+            state.selectedKind = null;
+            updateGraphAppearance();
+          });
+        }
+
+        const renderer = state.graph.renderer();
+        if (!state.webglLossBound && renderer?.domElement) {
+          renderer.domElement.addEventListener('webglcontextlost', event => {
+            event.preventDefault();
+            activateFallback('WebGL 연결이 중단되어 3D 호환 렌더러로 전환했습니다.');
+          });
+          state.webglLossBound = true;
+        }
+        state.graph.resumeAnimation?.();
+        const width = Math.max(els.graph3d.clientWidth, 320);
+        const height = Math.max(els.graph3d.clientHeight, 520);
+        state.graph.width(width).height(height).graphData({nodes:graphNodes, links:graphLinks});
+        const charge = state.graph.d3Force('charge');
+        if (charge?.strength) charge.strength(state.data?.mode === 'overview' ? -260 : -115);
+        const linkForce = state.graph.d3Force('link');
+        if (linkForce?.distance) linkForce.distance(() => state.data?.mode === 'overview' ? 190 : 78);
+        state.graph.d3ReheatSimulation();
+        updateGraphAppearance();
+        window.setTimeout(() => state.graph?.zoomToFit(900, 90), 500);
+        verify3DRender();
+      } catch (error) {
+        activateFallback(`3D 초기화 실패: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      els.nodeCount.textContent = String(nodes.length);
+      els.edgeCount.textContent = String(edges.length);
+    }
+
+    function renderList() {
+      const nodes = visibleNodes();
+      els.list.replaceChildren();
+      const nodeHeading = document.createElement('h3');
+      nodeHeading.className = 'list-heading';
+      nodeHeading.textContent = `노드 ${nodes.length}`;
+      els.list.appendChild(nodeHeading);
+      nodes.forEach(node => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'list-node';
+        button.innerHTML = `<strong>${escapeHtml(node.label)}</strong><span>${escapeHtml(nodeMeta(node.type).label)} · ${escapeHtml(node.subtitle || '')}</span>`;
+        button.addEventListener('click', () => selectNode(node.id));
+        els.list.appendChild(button);
+      });
+      const nodeIds = new Set(nodes.map(node => node.id));
+      const edges = visibleEdges(nodeIds);
+      const nodesById = new Map(nodes.map(node => [node.id, node]));
+      const edgeHeading = document.createElement('h3');
+      edgeHeading.className = 'list-heading';
+      edgeHeading.textContent = `관계 ${edges.length}`;
+      els.list.appendChild(edgeHeading);
+      edges.forEach(edge => {
+        const source = nodesById.get(edge.source);
+        const target = nodesById.get(edge.target);
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'list-node list-edge';
+        button.innerHTML = `<strong>${escapeHtml(edge.label || edge.type)}</strong><span>${escapeHtml(source?.label || edge.source)} → ${escapeHtml(target?.label || edge.target)}</span>`;
+        button.addEventListener('click', () => selectEdge(edge.id));
+        els.list.appendChild(button);
+      });
+      els.list.classList.toggle('visible', state.listVisible);
+      els.graphWrap.hidden = state.listVisible;
+    }
+
+    function propertyHtml(properties) {
+      const rows = Object.entries(properties || {}).filter(([, value]) => value !== '' && value !== null && value !== undefined);
+      if (!rows.length) return '<p class="subtitle">추가 속성이 없습니다.</p>';
+      return `<dl class="property-list">${rows.map(([key, value]) => `<div><dt>${escapeHtml(PROP_LABELS[key] || key)}</dt><dd>${escapeHtml(formatValue(value))}</dd></div>`).join('')}</dl>`;
+    }
+
+    function selectNode(id, rerender = true) {
+      const node = state.data?.nodes.find(item => item.id === id);
+      if (!node) return;
+      state.selected = id;
+      state.selectedKind = 'node';
+      const meta = nodeMeta(node.type);
+      const definitionNote = ['knowledge','skill','attitude','ksa'].includes(node.type) && !node.properties?.definition
+        ? '<div class="notice">사람이 검토한 실질 정의가 없어 개념명과 과업 근거만 표시합니다.</div>' : '';
+      const supportNote = ['qualification','job_base'].includes(node.type)
+        ? '<div class="notice">이 정보는 교육 탐색을 돕는 보조 근거이며 공식 인정이나 적격성 판단이 아닙니다.</div>' : '';
+      const drillAction = node.type === 'major' && state.data?.mode === 'overview'
+        ? `<button id="drillNode" class="btn btn-primary" type="button">${escapeHtml(node.label)} 전체 분류 펼치기</button>`
+        : node.type === 'classification'
+          ? `<button id="drillNode" class="btn btn-primary" type="button">이 세분류의 능력단위 ${escapeHtml(node.properties?.unit_count || 0)}개 보기</button>`
+          : '';
+      els.detail.innerHTML = `
+        <div class="detail-type">${escapeHtml(meta.label)}</div>
+        <h2>${escapeHtml(node.label)}</h2>
+        <p class="detail-subtitle">${escapeHtml(node.subtitle || '')}</p>
+        <div><span class="badge">${escapeHtml(node.review_state || '상태 없음')}</span><span class="badge">읽기 전용</span></div>
+        <section class="detail-section"><h3>속성</h3>${propertyHtml(node.properties)}</section>
+        <section class="detail-section"><h3>근거 출처</h3><p class="subtitle">${escapeHtml(sourceText(node.source))}</p></section>
+        ${drillAction}${definitionNote}${supportNote}`;
+      const drillButton = document.getElementById('drillNode');
+      if (drillButton) {
+        drillButton.addEventListener('click', () => {
+          if (node.type === 'major') loadGraph({major_code:node.properties?.major_code});
+          if (node.type === 'classification') loadGraph({classification_id:node.properties?.classification_id});
+        });
+      }
+      if (rerender) {
+        updateGraphAppearance();
+        const rendered = state.rendererMode === '3d'
+          ? state.graph?.graphData().nodes.find(item => item.id === id)
+          : null;
+        if (rendered && Number.isFinite(rendered.x)) {
+          const distance = Math.hypot(rendered.x, rendered.y, rendered.z) || 1;
+          const ratio = 1 + 115 / distance;
+          state.graph.cameraPosition(
+            {x:rendered.x * ratio, y:rendered.y * ratio, z:rendered.z * ratio},
+            rendered,
+            700
+          );
+        }
+      }
+    }
+
+    function selectEdge(id) {
+      const edge = state.data?.edges.find(item => item.id === id);
+      if (!edge) return;
+      state.selected = id;
+      state.selectedKind = 'edge';
+      const source = state.data.nodes.find(node => node.id === edge.source);
+      const target = state.data.nodes.find(node => node.id === edge.target);
+      const sourceRefs = edge.evidence_refs?.length ? edge.evidence_refs : [edge.source_ref];
+      const sourceRefsHtml = sourceRefs.filter(Boolean)
+        .map(ref => escapeHtml(sourceText(ref))).join('<br>');
+      const evidenceItems = edge.evidence_items?.length ? edge.evidence_items : (edge.evidence ? [edge.evidence] : []);
+      els.detail.innerHTML = `
+        <div class="detail-type">관계 근거</div>
+        <h2>${escapeHtml(edge.label || RELATION_LABELS[edge.type] || edge.type)}</h2>
+        <p class="detail-subtitle">${escapeHtml(source?.label || edge.source)} → ${escapeHtml(target?.label || edge.target)}</p>
+        <div><span class="badge">${escapeHtml(edge.strength || 'direct')}</span><span class="badge">${escapeHtml(edge.review_state || '상태 없음')}</span></div>
+        <section class="detail-section"><h3>관계 정보</h3><dl class="property-list">
+          <div><dt>관계 유형</dt><dd>${escapeHtml(edge.type)}</dd></div>
+          <div><dt>근거 강도</dt><dd>${escapeHtml(edge.strength || '')}</dd></div>
+          ${edge.evidence_count > 1 ? `<div><dt>결합 근거</dt><dd>${escapeHtml(edge.evidence_count)}건</dd></div>` : ''}
+          ${edge.confidence !== undefined ? `<div><dt>신뢰도</dt><dd>${escapeHtml(edge.confidence)}</dd></div>` : ''}
+          ${evidenceItems.length ? `<div><dt>근거</dt><dd>${evidenceItems.map(item => escapeHtml(item)).join('<br>')}</dd></div>` : ''}
+        </dl></section>
+        <section class="detail-section"><h3>근거 출처</h3><p class="subtitle">${sourceRefsHtml || '출처 없음'}</p></section>
+        <div class="notice">후보·자동 관계는 사람의 승인 상태로 해석하지 않습니다.</div>`;
+      updateGraphAppearance();
+    }
+
+    function zoom(factor) {
+      if (state.rendererMode === 'fallback') {
+        state.fallbackScale = Math.min(2.4, Math.max(.45, state.fallbackScale * factor));
+        renderCurrentFallback();
+        return;
+      }
+      if (!state.graph) return;
+      const position = state.graph.cameraPosition();
+      state.graph.cameraPosition(
+        {x:position.x * factor, y:position.y * factor, z:position.z * factor},
+        {x:0, y:0, z:0},
+        420
+      );
+    }
+    function fitView() {
+      if (state.rendererMode === 'fallback') {
+        state.fallbackScale = 1;
+        state.fallbackYaw = -.38;
+        state.fallbackPitch = -.18;
+        renderCurrentFallback();
+        return;
+      }
+      state.graph?.zoomToFit(850, 90);
+    }
+
+    function try3DRenderer() {
+      try {
+        if (state.graph?.renderer?.().getContext?.().isContextLost?.()) {
+          state.graph = null;
+          state.webglLossBound = false;
+          els.graph3d.replaceChildren();
+        }
+      } catch (_) {
+        state.graph = null;
+        state.webglLossBound = false;
+        els.graph3d.replaceChildren();
+      }
+      state.rendererMode = '3d';
+      renderGraph();
+    }
+
+    els.form.addEventListener('submit', event => {
+      event.preventDefault();
+      const q = els.query.value.trim();
+      if (q) loadGraph({q});
+    });
+    els.candidateEdges.addEventListener('change', () => { renderGraph(); renderList(); });
+    els.supportEdges.addEventListener('change', () => { renderGraph(); renderList(); });
+    els.zoomIn.addEventListener('click', () => zoom(.82));
+    els.zoomOut.addEventListener('click', () => zoom(1.22));
+    els.fit.addEventListener('click', fitView);
+    els.toggleRenderer.addEventListener('click', () => {
+      if (state.rendererMode === 'fallback') try3DRenderer();
+      else activateFallback('사용자가 3D 호환 렌더러를 선택했습니다.');
+    });
+    els.resetGraph.addEventListener('click', () => loadGraph({}));
+    els.toggleList.addEventListener('click', () => {
+      state.listVisible = !state.listVisible;
+      els.toggleList.setAttribute('aria-pressed', String(state.listVisible));
+      els.toggleList.textContent = state.listVisible ? '그래프' : '목록';
+      renderList();
+    });
+
+    els.fallback.addEventListener('pointerdown', event => {
+      state.fallbackDragging = true;
+      state.fallbackMoved = false;
+      state.fallbackPointerX = event.clientX;
+      state.fallbackPointerY = event.clientY;
+      els.fallback.setPointerCapture?.(event.pointerId);
+    });
+    els.fallback.addEventListener('pointermove', event => {
+      if (!state.fallbackDragging) return;
+      const dx = event.clientX - state.fallbackPointerX;
+      const dy = event.clientY - state.fallbackPointerY;
+      if (Math.abs(dx) + Math.abs(dy) > 1) state.fallbackMoved = true;
+      state.fallbackPointerX = event.clientX;
+      state.fallbackPointerY = event.clientY;
+      state.fallbackYaw += dx * .008;
+      state.fallbackPitch = Math.max(-1.35, Math.min(1.35, state.fallbackPitch + dy * .008));
+      queueFallbackRender();
+    });
+    const finishFallbackDrag = event => {
+      state.fallbackDragging = false;
+      try { els.fallback.releasePointerCapture?.(event.pointerId); } catch (_) {}
+      window.setTimeout(() => { state.fallbackMoved = false; }, 0);
+    };
+    els.fallback.addEventListener('pointerup', finishFallbackDrag);
+    els.fallback.addEventListener('pointercancel', finishFallbackDrag);
+    els.fallback.addEventListener('wheel', event => {
+      event.preventDefault();
+      state.fallbackScale = Math.min(2.4, Math.max(.45, state.fallbackScale * (event.deltaY > 0 ? 1.1 : .9)));
+      queueFallbackRender();
+    }, {passive:false});
+
+    const resizeObserver = new ResizeObserver(() => {
+      if (state.listVisible) return;
+      if (!els.fallback.hidden && state.data) {
+        const nodes = visibleNodes();
+        const ids = new Set(nodes.map(node => node.id));
+        renderFallback(nodes, visibleEdges(ids));
+      }
+      if (state.graph && state.rendererMode === '3d') {
+        state.graph
+          .width(Math.max(els.graph3d.clientWidth, 320))
+          .height(Math.max(els.graph3d.clientHeight, 520));
+      }
+    });
+    resizeObserver.observe(els.graph3d);
+
+    const initial = new URLSearchParams(location.search);
+    loadGraph({
+      q:initial.get('q') || '',
+      unit_code:initial.get('unit_code') || '',
+      major_code:initial.get('major_code') || '',
+      classification_id:initial.get('classification_id') || ''
+    });
+  })();
+  </script>
+</body>
+</html>

@@ -9,6 +9,10 @@
 - SQF와 NCS 학습모듈은 레거시/참조 데이터로 남아 있지만 기본 추천 도구 표면에는 노출하지 않는다.
 - 추천 결과는 공식 자격 인정이나 법적 적격성 판단이 아니라 교육훈련 안내다.
 - 원천 NCS 텍스트는 수정하지 않고, 전처리/온톨로지/리뷰 결과는 별도 테이블에 둔다.
+- 현재 배포 상태가 `private/draft developer preview`이면 기능 검증용 공유
+  단계이며, 안정 공개/내부 릴리스가 아니다. 사람 검토, 자격 API 커버리지,
+  provenance 재확인이 남아 있으면 추천 결과를 승인된 HR 의사결정으로
+  표현하지 않는다.
 
 ## 실행 방식
 
@@ -77,6 +81,7 @@ HTTP 기본 주소:
 | `ncs_analysis` | 경력개발경로, 자격, 직업기초능력, 온톨로지 근거를 조회한다. |
 | `recommend_training_for_task` | 현재 과업/능력단위 기준으로 필요한 훈련을 추천한다. |
 | `recommend_training_transition` | 현재 직무에서 목표 직무로 옮기기 위한 훈련을 추천한다. |
+| `plan_ncs_education_path` | 직무/과업 전환 추천 결과를 교육체계 수립용 단계형 계획으로 재구성한다. |
 | `recommend_task_transitions` | KSA 유사도 기반으로 가까운 과업 전환 후보를 추천한다. |
 | `get_concept_evidence` | 특정 온톨로지 개념의 KSA/수행준거/추천 근거를 조회한다. |
 
@@ -126,6 +131,30 @@ HTTP 기본 주소:
   }
 }
 ```
+
+교육체계 수립 초안:
+
+```json
+{
+  "tool": "plan_ncs_education_path",
+  "arguments": {
+    "current_query": "노무관리",
+    "target_query": "인사기획",
+    "plan_objective": "인사기획 담당자 전환 교육체계",
+    "target_population": "노무관리 경험이 있는 HR 담당자",
+    "scenario": "직무전환",
+    "preferred_max_hours": 24,
+    "preferred_methods": ["집체훈련"],
+    "limit": 5,
+    "save": false
+  }
+}
+```
+
+`scenario`는 생략하면 자동 선택한다. 지원 시나리오는 `직무전환`,
+`온보딩`, `업스킬링`, `리스킬링`, `자격연계`, `직업기초능력`, `운영`
+관점이다. 시나리오는 추천 점수를 공식 판정으로 바꾸지 않고, 같은
+전환 추천 근거를 교육기획 관점으로 재구성하는 보조 분석이다.
 
 근거 조회:
 

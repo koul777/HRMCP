@@ -125,9 +125,54 @@ class JobBaseApiTests(unittest.TestCase):
             self.assertEqual(summary["job_base_competency_count"], 1)
             self.assertEqual(summary["job_base_factor_count"], 2)
             self.assertEqual(summary["unit_job_base_link_count"], 2)
+            self.assertEqual(summary["linked_unit_count"], 1)
+            self.assertEqual(summary["unit_count"], 1)
+            self.assertEqual(summary["unit_job_base_coverage"], 1.0)
+            self.assertEqual(summary["factorless_link_count"], 0)
+            self.assertEqual(summary["links_with_factor_count"], 2)
+            self.assertEqual(summary["avg_factors_per_linked_unit"], 2.0)
+            self.assertEqual(summary["review_status_counts"], {"auto_linked": 2})
+            self.assertEqual(len(summary["top_factors"]), 2)
             self.assertEqual(len(links), 2)
+            self.assertEqual({link["review_status"] for link in links}, {"auto_linked"})
             self.assertEqual(len(profile), 2)
             self.assertEqual(profile[0]["competency_name"], "조직이해능력")
+
+    def test_job_base_summary_reports_factorless_links(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "ncs.db")
+            initialize_database(conn)
+            unit_code = seed_unit(conn)
+            result = upsert_job_base_rows(
+                conn,
+                [
+                    {
+                        "ncs_lclas_cd": "01",
+                        "ncs_lclas_cdnm": "사업관리",
+                        "ncs_mclas_cd": "01",
+                        "ncs_mclas_cdnm": "사업관리",
+                        "ncs_sclas_cd": "01",
+                        "ncs_sclas_cdnm": "프로젝트관리",
+                        "ncs_subd_cd": "01",
+                        "ncs_subd_cdnm": "공적개발원조사업관리",
+                        "ncs_cl_cd": unit_code,
+                        "compe_unit_name": "공적개발원조사업 개발전략수립",
+                        "job_base_competency_name": "조직이해능력",
+                        "job_base_factor_text": "",
+                        "job_base_factors": [],
+                    }
+                ],
+            )
+            summary = job_base_summary(conn)
+            conn.close()
+
+        self.assertEqual(result["links_upserted"], 1)
+        self.assertEqual(summary["job_base_competency_count"], 1)
+        self.assertEqual(summary["job_base_factor_count"], 0)
+        self.assertEqual(summary["unit_job_base_link_count"], 1)
+        self.assertEqual(summary["factorless_link_count"], 1)
+        self.assertEqual(summary["links_with_factor_count"], 0)
+        self.assertEqual(summary["top_factors"], [])
 
 
 if __name__ == "__main__":

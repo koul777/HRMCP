@@ -43,6 +43,7 @@ NCS MCP tool failures use the common envelope:
 | `meta_tool_recursion_blocked` | `policy` | false | `ncs_execute_tool` cannot execute itself or discovery. |
 | `tool_not_executable_via_meta` | `policy` | false | Operator/review/legacy tool is blocked from meta execution. |
 | `tool_execution_failed` | `execution` | false | Handler failed after argument binding succeeded. |
+| `service_busy` | `capacity` | true | Recommendation capacity is temporarily exhausted; retry after the returned delay. |
 | `qualification_service_key_missing` | `configuration` | false | Qualification collection key is absent. |
 | `job_base_service_key_missing` | `configuration` | false | Job-base collection key is absent. |
 | `external_api_error` | `external_dependency` | true | External API failed; retry may be appropriate. |
@@ -53,6 +54,14 @@ Specific not-found codes remain in `error.code`, for example
 `concept_not_found`. The response may also include the `[NOT_FOUND]` text marker
 inside `content` for LLM guidance. Client code should branch on `error.code` or
 `error.category`, not on the text marker.
+
+## Capacity Contract
+
+The three public recommendation facades return `service_busy` when they cannot
+obtain a bounded capacity slot before the configured queue timeout. The error
+includes `retry_after_seconds` and `capacity` metadata. Gateways should apply a
+bounded retry with jitter and show an overload response after the retry budget
+is exhausted; they must not reinterpret this response as an empty recommendation.
 
 ## Secret Handling
 

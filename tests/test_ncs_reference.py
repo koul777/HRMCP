@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 import sys
 import tempfile
@@ -16,6 +18,7 @@ if str(SRC) not in sys.path:
 from ncs_mcp.db import connect, initialize_database, normalize_concept_key, now_utc
 from ncs_mcp.config import load_settings, read_env_values
 from ncs_mcp.ncs_reference import (
+    _trusted_review_provenance_blockers,
     build_learning_module_links,
     build_ncs_derived_learning_plans,
     build_report_training_courses,
@@ -29,6 +32,36 @@ from ncs_mcp.ncs_reference import (
     review_learning_module_ncs_link,
     search_ncs_reference_chunks,
 )
+
+
+def write_review_packet(tmp: str | Path, filename: str, text: str) -> tuple[str, str]:
+    reports_dir = ROOT / "reports" / "_test_review_packets" / Path(tmp).name
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    path = reports_dir / filename
+    path.write_text(text, encoding="utf-8")
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    return path.relative_to(ROOT).as_posix(), f"sha256:{digest}"
+
+
+class NcsReferenceReviewPacketSafetyTests(unittest.TestCase):
+    def test_trusted_review_provenance_rejects_off_repo_reports_packet(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            packet = Path(tmp) / "reports" / "reference_review_packet.md"
+            packet.parent.mkdir(parents=True, exist_ok=True)
+            packet.write_text("# reference review packet\n", encoding="utf-8")
+            packet_hash = "sha256:" + hashlib.sha256(packet.read_bytes()).hexdigest()
+
+            blockers = _trusted_review_provenance_blockers(
+                reviewer_id="tester",
+                source_decision_packet=str(packet),
+                source_artifact_hash=packet_hash,
+                rationale="human decision rationale",
+            )
+
+        self.assertIn(
+            "trusted_status_requires_packet_backed_source_decision_packet",
+            blockers,
+        )
 
 
 def seed_hiring_unit(conn: sqlite3.Connection) -> str:
@@ -262,11 +295,28 @@ class NcsReferenceTests(unittest.TestCase):
                 save=False,
             )
             link_id = conn.execute("SELECT link_id FROM learning_module_unit_links").fetchone()["link_id"]
+            blocked_review = review_learning_module_ncs_link(
+                conn,
+                link_id=link_id,
+                review_status="accepted",
+                reviewer_id="mcp",
+            )
+            packet_ref, packet_hash = write_review_packet(
+                tmp,
+                "learning_module_review_packet.md",
+                f"learning_module_unit_link:{link_id}\n"
+                "Human confirmed learning module link is a trusted auxiliary reference.\n",
+            )
             reviewed = review_learning_module_ncs_link(
                 conn,
                 link_id=link_id,
                 review_status="accepted",
                 reviewer_id="tester",
+                source_decision_packet=packet_ref,
+                source_artifact_hash=packet_hash,
+                rationale="Human confirmed learning module link is a trusted auxiliary reference.",
+                evidence_refs=["learning_module_unit_link:test"],
+                run_artifact="reports/learning_module_review_run.json",
             )
             trusted_result = recommend_learning_modules_by_ncs(
                 conn,
@@ -284,6 +334,8 @@ class NcsReferenceTests(unittest.TestCase):
 
             self.assertEqual(target["unit_code"], unit_code)
             self.assertIsNone(candidate_result["recommendations"][0]["learn_module_seq"])
+            self.assertFalse(blocked_review["ok"])
+            self.assertEqual(blocked_review["error"]["code"], "trusted_review_provenance_required")
             self.assertTrue(reviewed["recommendation_eligible"])
             self.assertEqual(trusted_result["recommendations"][0]["learn_module_seq"], "LM-HIRE-1")
             self.assertGreaterEqual(saved_evidence, 1)
@@ -295,12 +347,37 @@ class NcsReferenceTests(unittest.TestCase):
             initialize_database(conn)
             unit_code = seed_hiring_unit(conn)
 
+            blocked = build_ncs_derived_learning_plans(
+                conn,
+                major_code="02",
+                middle_code="02",
+                small_code="02",
+                sub_code="01",
+                review_status="reviewed",
+                reviewer_id="ncs_learning_mvp",
+            )
+            self.assertFalse(blocked["ok"])
+            self.assertEqual(blocked["error"]["code"], "trusted_review_provenance_required")
+
+            packet_ref, packet_hash = write_review_packet(
+                tmp,
+                "ncs_derived_learning_plan_packet.md",
+                f"unit:{unit_code}\n"
+                "Human confirmed NCS-derived fallback plan should be trusted for this unit.\n",
+            )
             built = build_ncs_derived_learning_plans(
                 conn,
                 major_code="02",
                 middle_code="02",
                 small_code="02",
                 sub_code="01",
+                review_status="reviewed",
+                reviewer_id="tester",
+                source_decision_packet=packet_ref,
+                source_artifact_hash=packet_hash,
+                rationale="Human confirmed NCS-derived fallback plan should be trusted for this unit.",
+                evidence_refs=[f"unit:{unit_code}", "guide:C1-1"],
+                run_artifact="reports/ncs_derived_learning_plan_apply.json",
             )
             result = recommend_learning_modules_by_ncs(
                 conn,
@@ -328,9 +405,24 @@ class NcsReferenceTests(unittest.TestCase):
                 """,
                 (f"NCS-DERIVED-{unit_code}",),
             ).fetchone()[0]
+            audit_count = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM review_audit_log
+                WHERE action = 'build_ncs_derived_learning_plans'
+                  AND source_decision_packet = ?
+                  AND rationale = ?
+                """,
+                (
+                    packet_ref,
+                    "Human confirmed NCS-derived fallback plan should be trusted for this unit.",
+                ),
+            ).fetchone()[0]
             conn.close()
 
+            self.assertTrue(built["ok"])
             self.assertEqual(built["derived_plans_upserted"], 1)
+            self.assertTrue(built["trusted_status"])
             self.assertEqual(
                 result["recommendations"][0]["learn_module_seq"],
                 f"NCS-DERIVED-{unit_code}",
@@ -343,6 +435,7 @@ class NcsReferenceTests(unittest.TestCase):
                 concept_result["recommendations"][0]["learn_module_seq"],
                 f"NCS-DERIVED-{unit_code}",
             )
+            self.assertGreaterEqual(audit_count, 2)
 
     def test_build_learning_module_links_skips_ncs_derived_plans(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -356,6 +449,13 @@ class NcsReferenceTests(unittest.TestCase):
                 small_code="02",
                 sub_code="01",
             )
+            derived_status = conn.execute(
+                """
+                SELECT review_status
+                FROM learning_module_unit_links
+                WHERE learn_module_seq LIKE 'NCS-DERIVED-%'
+                """
+            ).fetchone()["review_status"]
 
             summary = build_learning_module_links(
                 conn,
@@ -375,6 +475,7 @@ class NcsReferenceTests(unittest.TestCase):
             conn.close()
 
             self.assertEqual(summary["module_count"], 1)
+            self.assertEqual(derived_status, "auto_linked")
             self.assertEqual(derived_generated_links, 0)
 
     def test_report_training_courses_link_to_ontology_concepts(self) -> None:
@@ -418,6 +519,25 @@ class NcsReferenceTests(unittest.TestCase):
             )
             imported = import_ncs_reference_html(conn, html_path, title="Training report")
 
+            blocked = build_report_training_courses(
+                conn,
+                document_id=imported["document_id"],
+                major_code="02",
+                middle_code="02",
+                small_code="02",
+                sub_code="01",
+                review_status="reviewed",
+                reviewer_id="ncs_reference_report_builder",
+            )
+            self.assertFalse(blocked["ok"])
+            self.assertEqual(blocked["error"]["code"], "trusted_review_provenance_required")
+
+            packet_ref, packet_hash = write_review_packet(
+                tmp,
+                "report_training_course_packet.md",
+                f"document:{imported['document_id']}\n"
+                "Human confirmed report-derived training course should be trusted as auxiliary evidence.\n",
+            )
             built = build_report_training_courses(
                 conn,
                 document_id=imported["document_id"],
@@ -425,6 +545,13 @@ class NcsReferenceTests(unittest.TestCase):
                 middle_code="02",
                 small_code="02",
                 sub_code="01",
+                review_status="reviewed",
+                reviewer_id="tester",
+                source_decision_packet=packet_ref,
+                source_artifact_hash=packet_hash,
+                rationale="Human confirmed report-derived training course should be trusted as auxiliary evidence.",
+                evidence_refs=[f"document:{imported['document_id']}", "guide:C1-1"],
+                run_artifact="reports/report_training_course_apply.json",
             )
             report_modules = conn.execute(
                 "SELECT COUNT(*) FROM ncs_learning_modules WHERE learn_module_seq LIKE 'REPORT-TRAINING-%'"
@@ -438,8 +565,23 @@ class NcsReferenceTests(unittest.TestCase):
                 trust_mode="trusted",
                 save=False,
             )
+            audit_count = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM review_audit_log
+                WHERE action = 'build_report_training_courses'
+                  AND source_decision_packet = ?
+                  AND rationale = ?
+                """,
+                (
+                    packet_ref,
+                    "Human confirmed report-derived training course should be trusted as auxiliary evidence.",
+                ),
+            ).fetchone()[0]
             conn.close()
 
+            self.assertTrue(built["ok"])
+            self.assertTrue(built["trusted_status"])
             self.assertEqual(built["report_training_courses_upserted"], 1)
             self.assertEqual(report_modules, 1)
             self.assertGreaterEqual(concept_links, 1)
@@ -447,6 +589,7 @@ class NcsReferenceTests(unittest.TestCase):
                 concept_result["recommendations"][0]["learn_module_seq"].startswith("REPORT-TRAINING-")
             )
             self.assertEqual(concept_result["recommendations"][0]["recommendation_type"], "report_training_course")
+            self.assertGreaterEqual(audit_count, 1)
 
     def test_scope_filters_reference_entities_and_auto_reviews_exact_names_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -501,6 +644,53 @@ class NcsReferenceTests(unittest.TestCase):
                 """,
                 (unit_code, timestamp, timestamp),
             )
+            blocked_review = review_exact_learning_module_name_links(
+                conn,
+                major_code="02",
+                middle_code="02",
+                small_code="02",
+                sub_codes=["01", "02"],
+                reviewer_id="ncs_learning_mvp",
+            )
+            blocked_status = conn.execute(
+                "SELECT review_status FROM learning_module_unit_links WHERE unit_code = ?",
+                (unit_code,),
+            ).fetchone()["review_status"]
+            self.assertFalse(blocked_review["ok"])
+            self.assertEqual(blocked_status, "auto_linked")
+            self.assertTrue(blocked_review["trusted_review_provenance_required"])
+            self.assertFalse(blocked_review["status_update_allowed_without_packet"])
+
+            packet_ref, packet_hash = write_review_packet(
+                tmp,
+                "learning_module_exact_name_packet.md",
+                f"learning_module:LM-HIRE-1\nunit:{unit_code}\n"
+                "Human confirmed exact-name learning module link is a trusted auxiliary reference.\n",
+            )
+            blocked_auto_reviewer = review_exact_learning_module_name_links(
+                conn,
+                major_code="02",
+                middle_code="02",
+                small_code="02",
+                sub_codes=["01", "02"],
+                reviewer_id="mcp",
+                source_decision_packet=packet_ref,
+                source_artifact_hash=packet_hash,
+                rationale="Human confirmed exact-name learning module link is a trusted auxiliary reference.",
+                evidence_refs=["learning_module:LM-HIRE-1", f"unit:{unit_code}"],
+                run_artifact="reports/learning_module_exact_name_apply.json",
+            )
+            auto_blocked_status = conn.execute(
+                "SELECT review_status FROM learning_module_unit_links WHERE unit_code = ?",
+                (unit_code,),
+            ).fetchone()["review_status"]
+            self.assertFalse(blocked_auto_reviewer["ok"])
+            self.assertIn(
+                "trusted_status_requires_explicit_human_reviewer_id",
+                blocked_auto_reviewer["error"]["blockers"],
+            )
+            self.assertEqual(auto_blocked_status, "auto_linked")
+
             reviewed = review_exact_learning_module_name_links(
                 conn,
                 major_code="02",
@@ -508,16 +698,46 @@ class NcsReferenceTests(unittest.TestCase):
                 small_code="02",
                 sub_codes=["01", "02"],
                 reviewer_id="tester",
+                source_decision_packet=packet_ref,
+                source_artifact_hash=packet_hash,
+                rationale="Human confirmed exact-name learning module link is a trusted auxiliary reference.",
+                evidence_refs=["learning_module:LM-HIRE-1", f"unit:{unit_code}"],
+                run_artifact="reports/learning_module_exact_name_apply.json",
             )
             review_status = conn.execute(
                 "SELECT review_status FROM learning_module_unit_links WHERE unit_code = ?",
                 (unit_code,),
             ).fetchone()["review_status"]
+            audit_row = conn.execute(
+                """
+                SELECT source_decision_packet, rationale, evidence_refs_json, created_by_tool, run_artifact
+                FROM review_audit_log
+                WHERE action = 'review_exact_learning_module_name_links'
+                """
+            ).fetchone()
             conn.close()
 
             self.assertEqual(out_links, 0)
+            self.assertTrue(reviewed["ok"])
             self.assertEqual(reviewed["reviewed_count"], 1)
+            self.assertEqual(reviewed["applied_review_status"], "reviewed")
+            self.assertTrue(reviewed["trusted_review_provenance_required"])
+            self.assertFalse(reviewed["status_update_allowed_without_packet"])
             self.assertEqual(review_status, "reviewed")
+            self.assertEqual(audit_row["source_decision_packet"], packet_ref)
+            self.assertEqual(
+                audit_row["rationale"],
+                "Human confirmed exact-name learning module link is a trusted auxiliary reference.",
+            )
+            self.assertEqual(
+                json.loads(audit_row["evidence_refs_json"]),
+                ["learning_module:LM-HIRE-1", f"unit:{unit_code}"],
+            )
+            self.assertEqual(
+                audit_row["created_by_tool"],
+                "ncs_reference.review_exact_learning_module_name_links",
+            )
+            self.assertEqual(audit_row["run_artifact"], "reports/learning_module_exact_name_apply.json")
 
 
 if __name__ == "__main__":

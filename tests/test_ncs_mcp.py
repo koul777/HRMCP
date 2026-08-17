@@ -136,11 +136,57 @@ class NcsMcpTests(unittest.TestCase):
             self.assertIn("ncs_job_base_competencies", tables)
             self.assertIn("ncs_job_base_factors", tables)
             self.assertIn("ncs_unit_job_base_links", tables)
+            review_defaults = {}
+            for table in (
+                "ncs_training_course_unit_links",
+                "ncs_unit_qualification_links",
+                "ncs_unit_job_base_links",
+            ):
+                columns = {
+                    row["name"]: row["dflt_value"]
+                    for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+                }
+                review_defaults[table] = columns["review_status"]
+            self.assertEqual(
+                review_defaults,
+                {
+                    "ncs_training_course_unit_links": "'auto_linked'",
+                    "ncs_unit_qualification_links": "'auto_linked'",
+                    "ncs_unit_job_base_links": "'auto_linked'",
+                },
+            )
+            audit_columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(review_audit_log)").fetchall()
+            }
+            self.assertTrue(
+                {
+                    "source_decision_packet",
+                    "source_artifact_hash",
+                    "rationale",
+                    "evidence_refs_json",
+                    "created_by_tool",
+                    "run_artifact",
+                }.issubset(audit_columns)
+            )
             alias_count = conn.execute("SELECT COUNT(*) FROM ncs_query_aliases").fetchone()[0]
+            recruiting_aliases = conn.execute(
+                """
+                SELECT alias_text, normalized_query, unit_code
+                FROM ncs_query_aliases
+                WHERE alias_text IN ('채용', '인력채용')
+                   OR normalized_query = '인력채용'
+                ORDER BY alias_text
+                """
+            ).fetchall()
             scenario_count = conn.execute(
                 "SELECT COUNT(*) FROM training_transition_gold_scenarios"
             ).fetchone()[0]
             self.assertGreaterEqual(alias_count, 1)
+            self.assertEqual(
+                {row["unit_code"] for row in recruiting_aliases},
+                {"0202020103_23v4"},
+            )
             self.assertGreaterEqual(scenario_count, 1)
             conn.close()
 

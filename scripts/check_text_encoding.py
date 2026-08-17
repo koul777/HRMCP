@@ -8,9 +8,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 TEXT_EXPECTATIONS = {
-    "README.md": ["NCS MCP", "훈련 추천", "NCS 중심"],
+    "README.md": ["NCS MCP", "education/training", "NCS-centered"],
     "docs/NCS_MCP_USER_GUIDE_KO.md": ["NCS 훈련 추천 MCP 사용자 가이드", "경력개발", "직무 전환"],
-    "docs/MCP_RELEASE_CHECKLIST.md": ["비밀값", "Docker", "/ready"],
+    "docs/MCP_RELEASE_CHECKLIST.md": ["API keys", "Docker", "/ready"],
 }
 
 MOJIBAKE_MARKERS = [
@@ -51,8 +51,8 @@ def check_contract(path: Path) -> list[str]:
         issues.append(f"{path}: ncs_training aliases do not include '훈련'")
     if "직무 전환" not in aliases_by_tool.get("recommend_training_transition", []):
         issues.append(f"{path}: recommend_training_transition aliases do not include '직무 전환'")
-    if payload.get("surface", {}).get("active_tool_count") != 10:
-        issues.append(f"{path}: public active_tool_count is not 10")
+    if payload.get("surface", {}).get("active_tool_count") != 11:
+        issues.append(f"{path}: public active_tool_count is not 11")
     return issues
 
 

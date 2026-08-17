@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import requests
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -15,8 +17,11 @@ if str(SRC) not in sys.path:
 
 from ncs_mcp.collect_api import (
     api_quality_hygiene_report,
+    api_unmatched_cleanup_proposal_report,
+    api_unmatched_diagnosis_report,
     apply_api_quality_hygiene,
     collect_elements_api,
+    fetch_standard_page,
     normalize_api_compare_text,
     upsert_standard_element_items,
 )
@@ -89,6 +94,52 @@ def add_element(
 
 
 class CollectApiQualityTests(unittest.TestCase):
+    def test_fetch_standard_page_reports_non_json_response_without_service_key(self) -> None:
+        class FakeResponse:
+            status_code = 200
+            headers = {"Content-Type": "text/html"}
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict:
+                raise ValueError("not json")
+
+        with patch("ncs_mcp.collect_api.requests.get", return_value=FakeResponse()):
+            with self.assertRaisesRegex(RuntimeError, "API response was not JSON") as raised:
+                fetch_standard_page(
+                    "https://example.test/api",
+                    "openapi6",
+                    "SECRET_SERVICE_KEY",
+                    1,
+                    10,
+                    3,
+                    {"ncsLclasCd": "14"},
+                )
+
+        message = str(raised.exception)
+        self.assertIn("openapi6", message)
+        self.assertIn("content_type=text/html", message)
+        self.assertNotIn("SECRET_SERVICE_KEY", message)
+
+    def test_fetch_standard_page_reports_connection_error_detail_without_service_key(self) -> None:
+        with patch("ncs_mcp.collect_api.requests.get", side_effect=requests.ConnectionError("proxy failed")):
+            with self.assertRaisesRegex(RuntimeError, "API request failed") as raised:
+                fetch_standard_page(
+                    "https://example.test/api",
+                    "openapi6",
+                    "SECRET_SERVICE_KEY",
+                    1,
+                    10,
+                    3,
+                    {"ncsLclasCd": "14"},
+                )
+
+        message = str(raised.exception)
+        self.assertIn("error=ConnectionError", message)
+        self.assertIn("proxy failed", message)
+        self.assertNotIn("SECRET_SERVICE_KEY", message)
+
     def test_normalize_api_compare_text_handles_html_entities(self) -> None:
         self.assertEqual(normalize_api_compare_text("M&;A"), "M&A")
         self.assertEqual(normalize_api_compare_text("M&amp;A"), "M&A")
@@ -236,6 +287,239 @@ class CollectApiQualityTests(unittest.TestCase):
         self.assertEqual(summary["elements_successful"], 1)
         self.assertEqual(not_collected_status, "not_collected")
 
+    def test_collect_elements_api_no_data_resolves_prior_unmatched_issue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "ncs.db"
+            reports_dir = Path(tmp) / "reports"
+            conn = connect(db_path)
+            initialize_database(conn)
+            element_id = seed_element(conn)
+            conn.execute(
+                "UPDATE competency_elements SET api_match_status='api_failed' WHERE element_id=?",
+                (element_id,),
+            )
+            insert_quality_issue(
+                conn,
+                target_type="element",
+                target_id=element_id,
+                issue_type="api_element_unmatched",
+                severity="warning",
+                issue_detail="NCS006 request failed after retries.",
+                suggested_action="Retry.",
+            )
+            conn.commit()
+            conn.close()
+
+            def fake_fetch(**kwargs):
+                return {
+                    "response": {
+                        "header": {"resultCode": "03", "resultMsg": "NO_DATA"},
+                        "body": {"totalCount": 0, "items": {}},
+                    }
+                }
+
+            with patch("ncs_mcp.collect_api.fetch_standard_page", side_effect=fake_fetch):
+                summary = collect_elements_api(
+                    db_path,
+                    reports_dir,
+                    service_key="test-key",
+                    only_failed=True,
+                    only_open_unmatched=True,
+                    element_limit=10,
+                )
+
+            conn = connect(db_path)
+            try:
+                row = conn.execute(
+                    """
+                    SELECT ce.api_match_status, qi.resolved_at
+                    FROM competency_elements ce
+                    JOIN quality_issues qi ON qi.target_id = CAST(ce.element_id AS TEXT)
+                    WHERE ce.element_id = ?
+                      AND qi.issue_type = 'api_element_unmatched'
+                    """,
+                    (element_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+
+        self.assertEqual(summary["elements_failed"], 0)
+        self.assertEqual(summary["elements_no_data"], 1)
+        self.assertEqual(row["api_match_status"], "no_data")
+        self.assertIsNotNone(row["resolved_at"])
+
+    def test_collect_elements_api_skips_cached_no_data_response(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "ncs.db"
+            reports_dir = Path(tmp) / "reports"
+            conn = connect(db_path)
+            initialize_database(conn)
+            element_id = seed_element(conn)
+            source_url = (
+                "https://apis.data.go.kr/B490007/hrdkapi/NCS006?"
+                "COMPE_UNIT_FACTR_NO=1&NCS_CL_CD=0202020101_23v3&USG_YN=Y"
+            )
+            conn.execute(
+                """
+                INSERT INTO api_raw_responses(
+                    source_url, page_no, num_of_rows, total_count,
+                    result_code, result_msg, response_json, fetched_at
+                ) VALUES (?, 1, 100, 0, '03', 'NO_DATA', '{}', ?)
+                """,
+                (source_url, now_utc()),
+            )
+            conn.execute(
+                "UPDATE competency_elements SET api_match_status='api_failed' WHERE element_id=?",
+                (element_id,),
+            )
+            insert_quality_issue(
+                conn,
+                target_type="element",
+                target_id=element_id,
+                issue_type="api_element_unmatched",
+                severity="warning",
+                issue_detail="NCS006 request failed after retries.",
+                suggested_action="Retry.",
+            )
+            conn.commit()
+            conn.close()
+
+            with patch("ncs_mcp.collect_api.fetch_standard_page") as fake_fetch:
+                summary = collect_elements_api(
+                    db_path,
+                    reports_dir,
+                    service_key="test-key",
+                    element_limit=10,
+                )
+
+            conn = connect(db_path)
+            try:
+                row = conn.execute(
+                    """
+                    SELECT ce.api_match_status, qi.resolved_at
+                    FROM competency_elements ce
+                    JOIN quality_issues qi ON qi.target_id = CAST(ce.element_id AS TEXT)
+                    WHERE ce.element_id = ?
+                      AND qi.issue_type = 'api_element_unmatched'
+                    """,
+                    (element_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+
+        fake_fetch.assert_not_called()
+        self.assertEqual(summary["elements_skipped"], 1)
+        self.assertEqual(summary["elements_successful"], 0)
+        self.assertEqual(summary["elements_failed"], 0)
+        self.assertEqual(summary["elements_no_data"], 1)
+        self.assertEqual(row["api_match_status"], "no_data")
+        self.assertIsNotNone(row["resolved_at"])
+
+    def test_collect_elements_api_non_no_data_error_stays_api_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "ncs.db"
+            reports_dir = Path(tmp) / "reports"
+            conn = connect(db_path)
+            initialize_database(conn)
+            element_id = seed_element(conn)
+            conn.execute(
+                "UPDATE competency_elements SET api_match_status='api_failed' WHERE element_id=?",
+                (element_id,),
+            )
+            conn.commit()
+            conn.close()
+
+            def fake_fetch(**kwargs):
+                return {
+                    "response": {
+                        "header": {"resultCode": "99", "resultMsg": "ERROR"},
+                        "body": {"totalCount": 0, "items": {}},
+                    }
+                }
+
+            with patch("ncs_mcp.collect_api.fetch_standard_page", side_effect=fake_fetch):
+                summary = collect_elements_api(
+                    db_path,
+                    reports_dir,
+                    service_key="test-key",
+                    only_failed=True,
+                    element_limit=10,
+                )
+
+            conn = connect(db_path)
+            try:
+                row = conn.execute(
+                    """
+                    SELECT ce.api_match_status, qi.resolved_at, qi.issue_detail
+                    FROM competency_elements ce
+                    JOIN quality_issues qi ON qi.target_id = CAST(ce.element_id AS TEXT)
+                    WHERE ce.element_id = ?
+                      AND qi.issue_type IN ('api_element_unmatched', 'api_element_collection_failure')
+                    """,
+                    (element_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+
+        self.assertEqual(summary["elements_failed"], 1)
+        self.assertEqual(summary["elements_no_data"], 0)
+        self.assertEqual(row["api_match_status"], "api_failed")
+        self.assertIsNone(row["resolved_at"])
+        self.assertIn("resultCode=99", row["issue_detail"])
+
+    def test_collect_elements_api_request_error_stores_connection_detail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "ncs.db"
+            reports_dir = Path(tmp) / "reports"
+            conn = connect(db_path)
+            initialize_database(conn)
+            element_id = seed_element(conn)
+            conn.execute(
+                "UPDATE competency_elements SET api_match_status='api_failed' WHERE element_id=?",
+                (element_id,),
+            )
+            conn.commit()
+            conn.close()
+
+            def fake_fetch(**kwargs):
+                raise RuntimeError(
+                    "API request failed: url=https://example.test/api, "
+                    "params={'pageNo': 1}, error=ConnectionError, "
+                    "detail=HTTPSConnectionPool(host='apis.data.go.kr', port=443): "
+                    "Max retries exceeded with url: /B490007/hrdkapi/NCS006 "
+                    "(Caused by NewConnectionError(\"HTTPSConnection(host='apis.data.go.kr', "
+                    "port=443): Failed to establish a new connection: [WinError 10013] "
+                    "액세스 권한에 의해 숨겨진 소켓에 액세스를 시도했습니다\"))"
+                )
+
+            with patch("ncs_mcp.collect_api.fetch_standard_page", side_effect=fake_fetch):
+                summary = collect_elements_api(
+                    db_path,
+                    reports_dir,
+                    service_key="test-key",
+                    only_failed=True,
+                    element_limit=10,
+                )
+
+            conn = connect(db_path)
+            try:
+                row = conn.execute(
+                    """
+                    SELECT qi.issue_type, qi.issue_detail
+                    FROM quality_issues qi
+                    WHERE qi.target_id = ? AND qi.issue_type = 'api_element_collection_failure'
+                    ORDER BY qi.issue_id DESC
+                    LIMIT 1
+                    """,
+                    (str(element_id),),
+                ).fetchone()
+            finally:
+                conn.close()
+
+        self.assertEqual(summary["elements_failed"], 1)
+        self.assertEqual(row["issue_type"], "api_element_collection_failure")
+        self.assertIn("WinError 10013", row["issue_detail"])
+
     def test_api_quality_hygiene_resolves_duplicates_and_normalized_equal_mismatches(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             conn = connect(Path(tmp) / "ncs.db")
@@ -277,6 +561,137 @@ class CollectApiQualityTests(unittest.TestCase):
         self.assertEqual(report["candidate_count"], 2)
         self.assertEqual(applied["resolved_count"], 2)
         self.assertEqual(open_count, 1)
+
+    def test_api_quality_hygiene_resolves_terminal_no_data_unmatched_issue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "ncs.db")
+            initialize_database(conn)
+            element_id = seed_element(conn)
+            conn.execute(
+                "UPDATE competency_elements SET api_match_status='no_data' WHERE element_id=?",
+                (element_id,),
+            )
+            insert_quality_issue(
+                conn,
+                target_type="element",
+                target_id=element_id,
+                issue_type="api_element_unmatched",
+                severity="warning",
+                issue_detail="NCS006 request failed after retries.",
+                suggested_action="Retry.",
+            )
+            conn.commit()
+
+            report = api_quality_hygiene_report(conn, limit=10)
+            applied = apply_api_quality_hygiene(conn, limit=10)
+            open_count = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM quality_issues
+                WHERE issue_type='api_element_unmatched'
+                  AND resolved_at IS NULL
+                """
+            ).fetchone()[0]
+            conn.close()
+
+        self.assertEqual(report["candidate_action_counts"]["resolve_terminal_no_data"], 1)
+        self.assertEqual(applied["resolved_count"], 1)
+        self.assertEqual(open_count, 0)
+
+    def test_api_quality_hygiene_resolves_stale_matched_element_api_issue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "ncs.db")
+            initialize_database(conn)
+            element_id = seed_element(conn)
+            conn.execute(
+                "UPDATE competency_elements SET api_match_status = 'matched' WHERE element_id = ?",
+                (element_id,),
+            )
+            insert_quality_issue(
+                conn,
+                target_type="element",
+                target_id=str(element_id),
+                issue_type="api_element_collection_failure",
+                severity="warning",
+                issue_detail="NCS006 returned resultCode=15: HRDK_UNKNOWN_ERROR",
+                suggested_action="Retry.",
+            )
+            conn.commit()
+
+            report = api_quality_hygiene_report(conn, limit=10)
+            applied = apply_api_quality_hygiene(conn, limit=10)
+            open_count = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM quality_issues
+                WHERE issue_type='api_element_collection_failure'
+                  AND resolved_at IS NULL
+                """
+            ).fetchone()[0]
+            conn.close()
+
+        self.assertEqual(
+            report["candidate_action_counts"]["resolve_stale_matched_element_api_issue"],
+            1,
+        )
+        self.assertEqual(applied["resolved_count"], 1)
+        self.assertEqual(open_count, 0)
+
+    def test_api_unmatched_diagnosis_and_cleanup_proposal_reports_open_and_resolved_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "ncs.db")
+            initialize_database(conn)
+            timestamp = now_utc()
+            for issue_type, target_id, detail, resolved in (
+                ("api_element_unmatched", "101", "NCS006 request failed after retries.", False),
+                ("api_element_unmatched", "102", "NCS006 request failed after retries.", True),
+                ("api_element_collection_failure", "103", "API collection failed after retries.", False),
+                ("api_element_collection_failure", "104", "API collection failed after retries.", True),
+                ("api_value_mismatch", "105", "unit_name mismatch.", False),
+                ("api_element_value_mismatch", "106", "element_level mismatch.", False),
+            ):
+                insert_quality_issue(
+                    conn,
+                    target_type="element",
+                    target_id=target_id,
+                    issue_type=issue_type,
+                    severity="warning",
+                    issue_detail=detail,
+                    suggested_action="Review.",
+                )
+                if resolved:
+                    issue_id = int(
+                        conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                    )
+                    conn.execute(
+                        "UPDATE quality_issues SET resolved_at = ? WHERE issue_id = ?",
+                        (timestamp, issue_id),
+                    )
+            conn.commit()
+
+            diagnosis = api_unmatched_diagnosis_report(conn, limit=1)
+            proposal = api_unmatched_cleanup_proposal_report(diagnosis)
+            conn.close()
+
+        self.assertEqual(diagnosis["summary"]["api_element_unmatched"]["total_rows"], 2)
+        self.assertEqual(diagnosis["summary"]["api_element_unmatched"]["open_rows"], 1)
+        self.assertEqual(diagnosis["summary"]["api_element_unmatched"]["resolved_rows"], 1)
+        self.assertEqual(
+            diagnosis["summary"]["api_element_collection_failure"]["resolved_rows"],
+            1,
+        )
+        self.assertEqual(
+            diagnosis["dominant_details"]["api_element_unmatched"][0]["issue_detail"],
+            "NCS006 request failed after retries.",
+        )
+        self.assertIn("retry-noise bookkeeping", diagnosis["root_cause"])
+        self.assertEqual(
+            proposal["diagnosis_snapshot"]["api_element_collection_failure_resolved_rows"],
+            1,
+        )
+        self.assertEqual(proposal["dry_run_impact"]["remaining_open_api_value_mismatch_rows"], 1)
+        self.assertEqual(proposal["dry_run_impact"]["resolved_api_element_unmatched_rows_removed"], 1)
+        self.assertIn("report-only cleanup proposal", proposal["recommendation"])
 
 
 if __name__ == "__main__":

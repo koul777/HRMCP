@@ -66,16 +66,136 @@
     "legacy_scope": "SQF and NCS learning modules are hidden reference paths.",
     "meta_execution": "Only read-only user tools are executable through ncs_execute_tool.",
     "operator_tools": "Hidden by default; enable with NCS_MCP_ENABLE_OPERATOR_TOOLS=1 before server start.",
+    "query_routing": "ncs_discover_tools returns a Law MCP-style query_route with scenario, tool, params, required_params, missing_params, pipeline, risk_flags, guard_flags, and a stable route_fingerprint.",
     "recommendation_meta_calls_default_compact_true": true,
-    "recommendation_meta_calls_force_save_false": true
+    "recommendation_meta_calls_force_save_false": true,
+    "route_integrity": "ncs_execute_tool accepts _route_query and optional _route_fingerprint, recomputes the route, rejects mismatched fingerprints, and only executes the routed primary tool or expected tool-chain tools."
+  },
+  "query_router": {
+    "fingerprint_version": "route-fingerprint-v1",
+    "scenario_count": 7,
+    "scenarios": [
+      {
+        "expected_tool_chain": [
+          "plan_ncs_education_path",
+          "recommend_training_transition",
+          "get_concept_evidence",
+          "ncs_analysis"
+        ],
+        "pipeline": [
+          "recommend_training_transition",
+          "get_concept_evidence",
+          "ncs_analysis"
+        ],
+        "public_executable": true,
+        "required_params": [
+          "current_query",
+          "target_query"
+        ],
+        "requires_operator_surface": false,
+        "scenario": "education_system_design",
+        "tool": "plan_ncs_education_path"
+      },
+      {
+        "expected_tool_chain": [
+          "recommend_training_transition",
+          "recommend_task_transitions",
+          "recommend_training_for_task"
+        ],
+        "pipeline": [
+          "recommend_task_transitions",
+          "recommend_training_for_task"
+        ],
+        "public_executable": true,
+        "required_params": [
+          "current_query",
+          "target_query"
+        ],
+        "requires_operator_surface": false,
+        "scenario": "training_transition",
+        "tool": "recommend_training_transition"
+      },
+      {
+        "expected_tool_chain": [
+          "recommend_training_for_task",
+          "get_concept_evidence",
+          "ncs_training"
+        ],
+        "pipeline": [
+          "get_concept_evidence",
+          "ncs_training"
+        ],
+        "public_executable": true,
+        "required_params": [
+          "query"
+        ],
+        "requires_operator_surface": false,
+        "scenario": "task_training",
+        "tool": "recommend_training_for_task"
+      },
+      {
+        "expected_tool_chain": [
+          "recommend_task_transitions",
+          "recommend_training_for_task"
+        ],
+        "pipeline": [
+          "recommend_training_for_task"
+        ],
+        "public_executable": true,
+        "required_params": [
+          "query"
+        ],
+        "requires_operator_surface": false,
+        "scenario": "task_transition",
+        "tool": "recommend_task_transitions"
+      },
+      {
+        "expected_tool_chain": [
+          "ncs_analysis"
+        ],
+        "pipeline": [],
+        "public_executable": true,
+        "required_params": [
+          "mode"
+        ],
+        "requires_operator_surface": false,
+        "scenario": "evidence_analysis",
+        "tool": "ncs_analysis"
+      },
+      {
+        "expected_tool_chain": [
+          "get_quality_issues"
+        ],
+        "pipeline": [],
+        "public_executable": false,
+        "required_params": [],
+        "requires_operator_surface": true,
+        "scenario": "operator_review",
+        "tool": "get_quality_issues"
+      },
+      {
+        "expected_tool_chain": [
+          "ncs_search"
+        ],
+        "pipeline": [],
+        "public_executable": true,
+        "required_params": [
+          "query"
+        ],
+        "requires_operator_surface": false,
+        "scenario": "structure_search",
+        "tool": "ncs_search"
+      }
+    ],
+    "schema": "ncs_query_route_v1"
   },
   "surface": {
-    "active_tool_count": 10,
+    "active_tool_count": 11,
     "legacy_hidden_tool_count": 52,
     "mode": "public",
     "operator_tool_count": 0,
     "operator_tool_count_available": 5,
-    "user_tool_count": 10
+    "user_tool_count": 11
   },
   "tools": [
     {
@@ -199,6 +319,29 @@
     },
     {
       "aliases": [
+        "education plan",
+        "curriculum",
+        "training path",
+        "AI-HR plan",
+        "training system matrix",
+        "교육체계",
+        "교육계획",
+        "훈련체계도"
+      ],
+      "categories": [
+        "career_transition",
+        "education_planning",
+        "training_courses"
+      ],
+      "description": "Build a compact NCS education-system plan for a task or career transition, including training_system_summary, training_system_matrix, required/reference classification, KSA evidence, preferred facility constraints, and level/hour/method/facility fit.",
+      "executable_via_meta": true,
+      "meta_compact_default": false,
+      "meta_save_forced_false": true,
+      "name": "plan_ncs_education_path",
+      "role": "user"
+    },
+    {
+      "aliases": [
         "task transition",
         "similar task",
         "transferability"
@@ -220,6 +363,7 @@
         "reskilling"
       ],
       "categories": [
+        "education_planning",
         "training_courses"
       ],
       "description": "Recommend training courses for a current NCS task from KSA evidence.",
@@ -238,6 +382,7 @@
       ],
       "categories": [
         "career_transition",
+        "education_planning",
         "training_courses"
       ],
       "description": "Recommend training for moving from one NCS scope or task query to another.",

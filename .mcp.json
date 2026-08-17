@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "ncs-sqf-education": {
+    "ncs-training": {
       "type": "stdio",
       "command": "C:/workspace/NCS_MCP/run_ncs_mcp_stdio.cmd",
       "args": []

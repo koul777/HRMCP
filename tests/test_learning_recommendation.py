@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 import sys
 import tempfile
 import unittest
 import os
+import shutil
 from pathlib import Path
 
 
@@ -436,11 +438,46 @@ class LearningRecommendationTests(unittest.TestCase):
             self.set_db_env(db_path)
             from ncs_mcp import server
 
+            reports_dir = ROOT / "reports" / "_test_review_packets" / Path(tmp).name
+            reports_dir.mkdir(parents=True, exist_ok=True)
+            self.addCleanup(shutil.rmtree, reports_dir, ignore_errors=True)
+            sqf_packet = reports_dir / "sqf_match_review_packet.md"
+            sqf_packet_text = (
+                f"sqf_match:{match_id}\n"
+                "Human confirmed SQF-NCS mapping from reviewed packet.\n"
+            )
+            sqf_packet.write_text(sqf_packet_text, encoding="utf-8")
+            sqf_packet_hash = "sha256:" + hashlib.sha256(
+                sqf_packet.read_bytes()
+            ).hexdigest()
+            concept_packet = reports_dir / "concept_review_packet.md"
+            concept_packet_text = (
+                f"concept_id:{concept_id}\n"
+                "Human confirmed concept definition from reviewed packet.\n"
+            )
+            concept_packet.write_text(concept_packet_text, encoding="utf-8")
+            concept_packet_hash = "sha256:" + hashlib.sha256(
+                concept_packet.read_bytes()
+            ).hexdigest()
+
+            blocked = server.review_sqf_ncs_match(
+                match_id=match_id,
+                new_status="accepted",
+                reviewer_id="mcp",
+            )
+            self.assertFalse(blocked["ok"])
+            self.assertEqual(blocked["error"]["code"], "trusted_review_provenance_required")
+
             reviewed = server.review_sqf_ncs_match(
                 match_id=match_id,
                 new_status="accepted",
                 reviewer_id="tester",
                 notes="trusted fixture",
+                source_decision_packet=str(sqf_packet),
+                source_artifact_hash=sqf_packet_hash,
+                rationale="Human confirmed SQF-NCS mapping from reviewed packet.",
+                evidence_refs=[f"sqf_match:{match_id}"],
+                run_artifact="reports/sqf_match_review_run.json",
             )
             self.assertTrue(reviewed["ok"])
             self.assertIn("data", reviewed)
@@ -456,6 +493,11 @@ class LearningRecommendationTests(unittest.TestCase):
                 definition="Workforce supply and demand planning.",
                 aliases=["workforce plan"],
                 reviewer_id="tester",
+                source_decision_packet=str(concept_packet),
+                source_artifact_hash=concept_packet_hash,
+                rationale="Human confirmed concept definition from reviewed packet.",
+                evidence_refs=["concept:workforce"],
+                run_artifact="reports/concept_review_run.json",
             )
             self.assertTrue(concept_review["ok"])
             self.assertEqual(concept_review["concept"]["definition_status"], "defined")

@@ -12,7 +12,7 @@ legacy-tool removal.
 The public JSON contract is generated from the same registry at
 `mcp\ncs-tool-contract.json`.
 Use `docs\MCP_RELEASE_CHECKLIST.md` before registering or deploying the MCP.
-For a Korean user-facing overview of the 10 public tools, see
+For a Korean user-facing overview of the 11 public tools, see
 `docs\NCS_MCP_USER_GUIDE_KO.md`.
 
 ## Run Modes
@@ -71,8 +71,8 @@ python scripts\export_mcp_tool_contract.py --check --out mcp\ncs-tool-contract.j
 Build and run the HTTP server with Docker:
 
 ```powershell
-docker build -t ncs-mcp:local .
-docker run --rm -p 8766:8766 -v ${PWD}\data\processed:/data ncs-mcp:local
+$env:NCS_DB_HOST_PATH="C:\secure-data\ncs.db"
+docker compose -f deploy\compose.internal.yml up --build -d
 ```
 
 For a minimal Docker readiness smoke without mounting the full production DB:
@@ -80,8 +80,13 @@ For a minimal Docker readiness smoke without mounting the full production DB:
 ```powershell
 mkdir docker-smoke
 docker run --rm -v ${PWD}\docker-smoke:/data ncs-mcp:local python -m ncs_mcp.smoke_data --out /data/ncs.db
-docker run --rm -p 8766:8766 -v ${PWD}\docker-smoke:/data ncs-mcp:local
+$env:NCS_DB_HOST_PATH="${PWD}\docker-smoke\ncs.db"
+docker compose -f deploy\compose.internal.yml up --build -d
 ```
+
+Serving examples must publish only to host loopback and mount the exact DB file
+read-only. The writable directory mount above is used only by the one-shot
+smoke-data generator; it is not a serving configuration.
 
 Pass API keys with environment variables when collection utilities are needed.
 Do not bake `.env`, raw CSV/Excel files, or generated SQLite databases into the
@@ -106,14 +111,14 @@ Use `--apply` only to backfill retry metadata from existing error rows; it does
 not call the API.
 
 ```powershell
-python scripts\ncs_harness.py qualification-retry-hygiene --out reports\qualification_retry_hygiene.json --markdown-out reports\qualification_retry_hygiene.md
-python scripts\ncs_harness.py qualification-retry-hygiene --apply --retry-backoff-seconds 3600 --out reports\qualification_retry_hygiene_applied.json --markdown-out reports\qualification_retry_hygiene_applied.md
+python scripts\ncs_harness.py qualification-retry-hygiene --ncs006-checkpoint-path reports\checkpoint_ncs006_element_api_status_<DATE>_current.json --out reports\qualification_retry_hygiene.json --markdown-out reports\qualification_retry_hygiene.md
+python scripts\ncs_harness.py qualification-retry-hygiene --apply --retry-backoff-seconds 3600 --ncs006-checkpoint-path reports\checkpoint_ncs006_element_api_status_<DATE>_current.json --out reports\qualification_retry_hygiene_applied.json --markdown-out reports\qualification_retry_hygiene_applied.md
 ```
 
 Then retry only a small API batch after `next_retry_at` has passed:
 
 ```powershell
-python scripts\ncs_harness.py retry-qualification-errors --limit-units 50 --num-of-rows 50 --max-pages 1 --request-delay 2 --max-retries 1 --retry-backoff-seconds 30 --stop-after-rate-limit-errors 3 --report-path reports\qualification_error_report.md
+python scripts\ncs_harness.py retry-qualification-errors --limit-units 50 --num-of-rows 50 --max-pages 1 --request-delay 2 --max-retries 1 --retry-backoff-seconds 30 --stop-after-rate-limit-errors 3 --ncs006-checkpoint-path reports\checkpoint_ncs006_element_api_status_<DATE>_current.json --report-path reports\qualification_error_report.md
 ```
 
 Treat `stopped_early=true` or `stop_reason=rate_limited` as a hard stop for the

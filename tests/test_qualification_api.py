@@ -169,6 +169,7 @@ class QualificationApiTests(unittest.TestCase):
             self.assertEqual(summary["unattempted_unit_count"], 1)
             self.assertEqual(summary["collection_coverage"], 0.0)
             self.assertEqual(len(links), 2)
+            self.assertEqual({link["review_status"] for link in links}, {"auto_linked"})
             self.assertEqual(links[0]["ablt_unit_typ_cd"], "MAND")
             self.assertEqual(mandatory[0]["jm_nm"], "기계설계산업기사")
 
@@ -211,6 +212,7 @@ class QualificationApiTests(unittest.TestCase):
             conn = connect(tmp_path / "ncs.db")
             initialize_database(conn)
             unit_code = seed_unit(conn)
+            seed_second_unit(conn)
             timestamp = now_utc()
             conn.execute(
                 """
@@ -228,6 +230,19 @@ class QualificationApiTests(unittest.TestCase):
             conn.commit()
 
             report = qualification_retry_hygiene_report(conn, retry_backoff_seconds=5, limit=5)
+            report["api_execution_guard"] = {
+                "status": "blocked",
+                "api_call_allowed_now": False,
+                "qualification_retry_allowed_now": False,
+                "next_safe_action_status": "start_guarded_watchdog_if_no_active_process",
+                "checkpoint_path": "reports/checkpoint_ncs006_element_api_status_20260623.json",
+                "safety_violations": ["ncs006_checkpoint_api_call_not_allowed"],
+            }
+            report["api_call_allowed_now"] = False
+            report["qualification_retry_allowed_now"] = False
+            report["blocked_by_checkpoint"] = True
+            report["checkpoint_path"] = "reports/checkpoint_ncs006_element_api_status_20260623.json"
+            report["next_safe_action_status"] = "start_guarded_watchdog_if_no_active_process"
             unchanged = conn.execute(
                 """
                 SELECT last_error_type, attempt_count, next_retry_at
@@ -243,8 +258,24 @@ class QualificationApiTests(unittest.TestCase):
             text = markdown_path.read_text(encoding="utf-8")
 
         self.assertTrue(report["ok"])
+        self.assertEqual(report["schema"], "ncs_qualification_retry_hygiene_v1")
+        self.assertTrue(report["report_only"])
+        self.assertFalse(report["status_update_allowed"])
+        self.assertFalse(report["db_writes"])
+        self.assertFalse(report["api_calls"])
+        self.assertFalse(report["execution_authorized"])
+        self.assertFalse(report["automatic_queue_execution_allowed"])
+        self.assertEqual(report["authorization_status"], "not_authorized_read_only_report")
+        self.assertFalse(report["approval_claim"])
         self.assertEqual(report["mode"], "dry_run")
+        self.assertEqual(report["coverage_gap"]["total_unit_count"], 2)
+        self.assertEqual(report["coverage_gap"]["attempted_unit_count"], 1)
+        self.assertEqual(report["coverage_gap"]["collection_coverage"], 0.5)
+        self.assertEqual(report["coverage_gap"]["target_attempted_unit_count"], 2)
+        self.assertEqual(report["coverage_gap"]["additional_attempted_units_needed"], 1)
+        self.assertEqual(report["major_coverage_gaps"][0]["unattempted_unit_count"], 1)
         self.assertEqual(report["error_type_counts"]["rate_limited"], 1)
+        self.assertEqual(report["retry_candidate_unit_count"], report["retry_ready_unit_count"])
         self.assertEqual(report["metadata_gaps"]["missing_error_type_count"], 1)
         self.assertEqual(report["metadata_gaps"]["zero_attempt_count"], 1)
         self.assertEqual(report["metadata_gaps"]["missing_next_retry_at_count"], 1)
@@ -253,6 +284,17 @@ class QualificationApiTests(unittest.TestCase):
         self.assertEqual(unchanged["attempt_count"], 0)
         self.assertIsNone(unchanged["next_retry_at"])
         self.assertIn("# Qualification Retry Hygiene", text)
+        self.assertIn("report_only: True", text)
+        self.assertIn("execution_authorized: False", text)
+        self.assertIn("automatic_queue_execution_allowed: False", text)
+        self.assertIn("authorization_status: not_authorized_read_only_report", text)
+        self.assertIn("Coverage Gap", text)
+        self.assertIn("additional_attempted_units_needed", text)
+        self.assertIn("retry_candidate_unit_count", text)
+        self.assertIn("api_call_allowed_now: False", text)
+        self.assertIn("qualification_retry_allowed_now: False", text)
+        self.assertIn("blocked_by_checkpoint: True", text)
+        self.assertIn("checkpoint_ncs006_element_api_status_20260623.json", text)
 
     def test_apply_qualification_retry_hygiene_backfills_metadata_without_api(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

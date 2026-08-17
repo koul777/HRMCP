@@ -30,6 +30,29 @@ def _harness_command_lines(path: Path) -> list[tuple[int, str]]:
 
 
 class OperatorDocsSafetyTests(unittest.TestCase):
+    def test_institutional_system_prompt_preserves_public_tool_boundary(self) -> None:
+        prompt_path = (
+            ROOT
+            / "docs"
+            / "examples"
+            / "institutional_chatbot_system_prompt.md"
+        )
+        text = prompt_path.read_text(encoding="utf-8")
+
+        for marker in (
+            "ncs_discover_tools",
+            "query_route",
+            "operator, review-apply, collection",
+            "human_reviewed, accepted, or reviewed",
+            "framework_reference",
+            "service_busy",
+            "bounded retry",
+            "structured error",
+            "tool allowlists independently of prompt text",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, text)
+
     def test_qualification_retry_examples_use_rate_limit_guard(self) -> None:
         failures: list[str] = []
         for path in PUBLIC_OPERATOR_DOCS:
@@ -43,6 +66,7 @@ class OperatorDocsSafetyTests(unittest.TestCase):
                         "--max-retries 1",
                         "--num-of-rows 50",
                         "--max-pages 1",
+                        "--ncs006-checkpoint-path",
                     ]
                     if token not in command
                 ]
