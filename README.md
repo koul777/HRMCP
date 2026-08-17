@@ -1,22 +1,22 @@
+<div align="center">
+
+<video src="https://github.com/koul777/HRMCP/raw/main/docs/hrmcp_promo.mp4" poster="docs/images/promo_poster.jpg" controls muted width="820"></video>
+
+https://github.com/koul777/HRMCP/raw/main/docs/hrmcp_promo.mp4
+
+[![HRMCP 소개 영상](docs/images/promo_poster.jpg)](https://github.com/koul777/HRMCP/raw/main/docs/hrmcp_promo.mp4)
+
+**🎬 [HRMCP 소개 영상 재생하기](https://github.com/koul777/HRMCP/raw/main/docs/hrmcp_promo.mp4)** — 위 영상이 보이지 않으면 클릭하세요
+
+</div>
+
+---
+
 # HRMCP — NCS 기반 HR 실무용 MCP
 
 > **HR 실무에서 NCS를 활용하는 가장 빠른 길.**
 > 채용 직무에 맞는 NCS 분류부터 능력단위 → 능력단위요소 → 수행준거 → 지식(K)·기술(S)·태도(A)까지,
 > 사람이 일일이 찾아 정리하던 정보를 이제 AI가 구조화된 NCS 데이터베이스에서 직접 조회해 활용합니다.
-
----
-
-## 🎬 홍보 영상
-
-<!--
-  아래 링크와 썸네일을 실제 홍보 영상 주소로 교체하세요.
-  · YouTube 예시:  [![HRMCP 소개 영상](영상썸네일이미지_URL)](https://youtu.be/영상ID)
-  · 파일 업로드 시: docs/images/ 아래에 썸네일을 넣고 아래 경로를 바꾸면 됩니다.
--->
-
-[![HRMCP 소개 영상 — 준비 중](https://img.shields.io/badge/▶%20HRMCP%20소개%20영상-준비%20중-E23B3B?style=for-the-badge)](#-홍보-영상)
-
-> 📌 홍보 영상은 준비되는 대로 이 자리에 게시됩니다. (영상 URL이 나오면 위 배지를 클릭 가능한 썸네일로 교체)
 
 ---
 
