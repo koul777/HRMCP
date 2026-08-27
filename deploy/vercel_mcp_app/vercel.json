@@ -3,12 +3,17 @@
   "env": {
     "NCS_MCP_READ_ONLY": "1",
     "NCS_MCP_ENABLE_OPERATOR_TOOLS": "0",
+    "NCS_MCP_ENABLE_ADVANCED_TOOLS": "0",
     "NCS_MCP_DISABLE_DNS_REBINDING_PROTECTION": "1",
-    "NCS_MCP_STREAMABLE_HTTP_PATH": "/mcp"
+    "NCS_MCP_STREAMABLE_HTTP_PATH": "/mcp",
+    "NCS_MCP_MAX_CONCURRENT_RECOMMENDATIONS": "2",
+    "NCS_DB_PATH": "/tmp/ncs_interview_serving.db",
+    "NCS_DB_URL": "https://github.com/koul777/HRMCP/releases/download/ncs-serving-2026-02/ncs_interview_serving_release.db"
   },
   "functions": {
     "api/index.py": {
-      "maxDuration": 30
+      "maxDuration": 30,
+      "includeFiles": "{api/**/*.py,api/ncs_interview_serving_release.zip,src/**/*.py,requirements.txt}"
     }
   },
   "routes": [
