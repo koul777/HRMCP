@@ -124,6 +124,43 @@ AI의 검색과 결과물 작성을 뒷받침합니다.
 
 ---
 
+## 🤖 사용 방법 (Claude 연결)
+
+Claude의 원격 MCP 커스텀 커넥터는 Free·Pro·Max·Team·Enterprise 플랜에서 사용할 수
+있습니다. Free 플랜은 커스텀 커넥터를 1개까지 등록할 수 있습니다.
+자세한 최신 정책은 [Anthropic 공식 안내](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)를 참고하세요.
+
+![Claude 설정에서 HRMCP 커스텀 커넥터를 추가하는 화면 예시](docs/images/setup/claude_hrmcp_connector.png)
+
+> 화면 구성과 메뉴 이름은 Claude 버전 및 언어 설정에 따라 조금 다를 수 있습니다.
+
+### 개인 플랜 (Free·Pro·Max)
+
+1. Claude에서 **설정 → 기능 → 커넥터** 로 이동합니다. 영문 UI에서는
+   **Customize → Connectors** 로 표시될 수 있습니다.
+2. 커넥터 옆의 **`+` → Add custom connector** 를 선택합니다.
+3. 아래 정보를 입력한 뒤 **추가(Add)** 를 클릭합니다.
+
+| 항목 | 입력값 |
+| --- | --- |
+| 이름 | `HRMCP` |
+| 원격 MCP 서버 URL | `https://ncs-mcp-bridge-mini2.vercel.app/api/mcp` |
+| 인증 | 없음 — OAuth Client ID·Secret을 입력하지 않습니다. |
+
+연결 후 대화창 왼쪽 아래의 **`+` → Connectors** 에서 `HRMCP`를 켜면 해당 대화에서
+사용할 수 있습니다.
+
+### Team·Enterprise 플랜
+
+1. 조직의 **Owner 또는 Primary Owner**가 **Organization settings → Connectors** 로
+   이동합니다.
+2. **Add → Custom → Web** 을 선택하고 위의 원격 MCP 서버 URL을 입력합니다.
+3. OAuth 고급 설정은 비워 둔 채 **Add** 를 클릭해 조직에 등록합니다.
+4. 각 구성원은 **설정 → 기능 → 커넥터** 에서 `HRMCP`를 찾아 **Connect** 를 클릭한
+   뒤 대화별로 활성화합니다.
+
+---
+
 ## 💬 사용 예시
 
 연결 후 채팅창에서 등록한 이름 앞에 `@`를 붙여 선택하면 됩니다. 예를 들어 플러그인 이름을
