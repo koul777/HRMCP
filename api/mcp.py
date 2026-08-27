@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import sys
@@ -142,9 +143,23 @@ def _bootstrap_db_from_local_snapshot() -> None:
 def _app_with_path_prefix_fix() -> object:
     base_app = mcp.streamable_http_app()
     streamable_path = getattr(mcp.settings, "streamable_http_path", "/mcp")
+    lifespan_context = base_app.router.lifespan_context(base_app)
+    lifespan_started = False
+    lifespan_lock = asyncio.Lock()
+
+    async def _ensure_lifespan_ready() -> None:
+        nonlocal lifespan_started
+        if lifespan_started:
+            return
+        async with lifespan_lock:
+            if lifespan_started:
+                return
+            await lifespan_context.__aenter__()
+            lifespan_started = True
 
     async def app(scope, receive, send) -> None:
         if scope.get("type") == "http":
+            await _ensure_lifespan_ready()
             path = scope.get("path", "/") or "/"
             if path == "/" or path == "":
                 scope["path"] = streamable_path
