@@ -180,6 +180,19 @@ OPERATOR_MCP_TOOLS = {
 }
 
 
+# Advanced ontology / education-integration / transition tools. These are still
+# maturing (education-path planning and transition recommendations have known
+# issues), so they are hidden from the public MCP surface unless
+# NCS_MCP_ENABLE_ADVANCED_TOOLS=1 is set. The stable core (search, unit detail,
+# training lookup, evidence analysis, task-training recommendation) stays exposed.
+ADVANCED_MCP_TOOLS = {
+    "plan_ncs_education_path",
+    "recommend_training_transition",
+    "recommend_task_transitions",
+    "get_concept_evidence",
+}
+
+
 LEGACY_MCP_TOOLS = {
     "list_classifications",
     "get_competency_units",
@@ -290,5 +303,18 @@ def discover_tools_for_intent(
     return matches
 
 
-def mcp_tools_for_mode(*, operator_tools_enabled: bool = False) -> set[str]:
-    return ADMIN_MCP_TOOLS if operator_tools_enabled else PUBLIC_MCP_TOOLS
+def mcp_tools_for_mode(
+    *,
+    operator_tools_enabled: bool = False,
+    advanced_tools_enabled: bool = True,
+) -> set[str]:
+    tools = ADMIN_MCP_TOOLS if operator_tools_enabled else PUBLIC_MCP_TOOLS
+    if not advanced_tools_enabled:
+        tools = tools - ADVANCED_MCP_TOOLS
+    return tools
+
+
+def executable_tool_names_for_mode(*, advanced_tools_enabled: bool = True) -> set[str]:
+    if advanced_tools_enabled:
+        return set(NCS_EXECUTABLE_TOOL_NAMES)
+    return NCS_EXECUTABLE_TOOL_NAMES - ADVANCED_MCP_TOOLS

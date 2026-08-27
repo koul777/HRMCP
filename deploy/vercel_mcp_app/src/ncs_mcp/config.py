@@ -27,6 +27,7 @@ class Settings:
     job_base_service_key: str | None
     reports_dir: Path
     operator_tools_enabled: bool
+    advanced_tools_enabled: bool
     read_only_mode: bool
     max_concurrent_recommendations: int
     recommendation_queue_timeout_seconds: float
@@ -123,6 +124,10 @@ def load_settings() -> Settings:
     )
     reports_value = value_for("NCS_REPORTS_DIR")
     operator_tools_enabled = bool_for("NCS_MCP_ENABLE_OPERATOR_TOOLS")
+    # Advanced ontology / education-integration / transition tools are hidden by
+    # default for the public release. Set NCS_MCP_ENABLE_ADVANCED_TOOLS=1 to expose
+    # them again once they are stabilized.
+    advanced_tools_enabled = bool_for("NCS_MCP_ENABLE_ADVANCED_TOOLS")
     read_only_mode = bool_for("NCS_MCP_READ_ONLY")
     max_concurrent_recommendations = int_for(
         "NCS_MCP_MAX_CONCURRENT_RECOMMENDATIONS", 2, minimum=1, maximum=32
@@ -145,6 +150,7 @@ def load_settings() -> Settings:
         job_base_service_key=job_base_service_key,
         reports_dir=Path(reports_value) if reports_value else DEFAULT_REPORTS_DIR,
         operator_tools_enabled=operator_tools_enabled,
+        advanced_tools_enabled=advanced_tools_enabled,
         read_only_mode=read_only_mode,
         max_concurrent_recommendations=max_concurrent_recommendations,
         recommendation_queue_timeout_seconds=recommendation_queue_timeout_seconds,

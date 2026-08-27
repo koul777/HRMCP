@@ -1,1 +1,4 @@
 # keep all files
+api/*.zip
+!api/ncs_interview_serving_release.zip
+api/*.db

@@ -76,6 +76,7 @@ def _bootstrap_db_from_local_snapshot() -> None:
         db_path = Path(env_path)
     else:
         packaged_candidates = [
+            _ROOT / "api" / "ncs_interview_serving_release.zip",
             _ROOT / "api" / "ncs_interview_db.zip",
             _ROOT / "api" / "ncs_interview_serving_release.db",
             _ROOT / "tmp" / "ncs_interview_serving_release.db",
