@@ -107,7 +107,7 @@ AI의 검색과 결과물 작성을 뒷받침합니다.
   - **서버 URL:** 아래 HTTPS MCP 주소를 그대로 복사해 붙여넣기
 
     ```text
-    https://ncs-mcp-bridge-mini2.vercel.app/api/mcp
+    https://ncscope-ncs-mcp.vercel.app/api/mcp
     ```
 
 - **인증 방식:** `인증 없음` 선택 (드롭다운의 `∨`를 클릭해 선택)
@@ -130,21 +130,21 @@ Claude의 원격 MCP 커스텀 커넥터는 Free·Pro·Max·Team·Enterprise 플
 있습니다. Free 플랜은 커스텀 커넥터를 1개까지 등록할 수 있습니다.
 자세한 최신 정책은 [Anthropic 공식 안내](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)를 참고하세요.
 
-![Claude 설정에서 HRMCP 커스텀 커넥터를 추가하는 화면 예시](docs/images/setup/claude_hrmcp_connector.png)
+![Claude 설정에서 HRMCP 커스텀 커넥터를 추가하는 화면 예시](docs/images/setup/claude_hrmcp_connector_v2.png)
 
 > 화면 구성과 메뉴 이름은 Claude 버전 및 언어 설정에 따라 조금 다를 수 있습니다.
 
 ### 개인 플랜 (Free·Pro·Max)
 
-1. Claude에서 **설정 → 기능 → 커넥터** 로 이동합니다. 영문 UI에서는
-   **Customize → Connectors** 로 표시될 수 있습니다.
+1. Claude에서 **Customize → Connectors** 로 이동합니다. 일부 화면에서는
+   **Settings → Connectors** 로 표시될 수 있습니다.
 2. 커넥터 옆의 **`+` → Add custom connector** 를 선택합니다.
 3. 아래 정보를 입력한 뒤 **추가(Add)** 를 클릭합니다.
 
 | 항목 | 입력값 |
 | --- | --- |
 | 이름 | `HRMCP` |
-| 원격 MCP 서버 URL | `https://ncs-mcp-bridge-mini2.vercel.app/api/mcp` |
+| 원격 MCP 서버 URL | `https://ncscope-ncs-mcp.vercel.app/api/mcp` |
 | 인증 | 없음 — OAuth Client ID·Secret을 입력하지 않습니다. |
 
 연결 후 대화창 왼쪽 아래의 **`+` → Connectors** 에서 `HRMCP`를 켜면 해당 대화에서
@@ -156,37 +156,62 @@ Claude의 원격 MCP 커스텀 커넥터는 Free·Pro·Max·Team·Enterprise 플
    이동합니다.
 2. **Add → Custom → Web** 을 선택하고 위의 원격 MCP 서버 URL을 입력합니다.
 3. OAuth 고급 설정은 비워 둔 채 **Add** 를 클릭해 조직에 등록합니다.
-4. 각 구성원은 **설정 → 기능 → 커넥터** 에서 `HRMCP`를 찾아 **Connect** 를 클릭한
+4. 각 구성원은 **Customize → Connectors** 에서 `HRMCP`를 찾아 **Connect** 를 클릭한
    뒤 대화별로 활성화합니다.
 
 ---
 
-## 💬 사용 예시
+## 💬 ChatGPT와 Claude에서 HRMCP 사용하기
 
-연결 후 채팅창에서 등록한 이름 앞에 `@`를 붙여 선택하면 됩니다. 예를 들어 플러그인 이름을
-`HRMCP`로 만들었다면 `@HRMCP`와 같이 사용합니다.
+연결 방식은 다르지만 요청하는 내용은 동일합니다. 아래 예시는 ChatGPT와 Claude가 HRMCP에서
+조회한 NCS 근거를 참고해 면접 질문 초안을 작성하도록 요청하는 방법입니다.
 
-![@ 로 플러그인 선택](docs/images/setup/1_5.jpg)
+### 구조화된 면접 질문 만들기
 
-**① 구조화된 면접 질문 만들기**
+#### ChatGPT
+
+채팅창에서 등록한 이름 앞에 `@`를 붙여 HRMCP를 선택한 뒤 요청합니다. 연결 이름을
+`HRMCP`로 만들었다면 다음과 같이 입력합니다.
+
+![@HRMCP를 선택하는 방법](docs/images/setup/1_5.jpg)
 
 ```text
 @HRMCP 첨부한 채용공고와 직무기술서를 참고해 구조화된 행동면접 질문 10개를 작성해줘.
-각 질문별 평가요소, 추가 질문, 긍정·부정 행동지표도 함께 제시해줘.
+각 질문별 평가요소, 추가 질문, 긍정적·부정적 행동지표도 함께 제시해줘.
 ```
 
-![면접 질문 생성 결과](docs/images/setup/1_6.jpg)
+![ChatGPT에서 HRMCP를 활용한 면접 질문 생성 결과](docs/images/setup/1_6.jpg)
 
-**② 직무기술서 작성하기**
+#### Claude
+
+Claude에서는 `@HRMCP`를 입력하는 대신, 사용할 대화에서 왼쪽 아래 **`+` → Connectors** 로
+이동해 `HRMCP`를 켭니다. 채용공고와 직무기술서를 첨부한 뒤 다음과 같이 요청합니다.
+
+![Claude 대화에서 Connectors 메뉴를 열어 HRMCP를 활성화하고 요청하는 방법](docs/images/setup/claude_hrmcp_use.png)
 
 ```text
-@HRMCP 채용 직무에 적합한 NCS 분류와 능력단위를 찾아 NCS 기반 직무기술서를 작성해줘.
+첨부한 채용공고와 직무기술서를 참고하고 HRMCP의 NCS 데이터를 활용해 구조화된 행동면접 질문 10개를 작성해줘.
+각 질문별 평가요소, 추가 질문, 긍정적·부정적 행동지표도 함께 제시해줘.
 ```
 
-**③ 교육훈련 계획 수립하기**
+> Claude의 메뉴 구성과 이름은 버전 및 언어 설정에 따라 다를 수 있습니다. 일부 화면에서는
+> 왼쪽 아래 `+` 대신 `/`를 입력해 **Connectors → HRMCP**를 활성화할 수 있습니다.
+
+### 그 밖의 활용 예시
+
+ChatGPT에서는 아래 문장 앞에 `@HRMCP`를 붙입니다. Claude에서는 HRMCP 커넥터를 켠 뒤
+`@HRMCP` 없이 그대로 요청합니다.
+
+**직무기술서 작성하기**
 
 ```text
-@HRMCP 인사 직무의 능력단위와 지식·기술·태도를 분석해 교육훈련 계획과 과정별 학습목표를 설계해줘.
+HRMCP의 NCS 데이터를 활용해 채용 직무에 적합한 NCS 분류와 능력단위를 찾고 NCS 기반 직무기술서를 작성해줘.
+```
+
+**교육훈련 계획 수립하기**
+
+```text
+HRMCP의 NCS 데이터를 활용해 인사 직무의 능력단위와 지식·기술·태도를 분석하고 교육훈련 계획과 과정별 학습목표를 설계해줘.
 ```
 
 ---
@@ -205,10 +230,10 @@ Claude의 원격 MCP 커스텀 커넥터는 Free·Pro·Max·Team·Enterprise 플
 
 | 항목 | 값 |
 | --- | --- |
-| MCP 서버 URL | `https://ncs-mcp-bridge-mini2.vercel.app/api/mcp` |
+| MCP 서버 URL | `https://ncscope-ncs-mcp.vercel.app/api/mcp` |
 | 인증 | 없음 (Auth: None) |
-| 상태 확인(health) | `https://ncs-mcp-bridge-mini2.vercel.app/api/health` |
-| 준비 확인(ready) | `https://ncs-mcp-bridge-mini2.vercel.app/api/ready` |
+| 상태 확인(health) | `https://ncscope-ncs-mcp.vercel.app/api/health` |
+| 준비 확인(ready) | `https://ncscope-ncs-mcp.vercel.app/api/ready` |
 
 ChatGPT Custom GPT(Agent/Tools) 설정에서는 아래 JSON의 `url`만 넣으면 됩니다.
 
@@ -216,7 +241,7 @@ ChatGPT Custom GPT(Agent/Tools) 설정에서는 아래 JSON의 `url`만 넣으�
 {
   "mcpServers": {
     "hrmcp": {
-      "url": "https://ncs-mcp-bridge-mini2.vercel.app/api/mcp"
+      "url": "https://ncscope-ncs-mcp.vercel.app/api/mcp"
     }
   }
 }
