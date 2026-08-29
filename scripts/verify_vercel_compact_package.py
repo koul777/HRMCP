@@ -26,6 +26,8 @@ from ncs_mcp.vercel_snapshot import (  # noqa: E402
     COMPACT_SNAPSHOT_NAME,
     inspect_compact_archive,
     materialize_compact_snapshot,
+    readiness_required_min_rows,
+    readiness_required_tables,
 )
 
 
@@ -87,6 +89,38 @@ def measure_function_bundle(
     return {"bytes": total_bytes, "file_count": file_count, "max_bytes": max_bytes}
 
 
+def _deployment_readiness_contract(
+    manifest_path: Path,
+) -> tuple[tuple[str, ...], dict[str, int], Path | None]:
+    """Load the nearest Vercel environment contract for a packaged snapshot."""
+
+    manifest_parent = manifest_path.resolve().parent
+    candidate_roots = []
+    if manifest_parent.name == "api":
+        candidate_roots.append(manifest_parent.parent)
+    candidate_roots.append(manifest_parent)
+
+    for root in candidate_roots:
+        config_path = root / "vercel.json"
+        if not config_path.is_file():
+            continue
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"unable to read Vercel readiness contract: {config_path}") from exc
+        environment = config.get("env") if isinstance(config, dict) else None
+        if not isinstance(environment, dict):
+            raise ValueError(f"Vercel readiness contract has no env object: {config_path}")
+        normalized = {str(key): str(value) for key, value in environment.items()}
+        return (
+            readiness_required_tables(normalized),
+            readiness_required_min_rows(normalized),
+            config_path,
+        )
+
+    return readiness_required_tables({}), readiness_required_min_rows({}), None
+
+
 def verify_package(
     archive_path: Path,
     manifest_path: Path,
@@ -95,12 +129,17 @@ def verify_package(
     require_function_bundle: bool = False,
 ) -> dict[str, object]:
     manifest, member = inspect_compact_archive(archive_path, manifest_path)
+    required_tables, minimum_rows, readiness_config_path = (
+        _deployment_readiness_contract(manifest_path)
+    )
     with tempfile.TemporaryDirectory(prefix="ncs-ontology-compact-verify-") as temp_dir:
         destination = Path(temp_dir) / COMPACT_SNAPSHOT_NAME
         materialized = materialize_compact_snapshot(
             archive_path,
             manifest_path,
             destination,
+            required_tables=required_tables,
+            minimum_rows=minimum_rows,
         )
         destination_bytes = destination.stat().st_size if destination.exists() else 0
 
@@ -143,6 +182,13 @@ def verify_package(
         "physical_counts": manifest["physical_counts"],
         "logical_counts": manifest["logical_counts"],
         "servable_counts": manifest.get("servable_counts", {}),
+        "readiness_contract": {
+            "config_path": (
+                str(readiness_config_path.resolve()) if readiness_config_path else None
+            ),
+            "required_tables": list(required_tables),
+            "minimum_rows": minimum_rows,
+        },
         "function_bundle": function_bundle,
     }
 

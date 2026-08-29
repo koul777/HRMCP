@@ -210,6 +210,17 @@ class VercelSnapshotTests(unittest.TestCase):
                 "ncs_unit_job_base_links",
                 config["env"]["NCS_MCP_READINESS_EXTRA_TABLES"].split(","),
             )
+            self.assertIn(
+                "ncs_qualification_items",
+                config["env"]["NCS_MCP_READINESS_EXTRA_TABLES"].split(","),
+            )
+            self.assertIn(
+                "ncs_unit_qualification_links",
+                config["env"]["NCS_MCP_READINESS_EXTRA_TABLES"].split(","),
+            )
+            minimum_rows = json.loads(config["env"]["NCS_MCP_READINESS_MIN_ROWS"])
+            self.assertEqual(minimum_rows["ncs_qualification_items"], 1)
+            self.assertEqual(minimum_rows["ncs_unit_qualification_links"], 1)
             function = config["functions"]["api/index.py"]
             self.assertIn("api/ncs_ontology_compact.zip", function["includeFiles"])
             self.assertIn(
@@ -238,6 +249,40 @@ class VercelSnapshotTests(unittest.TestCase):
             self.assertTrue(result["function_bundle"]["checked"])
             self.assertTrue(result["function_bundle"]["required"])
             self.assertEqual(result["function_bundle"]["file_count"], 1)
+
+    def test_package_verifier_rejects_missing_required_qualification_data(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _, archive, manifest, _ = self._create_package(root)
+            (root / "vercel.json").write_text(
+                json.dumps(
+                    {
+                        "env": {
+                            "NCS_MCP_READINESS_EXTRA_TABLES": (
+                                "ncs_qualification_items,ncs_unit_qualification_links"
+                            ),
+                            "NCS_MCP_READINESS_MIN_ROWS": json.dumps(
+                                {
+                                    "ncs_qualification_items": 1,
+                                    "ncs_unit_qualification_links": 1,
+                                }
+                            ),
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = verify_package(archive, manifest)
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(
+                result["readiness_contract"]["minimum_rows"],
+                {
+                    "ncs_qualification_items": 1,
+                    "ncs_unit_qualification_links": 1,
+                },
+            )
 
     def test_function_bundle_gate_is_strictly_below_its_limit(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

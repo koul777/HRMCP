@@ -91,6 +91,9 @@ TOOL_SMOKE_CALLS: tuple[tuple[str, str, dict[str, Any]], ...] = (
         },
     ),
 )
+TOOL_SMOKE_REQUIRED_NONEMPTY_FIELDS = {
+    "analysis_qualification": "qualification_links",
+}
 
 
 def _rpc(method: str, *, request_id: int | None = None, params: dict[str, Any] | None = None) -> bytes:
@@ -238,7 +241,11 @@ def _resolve_smoke_arguments(
     return resolved
 
 
-def _tool_call_assessment(response: dict[str, Any]) -> dict[str, Any]:
+def _tool_call_assessment(
+    response: dict[str, Any],
+    *,
+    expected_nonempty_field: str | None = None,
+) -> dict[str, Any]:
     rpc_payload = _response_payload(response)
     rpc_error = isinstance(rpc_payload, dict) and isinstance(rpc_payload.get("error"), dict)
     rpc_result = rpc_payload.get("result") if isinstance(rpc_payload, dict) else None
@@ -251,6 +258,16 @@ def _tool_call_assessment(response: dict[str, Any]) -> dict[str, Any]:
         else None
     )
     raw_exception = _contains_raw_exception(rpc_payload)
+    expected_value: Any = None
+    if isinstance(tool_payload, dict) and expected_nonempty_field:
+        expected_value = tool_payload.get(expected_nonempty_field)
+        if expected_value is None and isinstance(tool_payload.get("data"), dict):
+            expected_value = tool_payload["data"].get(expected_nonempty_field)
+    expected_data_present = (
+        isinstance(expected_value, list) and len(expected_value) > 0
+        if expected_nonempty_field
+        else None
+    )
     return {
         **_safe_response(response),
         "jsonrpc_error": rpc_error,
@@ -258,6 +275,8 @@ def _tool_call_assessment(response: dict[str, Any]) -> dict[str, Any]:
         "semantic_ok": semantic_ok,
         "payload_chars": payload_chars,
         "raw_exception_detected": raw_exception,
+        "expected_nonempty_field": expected_nonempty_field,
+        "expected_data_present": expected_data_present,
         "response_body_logged": False,
     }
 
@@ -435,7 +454,12 @@ def verify(
             )
         checks[f"tools_call_{check_name}"] = {
             "tool_name": tool_name,
-            **_tool_call_assessment(response),
+            **_tool_call_assessment(
+                response,
+                expected_nonempty_field=TOOL_SMOKE_REQUIRED_NONEMPTY_FIELDS.get(
+                    check_name
+                ),
+            ),
         }
 
     checks["unsupported_protocol"] = _safe_response(_request(
@@ -513,6 +537,10 @@ def verify(
             failures.append(f"{failure_prefix}_semantic")
         if item["raw_exception_detected"]:
             failures.append(f"{failure_prefix}_raw_exception")
+        if item.get("expected_nonempty_field") and not item.get(
+            "expected_data_present"
+        ):
+            failures.append(f"{failure_prefix}_empty")
         if check_name == "analysis_job_base":
             if (
                 not isinstance(item.get("payload_chars"), int)

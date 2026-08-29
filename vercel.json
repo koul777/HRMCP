@@ -11,8 +11,8 @@
     "NCS_MCP_STREAMABLE_HTTP_PATH": "/mcp",
     "NCS_MCP_MAX_CONCURRENT_RECOMMENDATIONS": "2",
     "NCS_MCP_ALLOW_EXTERNAL_DB_OVERRIDE": "0",
-    "NCS_MCP_READINESS_EXTRA_TABLES": "ontology_concepts,ontology_concept_aliases,ontology_concept_label_candidates,ksa_concept_links,ksa_atomic_items,ksa_atomic_concept_links,ontology_relation_outgoing,ontology_relation_incoming,criteria_concept_forward,criteria_concept_inverse,ncs_training_course_unit_links,ncs_training_course_concept_links,ncs_training_course_element_links,training_goal_concept_links,training_delivery_relations,ncs_unit_standard_training,ncs_unit_job_base_links,training_transition_gold_scenarios,training_transition_scenario_reviews",
-    "NCS_MCP_READINESS_MIN_ROWS": "{\"ksa_items\":574279,\"ksa_atomic_items\":644384,\"ontology_concepts\":533909,\"ksa_concept_links\":574279,\"ksa_atomic_concept_links\":644384,\"training_transition_gold_scenarios\":100,\"training_transition_scenario_reviews\":11,\"ontology_concept_label_candidates\":755}"
+    "NCS_MCP_READINESS_EXTRA_TABLES": "ontology_concepts,ontology_concept_aliases,ontology_concept_label_candidates,ksa_concept_links,ksa_atomic_items,ksa_atomic_concept_links,ontology_relation_outgoing,ontology_relation_incoming,criteria_concept_forward,criteria_concept_inverse,ncs_training_course_unit_links,ncs_training_course_concept_links,ncs_training_course_element_links,training_goal_concept_links,training_delivery_relations,ncs_unit_standard_training,ncs_unit_job_base_links,ncs_qualification_items,ncs_unit_qualification_links,training_transition_gold_scenarios,training_transition_scenario_reviews",
+    "NCS_MCP_READINESS_MIN_ROWS": "{\"ksa_items\":574279,\"ksa_atomic_items\":644384,\"ontology_concepts\":533909,\"ksa_concept_links\":574279,\"ksa_atomic_concept_links\":644384,\"ncs_qualification_items\":1,\"ncs_unit_qualification_links\":1,\"training_transition_gold_scenarios\":100,\"training_transition_scenario_reviews\":11,\"ontology_concept_label_candidates\":755}"
   },
   "functions": {
     "api/index.py": {

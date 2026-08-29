@@ -88,6 +88,10 @@ def _successful_request_factory(
                 tool_payload["results"] = [
                     {"type": "unit", "id": "dynamic-unit-code"}
                 ]
+            if name == "ncs_analysis" and arguments.get("mode") == "qualification":
+                tool_payload["qualification_links"] = [
+                    {"unit_code": "dynamic-unit-code", "qualification_name": "sample"}
+                ]
             return {
                 "status": 200,
                 "duration_seconds": 0.01,
@@ -343,6 +347,52 @@ class RemoteMcpTransportVerifierTests(unittest.TestCase):
             "tools_call_analysis_job_base_payload_size", report["failures"]
         )
         self.assertIn("tools_call_analysis_job_base_duration", report["failures"])
+
+    def test_empty_qualification_result_blocks_release_gate(self) -> None:
+        fake_request, _observed_protocols, _tool_calls = _successful_request_factory(
+            selected_protocol=verifier.PROTOCOL_VERSION
+        )
+
+        def empty_qualification_request(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            response = fake_request(*args, **kwargs)
+            body = kwargs.get("body")
+            if not body or body == b"{not-json":
+                return response
+            payload = json.loads(body)
+            params = payload.get("params") or {}
+            arguments = params.get("arguments") or {}
+            if (
+                payload.get("method") == "tools/call"
+                and params.get("name") == "ncs_analysis"
+                and arguments.get("mode") == "qualification"
+            ):
+                tool_payload = {"ok": True, "qualification_links": []}
+                return {
+                    "status": 200,
+                    "duration_seconds": 0.01,
+                    "payload": {
+                        "result": {
+                            "isError": False,
+                            "content": [
+                                {"type": "text", "text": json.dumps(tool_payload)}
+                            ],
+                        }
+                    },
+                }
+            return response
+
+        with patch.object(verifier, "_request", side_effect=empty_qualification_request):
+            report = verifier.verify("https://example.test/api/mcp", concurrency=1)
+
+        self.assertFalse(report["ok"])
+        self.assertIn(
+            "tools_call_analysis_qualification_empty", report["failures"]
+        )
+        self.assertFalse(
+            report["checks"]["tools_call_analysis_qualification"][
+                "expected_data_present"
+            ]
+        )
 
 
 if __name__ == "__main__":
