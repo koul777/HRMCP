@@ -137,11 +137,13 @@ the existing retry-hygiene, coverage-plan, and operator-ready gates.
 ## Verified baseline promotion
 
 A prepared DB does not become the next comparison baseline merely because a
-local build succeeded. Baseline promotion requires all three evidence files:
+local build succeeded. Baseline promotion requires these evidence files:
 
 1. a successful, non-blocked ontology apply report;
 2. a successful, non-dry compact snapshot publish report for the exact same DB;
-3. a successful remote MCP transport verification report.
+3. a successful production MCP transport verification report;
+4. in the automated staged-release path, the successful exact staged-deployment
+   MCP verification report as well.
 
 After those checks, the promotion command stores an immutable versioned
 baseline, a lineage sidecar, and an atomic `current.json` pointer under the
@@ -151,7 +153,8 @@ persistent state directory:
 python scripts\promote_ncs_refresh_baseline.py `
   --refresh-report reports\ncs_ontology_refresh_apply.json `
   --publish-report reports\vercel_snapshot_publish_report.json `
-  --remote-verification reports\remote_mcp_transport_verify.json `
+  --staged-verification reports\remote_mcp_transport_verify_staged.json `
+  --remote-verification reports\remote_mcp_transport_verify_final.json `
   --state-dir C:\ncs_mcp_state\ncs-ontology-refresh `
   --out reports\baseline_promotion_report.json
 ```
@@ -206,7 +209,10 @@ vercel deploy --prod
 ```
 
 The first command produces a preview deployment; the second deploys production.
-Do not use `--prebuilt`. `git.deploymentEnabled=false` prevents Git pushes from
-deploying a commit that lacks the ignored ZIP; release only through this CLI
-flow after the Publisher has completed. Confirm `/api/health` and `/api/ready`
-after deployment.
+These direct commands rebuild from source, so do not add `--prebuilt` to them.
+The automated release workflow is different: it runs `vercel build`, verifies
+the resulting `.vercel/output` function bundle, and deploys that exact output
+with `vercel deploy --prebuilt`. `git.deploymentEnabled=false` prevents Git
+pushes from deploying a commit that lacks the ignored ZIP; release only through
+the CLI or guarded workflow after the Publisher has completed. Confirm
+`/api/health` and `/api/ready` after deployment.

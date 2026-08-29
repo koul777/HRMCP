@@ -124,9 +124,11 @@ ZIP과 manifest pair만 배포 루트 `api/`에 원자적으로 publish합니다
 
 ## 5. Preview와 Production 배포
 
-수동 배포 시 Vercel CLI를 연결한 뒤 canonical deploy root에서 실행합니다. `--prebuilt`는
-사용하지 않습니다. 자동 워크플로는 production 도메인을 바로 바꾸지 않고
-`--prod --skip-domain`으로 staged deployment를 검증한 뒤 `vercel promote`를 수행합니다.
+수동 배포 시 Vercel CLI를 연결한 뒤 canonical deploy root에서 실행합니다. 아래 직접 배포
+명령은 Vercel이 소스에서 다시 빌드하므로 `--prebuilt`를 붙이지 않습니다. 자동 워크플로는
+`vercel build`로 만든 `.vercel/output`과 함수 번들을 먼저 검증하고, 그 동일 산출물을
+`vercel deploy --prebuilt --prod --skip-domain`으로 올립니다. 고유 배포 URL의 MCP 검증이
+성공한 뒤에만 `vercel promote`를 수행합니다.
 
 ```powershell
 cd deploy\vercel_mcp_app
