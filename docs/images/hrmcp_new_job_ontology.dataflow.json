@@ -1,0 +1,206 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "NCS에 없는 신직무를 온톨로지로 설계하는 흐름",
+    "output": "docs/images/hrmcp_new_job_ontology.html",
+    "viewBox": [1200, 820],
+    "animation": "none",
+    "quality_profile": "showcase"
+  },
+  "stages": [
+    { "label": "신직무 요구" },
+    { "label": "NCS 근거 탐색" },
+    { "label": "온톨로지 조합" },
+    { "label": "탐색적 프로파일" },
+    { "label": "HR 활용" }
+  ],
+  "nodes": [
+    {
+      "id": "new_role",
+      "type": "external",
+      "label": "HR Analytics",
+      "sublabel": "조직 수요·NCS 직접 직무 없음",
+      "stage": 0,
+      "row": 2,
+      "width": 152,
+      "tag": "신직무 요구"
+    },
+    {
+      "id": "hr_evidence",
+      "type": "backend",
+      "label": "HR 인접 근거",
+      "sublabel": "인사기획·성과관리 등",
+      "stage": 1,
+      "row": 0,
+      "width": 144,
+      "tag": "NCS 조회"
+    },
+    {
+      "id": "data_evidence",
+      "type": "backend",
+      "label": "데이터 인접 근거",
+      "sublabel": "분석·통계·시각화 관련 범위",
+      "stage": 1,
+      "row": 4,
+      "width": 160,
+      "tag": "NCS 조회"
+    },
+    {
+      "id": "task_evidence",
+      "type": "database",
+      "label": "능력단위·수행준거",
+      "sublabel": "실제 NCS 과업 근거",
+      "stage": 2,
+      "row": 0,
+      "width": 152,
+      "tag": "직접 근거"
+    },
+    {
+      "id": "concept_graph",
+      "type": "database",
+      "label": "KSA 개념·관계",
+      "sublabel": "지식·기술·태도 연결",
+      "stage": 2,
+      "row": 2,
+      "width": 144,
+      "tag": "온톨로지"
+    },
+    {
+      "id": "provenance",
+      "type": "security",
+      "label": "근거 구분",
+      "sublabel": "NCS 직접·온톨로지 추론·모델 제안",
+      "stage": 2,
+      "row": 4,
+      "width": 176,
+      "tag": "출처 추적"
+    },
+    {
+      "id": "draft_profile",
+      "type": "backend",
+      "label": "검토용 신직무 초안",
+      "sublabel": "외부 에이전트·HR 담당자가 근거 조합",
+      "stage": 3,
+      "row": 2,
+      "width": 184,
+      "tag": "공식 NCS·자동 저장 아님"
+    },
+    {
+      "id": "job_description",
+      "type": "frontend",
+      "label": "직무기술서",
+      "sublabel": "책임·과업·요구역량 초안",
+      "stage": 4,
+      "row": 0,
+      "width": 144,
+      "tag": "산출물"
+    },
+    {
+      "id": "competency_model",
+      "type": "frontend",
+      "label": "역량모델",
+      "sublabel": "KSA 묶음과 수준 검토",
+      "stage": 4,
+      "row": 2,
+      "width": 144,
+      "tag": "산출물"
+    },
+    {
+      "id": "training_system",
+      "type": "frontend",
+      "label": "교육체계",
+      "sublabel": "부족 역량과 과정 연결",
+      "stage": 4,
+      "row": 4,
+      "width": 144,
+      "tag": "산출물"
+    }
+  ],
+  "flows": [
+    {
+      "id": "role_to_hr",
+      "from": "new_role",
+      "to": "hr_evidence",
+      "label": "HR 영역 해석",
+      "classification": "질의 확장",
+      "variant": "emphasis"
+    },
+    {
+      "id": "role_to_data",
+      "from": "new_role",
+      "to": "data_evidence",
+      "label": "분석 영역 해석",
+      "classification": "질의 확장",
+      "variant": "emphasis"
+    },
+    {
+      "id": "hr_to_tasks",
+      "from": "hr_evidence",
+      "to": "task_evidence",
+      "label": "과업 조회",
+      "classification": "NCS 직접 근거",
+      "variant": "emphasis",
+      "labelAt": [421, 200]
+    },
+    {
+      "id": "data_to_tasks",
+      "from": "data_evidence",
+      "to": "concept_graph",
+      "label": "관련 KSA 조회",
+      "classification": "NCS·온톨로지 근거",
+      "variant": "emphasis"
+    },
+    {
+      "id": "tasks_to_concepts",
+      "from": "task_evidence",
+      "to": "concept_graph",
+      "label": "KSA 연결",
+      "classification": "수행준거-개념",
+      "variant": "emphasis"
+    },
+    {
+      "id": "concepts_to_profile",
+      "from": "concept_graph",
+      "to": "draft_profile",
+      "label": "개념 조합",
+      "classification": "온톨로지 추론",
+      "variant": "dashed",
+      "route": "straight",
+      "labelAt": [700, 450]
+    },
+    {
+      "id": "provenance_to_profile",
+      "from": "provenance",
+      "to": "draft_profile",
+      "label": "출처 표시",
+      "classification": "감사 근거",
+      "variant": "security"
+    },
+    {
+      "id": "review_to_jd",
+      "from": "draft_profile",
+      "to": "job_description",
+      "label": "역할 구조화",
+      "classification": "검토 후 활용",
+      "variant": "default"
+    },
+    {
+      "id": "review_to_model",
+      "from": "draft_profile",
+      "to": "competency_model",
+      "label": "모델화",
+      "classification": "검토 후 활용",
+      "variant": "default",
+      "labelAt": [930, 450]
+    },
+    {
+      "id": "review_to_training",
+      "from": "draft_profile",
+      "to": "training_system",
+      "label": "역량 갭 연결",
+      "classification": "검토 후 활용",
+      "variant": "default"
+    }
+  ]
+}
