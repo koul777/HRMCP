@@ -81,11 +81,27 @@ manifest 기준 주요 서빙 건수는 다음과 같습니다.
 
 ## 4. 새 canonical DB에서 snapshot 만들기
 
-원천 DB 갱신과 Vercel snapshot publish는 서로 다른 작업입니다. upstream 파이프라인이 새
-`data/processed/ncs.db`를 검증한 뒤, 아래 one-input Publisher를 실행합니다.
+새 `ncs.db`를 받으면 먼저 변경 인식형 Refresh Builder를 실행합니다. 기본 실행은 계획만
+만들며 원본과 기준본을 수정하지 않습니다. `--apply`를 명시해야 별도의 준비본이 생성됩니다.
 
 ```powershell
-python scripts\publish_vercel_snapshot.py --source data\processed\ncs.db
+python scripts\refresh_ncs_ontology.py data\processed\ncs.db `
+  --state-dir C:\ncs_mcp_state\ncs-ontology-refresh `
+  --report reports\ncs_ontology_refresh_plan.json
+
+python scripts\refresh_ncs_ontology.py data\processed\ncs.db `
+  --state-dir C:\ncs_mcp_state\ncs-ontology-refresh `
+  --output build\prepared\ncs.db `
+  --report reports\ncs_ontology_refresh_apply.json `
+  --apply
+```
+
+변화가 없으면 마지막 원격 검증까지 마친 기준본을 재사용합니다. 작은 추가 변화는 증분
+구축하고, 수정·삭제·스키마 충돌·사람 검토 관계 충돌은 자동 배포하지 않고 차단합니다.
+성공 보고서의 `publisher_source`만 아래 one-input Publisher에 넘깁니다.
+
+```powershell
+python scripts\publish_vercel_snapshot.py --source <publisher_source.path>
 ```
 
 필요할 때만 `--deploy-root <path>`, `--dry-run`, `--report <path>`를 추가합니다.
@@ -100,10 +116,17 @@ ZIP과 manifest pair만 배포 루트 `api/`에 원자적으로 publish합니다
 `build_vercel_snapshot.py`는 custom output 경로가 필요한 경우에만 쓰는 low-level Builder입니다.
 기존 출력을 덮어쓰지 않으며, API 수집·사람 검토 상태 변경·Vercel 배포를 수행하지 않습니다.
 
+훈련과정·직업기초능력 API 자동 갱신은 `refresh_ncs_api_evidence.py`가 원본의 SQLite 온라인
+백업 복사본에서만 수행합니다. 자격/NCS006은 기존 운영자 승인·재시도 절차를 유지합니다.
+전체 자동 흐름은 `.github/workflows/vercel-snapshot-release.yml`에 있으며, 임시 Vercel
+배포와 Remote MCP 검증이 모두 성공한 뒤에만 `promote_ncs_refresh_baseline.py`가 다음
+비교 기준본을 승격합니다.
+
 ## 5. Preview와 Production 배포
 
-Vercel CLI를 연결한 뒤 canonical deploy root에서 실행합니다. `--prebuilt`는 사용하지
-않습니다.
+수동 배포 시 Vercel CLI를 연결한 뒤 canonical deploy root에서 실행합니다. `--prebuilt`는
+사용하지 않습니다. 자동 워크플로는 production 도메인을 바로 바꾸지 않고
+`--prod --skip-domain`으로 staged deployment를 검증한 뒤 `vercel promote`를 수행합니다.
 
 ```powershell
 cd deploy\vercel_mcp_app

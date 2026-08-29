@@ -334,18 +334,21 @@ vercel deploy
 vercel deploy --prod
 ```
 
-새 원천 DB로 교체할 때는 API 수집·품질 게이트·체크포인트와 자격 API의 운영자 승인을
-별도 upstream 파이프라인에서 마친 뒤, 그 결과인 단일 canonical DB를 Publisher 입력으로
-사용합니다.
+새 원천 DB로 교체할 때는 먼저 변경 인식형 Refresh Builder로 계획을 확인하고 별도 준비본을
+만듭니다. 성공 보고서의 `publisher_source.path`만 Publisher 입력으로 사용합니다.
 
 ```powershell
-python scripts\publish_vercel_snapshot.py --source data\processed\ncs.db
+python scripts\refresh_ncs_ontology.py data\processed\ncs.db --report reports\refresh-plan.json
+python scripts\refresh_ncs_ontology.py data\processed\ncs.db --output build\prepared\ncs.db --report reports\refresh-apply.json --apply
+python scripts\publish_vercel_snapshot.py --source <publisher_source.path>
 ```
 
 필요하면 `--deploy-root`, `--dry-run`, `--report`를 추가할 수 있습니다. Publisher는
 검증된 ZIP과 manifest만 `deploy/vercel_mcp_app/api/`에 함께 publish하며, 자체적으로 API를
 수집하거나 Vercel을 배포하지 않습니다. 별도 출력 경로가 필요한 경우에만 low-level
-`build_vercel_snapshot.py`를 사용하세요.
+`build_vercel_snapshot.py`를 사용하세요. 전체 자동 갱신·staged 배포·원격 검증·기준본 승격은
+`.github/workflows/vercel-snapshot-release.yml`이 담당합니다. 자격 API의 운영자 승인 절차는
+자동화 범위 밖에 그대로 유지됩니다.
 
 ### API 키 발급
 
@@ -434,6 +437,28 @@ package, verify하는 고정 파이프라인입니다. Vercel 런타임도 AI �
 - **교육훈련 계획 수립**: 부족 KSA와 교육과정의 훈련목표·수준·시간·방법을 함께 검토합니다.
 - **추천 근거 검토**: HR 담당자가 결과에 사용된 NCS·KSA·교육과정 연결을 확인하고 초안을
   수정할 수 있습니다.
+
+### 새 `ncs.db` 자동 반영용 Refresh Builder
+
+원 NCS DB가 갱신될 때마다 12.6GB 전체 온톨로지를 무조건 처음부터 다시 만들지는 않습니다.
+Refresh Builder가 이전에 Vercel 원격 검증까지 통과한 기준본과 새 `ncs.db`의 안정적인 원천
+키·내용 해시를 비교해 처리 범위를 결정합니다.
+
+- 원천 변화가 없으면 새 파일의 미검증 온톨로지를 쓰지 않고 마지막 승인 배포 기준본을 유지합니다.
+- 작은 추가 변화는 새 KSA·개념·과업 관계와 교육과정 링크만 증분 구축합니다.
+- 경력개발경로·자격·직업기초능력 같은 보조 근거 변화는 핵심 온톨로지를 다시 만들지 않고 반영합니다.
+- 훈련과정·직업기초능력 API는 원본이 아닌 SQLite 작업 복사본에 전체 대분류 기준으로 갱신합니다.
+- 수정·삭제·스키마 충돌이나 사람 검토 관계에 영향을 줄 수 있는 변화는 자동 배포를 중단하고
+  전체 재구축 또는 운영자 검토 대상으로 남깁니다.
+
+준비된 DB는 다시 500MB 이하의 compact SQLite와 ZIP으로 경량화합니다. Vercel staged
+deployment에서 `initialize`, `tools/list`, `tools/call`, GET 405 종료를 검증한 뒤 production으로
+승격하며, 이 원격 검증이 성공한 경우에만 다음 갱신의 기준본을 원자적으로 바꿉니다. 실패한
+API 수집·온톨로지 구축·배포는 기존 기준본을 바꾸지 않습니다. 이 과정에는 AI 모델을 넣지 않고
+고정 규칙, SQLite 무결성 검사, SHA-256, 변경 계획, 배포 증거를 사용합니다.
+
+자세한 실행 방법과 자동 워크플로 설정은
+[`docs/VERCEL_SNAPSHOT_BUILDER.md`](docs/VERCEL_SNAPSHOT_BUILDER.md)를 참고하세요.
 
 ### 경량판의 범위와 한계
 

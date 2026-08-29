@@ -109,13 +109,30 @@ class InternalDeploymentConfigTests(unittest.TestCase):
         for marker in (
             "runs-on: [self-hosted, windows]",
             "NCS_SOURCE_DB_URL",
+            "NCS_SOURCE_DB_ALLOWED_HOSTS",
+            "scripts\\refresh_ncs_api_evidence.py",
+            "scripts\\refresh_ncs_ontology.py",
             "scripts\\publish_vercel_snapshot.py",
-            "vercel build --yes --token $env:VERCEL_TOKEN",
+            "--skip-domain",
+            "vercel promote",
             "functions\\python.func",
             "scripts\\verify_remote_mcp_transport.py",
+            "scripts\\promote_ncs_refresh_baseline.py",
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, text)
+
+        self.assertLess(
+            text.index("scripts\\refresh_ncs_ontology.py"),
+            text.index("scripts\\publish_vercel_snapshot.py"),
+        )
+        self.assertLess(
+            text.index("Verify the exact staged MCP deployment"),
+            text.index("Promote verified canonical baseline state"),
+        )
+        self.assertIn("production baseline was intentionally left unchanged", text)
+        self.assertNotIn("github.event.inputs.source_db_url", text)
+        self.assertIn("Remove generated release working copies\n        if: always()", text)
 
     def test_mcp_client_examples_use_hrmcp_name(self) -> None:
         stdio = json.loads((ROOT / "mcp" / "ncs-mcp.json").read_text(encoding="utf-8"))

@@ -12,13 +12,27 @@ on:
           - preview
           - production
       source_db_url:
-        description: "Optional override URL for the canonical source DB"
+        description: "Optional HTTPS override for the canonical ncs.db"
         required: false
         type: string
       source_db_sha256:
-        description: "Optional SHA-256 for the downloaded canonical source DB"
+        description: "Optional SHA-256 for the downloaded canonical ncs.db"
         required: false
         type: string
+      api_refresh_mode:
+        description: "Refresh safe supplemental APIs on a working copy"
+        required: true
+        default: auto
+        type: choice
+        options:
+          - auto
+          - skip
+          - require
+      force_redeploy:
+        description: "Redeploy code even when the source projection is unchanged"
+        required: true
+        default: false
+        type: boolean
   schedule:
     - cron: "30 19 * * *"
 
@@ -28,14 +42,25 @@ concurrency:
 
 jobs:
   release:
-    name: Build compact snapshot and deploy to Vercel
+    name: Refresh, stage, verify, and promote the compact snapshot
     runs-on: [self-hosted, windows]
+    timeout-minutes: 360
     permissions:
       contents: read
     env:
       PYTHONUTF8: "1"
+      WORKFLOW_DEPLOY_TARGET: ${{ inputs.deploy_target }}
+      WORKFLOW_SOURCE_DB_URL: ${{ inputs.source_db_url }}
+      WORKFLOW_SOURCE_DB_SHA256: ${{ inputs.source_db_sha256 }}
+      WORKFLOW_API_REFRESH_MODE: ${{ inputs.api_refresh_mode }}
+      WORKFLOW_FORCE_REDEPLOY: ${{ inputs.force_redeploy }}
       NCS_SOURCE_DB_URL: ${{ secrets.NCS_SOURCE_DB_URL }}
       NCS_SOURCE_DB_SHA256: ${{ secrets.NCS_SOURCE_DB_SHA256 }}
+      NCS_SOURCE_DB_ALLOWED_HOSTS: ${{ vars.NCS_SOURCE_DB_ALLOWED_HOSTS }}
+      NCS_REFRESH_STATE_DIR: ${{ vars.NCS_REFRESH_STATE_DIR }}
+      NCS_PRODUCTION_MCP_URL: ${{ vars.NCS_PRODUCTION_MCP_URL }}
+      NCS_TRAINING_COURSE_SERVICE_KEY: ${{ secrets.NCS_TRAINING_COURSE_SERVICE_KEY }}
+      NCS_JOB_BASE_SERVICE_KEY: ${{ secrets.NCS_JOB_BASE_SERVICE_KEY }}
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
       VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
@@ -65,88 +90,344 @@ jobs:
       - name: Install Vercel CLI
         run: npm install --global vercel@latest
 
+      - name: Resolve persistent refresh state
+        shell: powershell
+        run: |
+          $stateDir = $env:NCS_REFRESH_STATE_DIR
+          if ([string]::IsNullOrWhiteSpace($stateDir)) {
+            $workspaceParent = Split-Path -Parent $env:GITHUB_WORKSPACE
+            $stateDir = Join-Path $workspaceParent "_ncs_mcp_state\ncs-ontology-refresh"
+          }
+          $stateDir = [System.IO.Path]::GetFullPath($stateDir)
+          $workspace = [System.IO.Path]::GetFullPath($env:GITHUB_WORKSPACE).TrimEnd('\')
+          if ($stateDir.Equals($workspace, [System.StringComparison]::OrdinalIgnoreCase) -or
+              $stateDir.StartsWith($workspace + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "NCS_REFRESH_STATE_DIR must be outside the checked-out repository."
+          }
+          New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
+          "REFRESH_STATE_DIR=$stateDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Download canonical source DB
         shell: powershell
         run: |
-          $sourceUrl = "${{ github.event.inputs.source_db_url }}"
-          if ([string]::IsNullOrWhiteSpace($sourceUrl)) {
-            $sourceUrl = $env:NCS_SOURCE_DB_URL
+          $configuredUrl = $env:NCS_SOURCE_DB_URL
+          $sourceUrl = $env:WORKFLOW_SOURCE_DB_URL
+          $isOverride = -not [string]::IsNullOrWhiteSpace($sourceUrl)
+          if (-not $isOverride) {
+            $sourceUrl = $configuredUrl
           }
           if ([string]::IsNullOrWhiteSpace($sourceUrl)) {
             throw "NCS_SOURCE_DB_URL must be set as a workflow input or repository secret."
           }
-          $sourceSha = "${{ github.event.inputs.source_db_sha256 }}"
+          try {
+            $sourceUri = [System.Uri]$sourceUrl
+          } catch {
+            throw "The canonical source DB URL is invalid."
+          }
+          if (-not $sourceUri.IsAbsoluteUri -or $sourceUri.Scheme -ne 'https') {
+            throw "The canonical source DB URL must use HTTPS."
+          }
+
+          $allowedHosts = [System.Collections.Generic.HashSet[string]]::new(
+            [System.StringComparer]::OrdinalIgnoreCase
+          )
+          if (-not [string]::IsNullOrWhiteSpace($configuredUrl)) {
+            try {
+              $configuredUri = [System.Uri]$configuredUrl
+              if ($configuredUri.IsAbsoluteUri -and $configuredUri.Scheme -eq 'https') {
+                [void]$allowedHosts.Add($configuredUri.DnsSafeHost)
+              }
+            } catch {}
+          }
+          foreach ($hostName in ($env:NCS_SOURCE_DB_ALLOWED_HOSTS -split '[,;\s]+')) {
+            if (-not [string]::IsNullOrWhiteSpace($hostName)) {
+              [void]$allowedHosts.Add($hostName.Trim())
+            }
+          }
+          if ($isOverride -and -not $allowedHosts.Contains($sourceUri.DnsSafeHost)) {
+            throw "The source_db_url host is not in NCS_SOURCE_DB_ALLOWED_HOSTS."
+          }
+
+          $buildDir = Join-Path $env:RUNNER_TEMP "ncs-vercel-release-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          New-Item -ItemType Directory -Path $buildDir | Out-Null
+          $sourceDir = Join-Path $buildDir 'source'
+          New-Item -ItemType Directory -Path $sourceDir | Out-Null
+          $sourcePath = Join-Path $sourceDir 'ncs.db'
+          Invoke-WebRequest -Uri $sourceUri -OutFile $sourcePath
+
+          $sourceSha = $env:WORKFLOW_SOURCE_DB_SHA256
           if ([string]::IsNullOrWhiteSpace($sourceSha)) {
             $sourceSha = $env:NCS_SOURCE_DB_SHA256
           }
-          $sourcePath = Join-Path $env:RUNNER_TEMP "ncs-source.db"
-          Invoke-WebRequest -Uri $sourceUrl -OutFile $sourcePath
           if (-not [string]::IsNullOrWhiteSpace($sourceSha)) {
+            $expected = $sourceSha.Trim().ToLowerInvariant()
+            if ($expected.StartsWith('sha256:')) {
+              $expected = $expected.Substring(7)
+            }
             $actual = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash.ToLowerInvariant()
-            if ($actual -ne $sourceSha.Trim().ToLowerInvariant()) {
+            if ($actual -ne $expected) {
               throw "Downloaded source DB SHA-256 does not match the configured value."
             }
           }
+          "BUILD_DIR=$buildDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "SOURCE_DB_PATH=$sourcePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Build compact snapshot
+      - name: Refresh safe supplemental API evidence on a working copy
         shell: powershell
         run: |
-          $buildDir = Join-Path $env:RUNNER_TEMP "vercel-snapshot-build"
-          New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
-          $report = Join-Path $buildDir "vercel_snapshot_publish_report.json"
-          python scripts\publish_vercel_snapshot.py `
-            --source "$env:SOURCE_DB_PATH" `
-            --deploy-root deploy\vercel_mcp_app `
-            --report "$report"
-          "BUILD_DIR=$buildDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $mode = $env:WORKFLOW_API_REFRESH_MODE
+          if ([string]::IsNullOrWhiteSpace($mode)) {
+            $mode = 'auto'
+          }
+          $sources = [System.Collections.Generic.List[string]]::new()
+          if (-not [string]::IsNullOrWhiteSpace($env:NCS_TRAINING_COURSE_SERVICE_KEY)) {
+            $sources.Add('training-courses')
+          }
+          if (-not [string]::IsNullOrWhiteSpace($env:NCS_JOB_BASE_SERVICE_KEY)) {
+            $sources.Add('job-base')
+          }
+          if ($mode -eq 'require' -and $sources.Count -ne 2) {
+            throw "api_refresh_mode=require needs both supplemental API credentials."
+          }
 
-      - name: Assemble Vercel function bundle
-        working-directory: deploy/vercel_mcp_app
+          $apiDir = Join-Path $env:BUILD_DIR 'api-refresh'
+          New-Item -ItemType Directory -Path $apiDir | Out-Null
+          $apiReport = Join-Path $apiDir 'api_refresh_report.json'
+          if ($mode -eq 'skip' -or $sources.Count -eq 0) {
+            $skip = [ordered]@{
+              schema = 'ncs_api_refresh_workflow_skip_v1'
+              outcome = 'skipped'
+              reason = if ($mode -eq 'skip') { 'workflow_input' } else { 'no_credentials_configured' }
+              source_writes_performed = $false
+              publish_performed = $false
+              deploy_performed = $false
+            }
+            $skip | ConvertTo-Json | Set-Content -LiteralPath $apiReport -Encoding utf8
+            $candidatePath = $env:SOURCE_DB_PATH
+          } else {
+            $apiOutput = Join-Path $apiDir 'ncs.db'
+            $arguments = @(
+              'scripts\refresh_ncs_api_evidence.py',
+              '--db', $env:SOURCE_DB_PATH,
+              '--apply',
+              '--output', $apiOutput,
+              '--out', $apiReport
+            )
+            foreach ($source in $sources) {
+              $arguments += @('--source', $source)
+            }
+            & python @arguments
+            if ($LASTEXITCODE -ne 0) {
+              throw "Supplemental API refresh did not produce a publishable working copy."
+            }
+            $apiEvidence = Get-Content -LiteralPath $apiReport -Raw | ConvertFrom-Json
+            $candidatePath = [string]$apiEvidence.prepared_output
+            if ([string]::IsNullOrWhiteSpace($candidatePath) -or -not (Test-Path -LiteralPath $candidatePath -PathType Leaf)) {
+              throw "API refresh evidence is missing its prepared output."
+            }
+          }
+          "API_REFRESH_REPORT=$apiReport" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CANDIDATE_DB_PATH=$candidatePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build change-aware ontology release candidate
+        id: ontology
         shell: powershell
-        run: vercel build --yes --token $env:VERCEL_TOKEN
+        run: |
+          $ontologyDir = Join-Path $env:BUILD_DIR 'ontology-refresh'
+          New-Item -ItemType Directory -Path $ontologyDir | Out-Null
+          $ontologyOutput = Join-Path $ontologyDir 'ncs.db'
+          $refreshReport = Join-Path $ontologyDir 'ontology_refresh_report.json'
+          python scripts\refresh_ncs_ontology.py `
+            "$env:CANDIDATE_DB_PATH" `
+            --state-dir "$env:REFRESH_STATE_DIR" `
+            --output "$ontologyOutput" `
+            --report "$refreshReport" `
+            --apply
+          if ($LASTEXITCODE -ne 0) {
+            throw "Ontology Refresh Builder blocked or failed this source change."
+          }
+          $refresh = Get-Content -LiteralPath $refreshReport -Raw | ConvertFrom-Json
+          $publisherSource = [string]$refresh.publisher_source.path
+          if ([string]::IsNullOrWhiteSpace($publisherSource) -or -not (Test-Path -LiteralPath $publisherSource -PathType Leaf)) {
+            throw "Ontology refresh report is missing a verified publisher_source."
+          }
+          $forceRedeploy = "$env:WORKFLOW_FORCE_REDEPLOY" -eq 'true'
+          $needsDeploy = $refresh.selected_strategy -ne 'no_rebuild' -or $forceRedeploy
+          "REFRESH_REPORT=$refreshReport" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PUBLISH_SOURCE_DB=$publisherSource" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "needs_deploy=$($needsDeploy.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-      - name: Verify deployable bundle
+      - name: Stage tracked Vercel application and verified snapshot pair
+        if: steps.ontology.outputs.needs_deploy == 'true'
+        shell: powershell
+        run: |
+          $deployStage = Join-Path $env:BUILD_DIR 'vercel-app'
+          $sourceArchive = Join-Path $env:BUILD_DIR 'vercel-app-source.zip'
+          git archive --format=zip --output="$sourceArchive" HEAD:deploy/vercel_mcp_app
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to stage the tracked Vercel application."
+          }
+          Expand-Archive -LiteralPath $sourceArchive -DestinationPath $deployStage
+
+          $trackedManifest = Join-Path $deployStage 'api\ncs_ontology_compact.manifest.json'
+          if (Test-Path -LiteralPath $trackedManifest -PathType Leaf) {
+            $resolvedStage = [System.IO.Path]::GetFullPath($deployStage).TrimEnd('\') + '\'
+            $resolvedManifest = [System.IO.Path]::GetFullPath($trackedManifest)
+            if (-not $resolvedManifest.StartsWith($resolvedStage, [System.StringComparison]::OrdinalIgnoreCase)) {
+              throw "Refusing to remove a manifest outside the temporary deploy stage."
+            }
+            Remove-Item -LiteralPath $resolvedManifest
+          }
+
+          $publishReport = Join-Path $env:BUILD_DIR 'vercel_snapshot_publish_report.json'
+          python scripts\publish_vercel_snapshot.py `
+            --source "$env:PUBLISH_SOURCE_DB" `
+            --deploy-root "$deployStage" `
+            --report "$publishReport"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Compact snapshot publication into the temporary deploy stage failed."
+          }
+          "DEPLOY_STAGE_ROOT=$deployStage" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PUBLISH_REPORT=$publishReport" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Link and assemble the staged Vercel function bundle
+        if: steps.ontology.outputs.needs_deploy == 'true'
+        shell: powershell
+        run: |
+          $target = $env:WORKFLOW_DEPLOY_TARGET
+          if ([string]::IsNullOrWhiteSpace($target)) {
+            $target = 'production'
+          }
+          Push-Location -LiteralPath $env:DEPLOY_STAGE_ROOT
+          try {
+            vercel pull --yes --environment=$target --token $env:VERCEL_TOKEN
+            if ($LASTEXITCODE -ne 0) { throw "vercel pull failed" }
+            if ($target -eq 'production') {
+              vercel build --prod --yes --token $env:VERCEL_TOKEN
+            } else {
+              vercel build --yes --token $env:VERCEL_TOKEN
+            }
+            if ($LASTEXITCODE -ne 0) { throw "vercel build failed" }
+          } finally {
+            Pop-Location
+          }
+
+      - name: Verify deployable function bundle
+        if: steps.ontology.outputs.needs_deploy == 'true'
         shell: powershell
         run: |
           python scripts\verify_vercel_compact_package.py `
-            --archive deploy\vercel_mcp_app\api\ncs_ontology_compact.zip `
-            --manifest deploy\vercel_mcp_app\api\ncs_ontology_compact.manifest.json `
-            --function-bundle deploy\vercel_mcp_app\.vercel\output\functions\python.func `
-            --out reports\vercel_compact_package_verify_${{ github.run_id }}.json
+            --archive "$env:DEPLOY_STAGE_ROOT\api\ncs_ontology_compact.zip" `
+            --manifest "$env:DEPLOY_STAGE_ROOT\api\ncs_ontology_compact.manifest.json" `
+            --function-bundle "$env:DEPLOY_STAGE_ROOT\.vercel\output\functions\python.func" `
+            --out "$env:BUILD_DIR\vercel_compact_package_verify.json"
 
-      - name: Deploy to Vercel
+      - name: Deploy a staged Vercel candidate
         id: deploy
-        working-directory: deploy/vercel_mcp_app
+        if: steps.ontology.outputs.needs_deploy == 'true'
         shell: powershell
         run: |
-          $deployTarget = "${{ github.event.inputs.deploy_target }}"
-          if ([string]::IsNullOrWhiteSpace($deployTarget)) {
-            $deployTarget = "production"
+          $target = $env:WORKFLOW_DEPLOY_TARGET
+          if ([string]::IsNullOrWhiteSpace($target)) {
+            $target = 'production'
           }
-          if ($deployTarget -eq "preview") {
-            $deployUrl = (vercel deploy --yes --token $env:VERCEL_TOKEN | Select-Object -Last 1).Trim()
-          } else {
-            $deployUrl = (vercel deploy --prod --yes --token $env:VERCEL_TOKEN | Select-Object -Last 1).Trim()
+          $arguments = @('deploy', '--yes', '--token', $env:VERCEL_TOKEN)
+          if ($target -eq 'production') {
+            $arguments += @('--prod', '--skip-domain')
           }
-          if (-not $deployUrl.StartsWith("https://")) {
+          Push-Location -LiteralPath $env:DEPLOY_STAGE_ROOT
+          try {
+            $output = & vercel @arguments
+            if ($LASTEXITCODE -ne 0) { throw "Vercel deployment failed" }
+          } finally {
+            Pop-Location
+          }
+          $deployUrl = [string]($output | Where-Object { $_ -match '^https://' } | Select-Object -Last 1)
+          $deployUrl = $deployUrl.Trim()
+          if (-not $deployUrl.StartsWith('https://')) {
             throw "Vercel deploy did not return a deployment URL."
           }
           "deploy_url=$deployUrl" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "STAGED_DEPLOY_URL=$deployUrl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Verify remote MCP transport
+      - name: Verify the exact staged MCP deployment
+        if: steps.ontology.outputs.needs_deploy == 'true'
         shell: powershell
         run: |
+          $exactReport = Join-Path $env:BUILD_DIR 'remote_mcp_transport_verify_staged.json'
           python scripts\verify_remote_mcp_transport.py `
-            "${{ steps.deploy.outputs.deploy_url }}/api/mcp" `
+            "$env:STAGED_DEPLOY_URL/api/mcp" `
             --concurrency 5 `
-            --out reports\remote_mcp_transport_verify_${{ github.run_id }}.json
+            --out "$exactReport"
+          "STAGED_REMOTE_REPORT=$exactReport" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Upload build artifacts
+      - name: Promote staged production deployment and verify public URL
+        if: steps.ontology.outputs.needs_deploy == 'true' && (inputs.deploy_target == 'production' || github.event_name == 'schedule')
+        shell: powershell
+        run: |
+          Push-Location -LiteralPath $env:DEPLOY_STAGE_ROOT
+          try {
+            vercel promote "$env:STAGED_DEPLOY_URL" --yes --token $env:VERCEL_TOKEN
+            if ($LASTEXITCODE -ne 0) { throw "Vercel production promotion failed" }
+          } finally {
+            Pop-Location
+          }
+          $productionMcpUrl = $env:NCS_PRODUCTION_MCP_URL
+          if ([string]::IsNullOrWhiteSpace($productionMcpUrl)) {
+            $productionMcpUrl = 'https://ncs-mcp-bridge-mini2.vercel.app/api/mcp'
+          }
+          $productionMcpUrl = $productionMcpUrl.TrimEnd('/')
+          $finalReport = Join-Path $env:BUILD_DIR 'remote_mcp_transport_verify_final.json'
+          python scripts\verify_remote_mcp_transport.py `
+            "$productionMcpUrl" `
+            --concurrency 5 `
+            --out "$finalReport"
+          "FINAL_REMOTE_REPORT=$finalReport" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Promote verified canonical baseline state
+        if: steps.ontology.outputs.needs_deploy == 'true' && (inputs.deploy_target == 'production' || github.event_name == 'schedule')
+        shell: powershell
+        run: |
+          python scripts\promote_ncs_refresh_baseline.py `
+            --refresh-report "$env:REFRESH_REPORT" `
+            --publish-report "$env:PUBLISH_REPORT" `
+            --remote-verification "$env:FINAL_REMOTE_REPORT" `
+            --state-dir "$env:REFRESH_STATE_DIR" `
+            --out "$env:BUILD_DIR\baseline_promotion_report.json"
+
+      - name: Record preview verification without changing production baseline
+        if: steps.ontology.outputs.needs_deploy == 'true' && inputs.deploy_target == 'preview'
+        shell: powershell
+        run: |
+          Copy-Item -LiteralPath $env:STAGED_REMOTE_REPORT -Destination "$env:BUILD_DIR\remote_mcp_transport_verify_final.json"
+          Write-Output "Preview passed; production baseline was intentionally left unchanged."
+
+      - name: Report unchanged source projection
+        if: steps.ontology.outputs.needs_deploy != 'true'
+        shell: powershell
+        run: Write-Output "No source projection change was detected; deployment and baseline promotion were skipped."
+
+      - name: Upload release evidence
+        id: upload_evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: vercel-snapshot-release-${{ github.run_id }}
+          name: vercel-snapshot-release-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/vercel-snapshot-build
-            reports/vercel_compact_package_verify_${{ github.run_id }}.json
-            reports/remote_mcp_transport_verify_${{ github.run_id }}.json
+            ${{ runner.temp }}/ncs-vercel-release-${{ github.run_id }}-${{ github.run_attempt }}/**/*.json
+            ${{ runner.temp }}/ncs-vercel-release-${{ github.run_id }}-${{ github.run_attempt }}/**/*.md
+          if-no-files-found: warn
+
+      - name: Remove generated release working copies
+        if: always()
+        shell: powershell
+        run: |
+          $target = Join-Path $env:RUNNER_TEMP "ncs-vercel-release-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          if (-not (Test-Path -LiteralPath $target)) { exit 0 }
+          $resolvedTemp = [System.IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\') + '\'
+          $resolvedTarget = [System.IO.Path]::GetFullPath($target)
+          if (-not $resolvedTarget.StartsWith($resolvedTemp, [System.StringComparison]::OrdinalIgnoreCase) -or
+              $resolvedTarget -eq $resolvedTemp.TrimEnd('\')) {
+            throw "Refusing to remove a path outside RUNNER_TEMP."
+          }
+          Remove-Item -LiteralPath $resolvedTarget -Recurse -Force

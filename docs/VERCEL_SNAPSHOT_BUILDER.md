@@ -73,45 +73,129 @@ artifact sizes, and bounded stdout/stderr tails in the JSON report. The final
 verification is archive-only; function bundle measurement and Vercel deployment
 are outside the Builder's scope.
 
-## Refresh and publish boundaries
+## Change-aware Refresh Builder
 
-Refreshing the canonical source is an upstream scheduled/guarded pipeline, not
-a Builder stage. That pipeline owns API credentials, checkpoints, retries,
-quality gates, and operator approval for qualification API collection. Once it
-has produced and validated the one canonical `ncs.db`, the Builder can produce
-a new staged snapshot from it.
+Use the Refresh Builder before the snapshot Publisher when a new `ncs.db` is
+supplied. Planning is the default and is read-only:
 
-For the standard deployment path, use `publish_vercel_snapshot.py` rather than
-manually promoting build outputs. It stages, verifies, and atomically publishes
-only the ZIP/manifest pair with rollback. `build_vercel_snapshot.py` is retained
-for custom output paths and remains intentionally separate from publication and
-Vercel deployment.
+```powershell
+python scripts\refresh_ncs_ontology.py data\processed\ncs.db `
+  --state-dir C:\ncs_mcp_state\ncs-ontology-refresh `
+  --report reports\ncs_ontology_refresh_plan.json
+```
+
+An explicit `--apply` creates a separate prepared database. It never writes to
+the supplied DB or the promoted baseline:
+
+```powershell
+python scripts\refresh_ncs_ontology.py data\processed\ncs.db `
+  --state-dir C:\ncs_mcp_state\ncs-ontology-refresh `
+  --output build\prepared\ncs.db `
+  --report reports\ncs_ontology_refresh_apply.json `
+  --apply
+```
+
+The Builder compares stable source projections rather than volatile timestamps.
+It chooses one of these fail-closed strategies:
+
+| Detected change | Builder action |
+| --- | --- |
+| No source projection change | Reuse the last promoted, verified baseline; never publish an unpromoted candidate |
+| Small append-only NCS/KSA change | Add missing atomic KSA, concept, task, similarity, and training evidence on a working copy |
+| Training-course additions | Add the corresponding training links on a working copy |
+| Career, qualification, or job-base evidence only | Prepare the new evidence without rebuilding the core ontology |
+| Schema/key conflict, large change, source update/delete, or trusted-row conflict | Block automatic publication and require a guarded rebuild/reconciliation |
+
+`publisher_source` in the successful apply report is the only DB that may move
+to the compact snapshot Publisher. The report also records the selected
+strategy, affected tables/scopes, source hashes, rule fingerprint, integrity
+checks, and KSA/review-state invariants.
+
+## Supplemental API Refresh Builder
+
+Training-course and job-base APIs can be refreshed before ontology planning.
+The command discovers all NCS major codes from the DB. It creates a consistent
+SQLite online-backup first, including committed WAL frames, and calls the APIs
+only against that working copy:
+
+```powershell
+python scripts\refresh_ncs_api_evidence.py `
+  --db data\processed\ncs.db `
+  --source training-courses `
+  --source job-base `
+  --apply `
+  --state-dir .state\ncs-api-refresh `
+  --out reports\ncs_api_refresh_evidence.json
+```
+
+If any major-code page fails or completion cannot be proven, the command exits
+without a publishable `prepared_output`; the original DB remains byte-for-byte
+unchanged. Absence in an API response is never treated as deletion. Qualification
+and NCS006 collection remain outside this automatic path because they require
+the existing retry-hygiene, coverage-plan, and operator-ready gates.
+
+## Verified baseline promotion
+
+A prepared DB does not become the next comparison baseline merely because a
+local build succeeded. Baseline promotion requires all three evidence files:
+
+1. a successful, non-blocked ontology apply report;
+2. a successful, non-dry compact snapshot publish report for the exact same DB;
+3. a successful remote MCP transport verification report.
+
+After those checks, the promotion command stores an immutable versioned
+baseline, a lineage sidecar, and an atomic `current.json` pointer under the
+persistent state directory:
+
+```powershell
+python scripts\promote_ncs_refresh_baseline.py `
+  --refresh-report reports\ncs_ontology_refresh_apply.json `
+  --publish-report reports\vercel_snapshot_publish_report.json `
+  --remote-verification reports\remote_mcp_transport_verify.json `
+  --state-dir C:\ncs_mcp_state\ncs-ontology-refresh `
+  --out reports\baseline_promotion_report.json
+```
+
+A failed build, deployment, or remote verification leaves `current.json`
+untouched. Versioned baselines are not deleted automatically; retention is an
+explicit operator task after backup and rollback requirements are satisfied.
+
+## Automatic refresh and Vercel release shape
+
+`.github/workflows/vercel-snapshot-release.yml` implements the complete guarded
+sequence on a self-hosted Windows runner:
+
+```text
+HTTPS ncs.db download + optional SHA-256 check
+  -> optional all-major supplemental API refresh on a working copy
+  -> source-diff plan + change-aware ontology preparation
+  -> compact ZIP/manifest in a temporary tracked-code deploy root
+  -> Vercel staged deployment
+  -> exact deployment MCP verification
+  -> production promotion + public MCP verification
+  -> verified baseline promotion
+```
+
+The workflow accepts only HTTPS source URLs. A manual override host must match
+the configured source host or `NCS_SOURCE_DB_ALLOWED_HOSTS`. Its persistent
+state directory is outside the checkout (`NCS_REFRESH_STATE_DIR`, or a
+self-hosted runner workspace sibling by default). `api_refresh_mode=auto` uses
+whichever safe supplemental API credentials are configured; `require` demands
+both; `skip` performs no network collection.
+
+The deterministic release path is deliberately not AI. It needs reproducible
+file transforms, source identity checks, rollback boundaries, and explicit
+promotion evidence. AI can generate HR outputs through the MCP tools, but it
+does not decide how deployment data is rebuilt or approved.
+
+Because the canonical source DB is currently about 12.6 GB, the self-hosted
+runner needs space for the downloaded source, API working copy, ontology
+working copy, compact build, and persistent versioned baseline. Vercel remains
+lightweight because only the compact ZIP and manifest are deployed.
 
 The runtime validates the manifest/archive before materializing the SQLite file
 under `/tmp`, then opens that path read-only. It does not use `NCS_DB_URL` in
 the standard deployment flow.
-
-## Automatic refresh shape
-
-If the canonical source DB changes over time, the stable design is:
-
-```text
-upstream API collection / DB refresh
-  -> one canonical ncs.db
-  -> Publisher stage + verify
-  -> atomic ZIP + manifest publish into deploy/vercel_mcp_app/api
-  -> Vercel CLI deploy + remote MCP verification
-```
-
-That is why the deterministic Publisher/Builder path is better than embedding
-AI into the Vercel release path. The release path needs reproducible file
-transforms, content checks, rollback, and a clear deploy gate. AI can still
-help generate HR outputs through the MCP tools, but it does not decide how the
-deployment artifact is built.
-
-Because the canonical source DB is currently about 12.6 GB, the scheduled build
-environment needs sufficient disk capacity. The serving side on Vercel remains
-lightweight because only the compact ZIP and manifest are deployed.
 
 ## Deploy the verified input
 
