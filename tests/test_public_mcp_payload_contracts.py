@@ -38,6 +38,13 @@ DEFINITION_UNIT = "TST_DEFINITION"
 DUTY_DEFINITION = "데이터 기반 인사 직무의 범위와 책임을 정의한다."
 PRIVATE_SENTINEL = "PRIVATE_SOURCE_AND_EVIDENCE_MUST_NOT_LEAK"
 MAX_PUBLIC_PAYLOAD_CHARS = 8_000
+MAX_MARKDOWN_TEXT_CHARS = {
+    "ncs_search": 1_300,
+    "ncs_unit_detail": 3_000,
+    "ncs_training": 1_200,
+    "ncs_analysis": 1_300,
+}
+SOURCE_FOOTER = "출처: 한국산업인력공단 NCS (공공데이터포털). 표준 원문: ncs.go.kr"
 
 
 def _json_size(value: object) -> int:
@@ -484,6 +491,52 @@ class PublicMcpPayloadContractTests(unittest.TestCase):
             yield conn
         finally:
             conn.close()
+
+    def _call_tool_wire(self, name: str, arguments: dict[str, object]) -> tuple[dict[str, object], str]:
+        async def invoke() -> dict[str, object]:
+            handler = server.mcp._mcp_server.request_handlers[types.CallToolRequest]
+            request = types.CallToolRequest(
+                params=types.CallToolRequestParams(name=name, arguments=arguments)
+            )
+            response = await handler(request)
+            root = getattr(response, "root", response)
+            return root.model_dump(mode="json", exclude_none=True, by_alias=True)
+
+        wire = asyncio.run(invoke())
+        text = "".join(
+            str(item.get("text", ""))
+            for item in wire.get("content", [])
+            if isinstance(item, dict)
+        )
+        return wire, text
+
+    def test_tool_response_keeps_dict_envelope_and_attaches_wire_markdown(self) -> None:
+        generated_at = "2026-08-30T00:00:00+00:00"
+        response = server.tool_response(
+            {
+                "ok": False,
+                "error": {"code": "NOT_FOUND", "message": "missing"},
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "[NOT_FOUND] missing\nLLM은 추측 또는 생성을 하지 마세요.",
+                    }
+                ],
+            },
+            data={},
+            audit={"generated_at": generated_at},
+            ok=False,
+        )
+
+        self.assertIsInstance(response, dict)
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["audit"]["generated_at"], generated_at)
+        markdown = server._payload_markdown(response)
+        self.assertIsInstance(markdown, str)
+        self.assertIn("[NOT_FOUND] missing", markdown)
+        self.assertIn("LLM은 추측 또는 생성을 하지 마세요.", markdown)
+        self.assertIn(f"audit.generated_at: `{generated_at}`", markdown)
+        self.assertTrue(markdown.endswith(SOURCE_FOOTER), markdown)
 
     def test_ncs_search_ranking_and_duty_definition_boundary(self) -> None:
         response = server.ncs_search(query=RANK_QUERY, scope="unit", limit=5)

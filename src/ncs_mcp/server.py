@@ -22,7 +22,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable
 
+import mcp.server.fastmcp.utilities.func_metadata as fastmcp_func_metadata
 from mcp.server.fastmcp import FastMCP
+from mcp.types import TextContent
 from starlette.responses import JSONResponse
 
 from ncs_mcp.config import load_settings
@@ -224,6 +226,58 @@ PUBLIC_JOB_BASE_LINK_FIELDS = (
     "link_method",
     "confidence_score",
 )
+PUBLIC_SOURCE_FOOTER = "출처: 한국산업인력공단 NCS (공공데이터포털). 표준 원문: ncs.go.kr"
+_RENDERED_MARKDOWN_ATTR = "_mcp_markdown"
+
+
+class RenderedToolPayload(dict[str, Any]):
+    """Dict payload that also carries wire-only markdown for MCP text content."""
+
+    def __init__(self, *args: Any, markdown: str | None = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        setattr(self, _RENDERED_MARKDOWN_ATTR, markdown)
+
+
+def _payload_markdown(result: Any) -> str | None:
+    return getattr(result, _RENDERED_MARKDOWN_ATTR, None)
+
+
+def _content_text_from_payload(result: Any) -> str | None:
+    if not isinstance(result, dict):
+        return None
+    content = result.get("content")
+    if not isinstance(content, list):
+        return None
+    text_parts = [
+        str(item.get("text", "")).strip()
+        for item in content
+        if isinstance(item, dict) and item.get("type") == "text"
+    ]
+    joined = "\n\n".join(part for part in text_parts if part)
+    return joined or None
+
+
+_CURRENT_FASTMCP_CONVERT_TO_CONTENT = fastmcp_func_metadata._convert_to_content
+_ORIGINAL_FASTMCP_CONVERT_TO_CONTENT = getattr(
+    _CURRENT_FASTMCP_CONVERT_TO_CONTENT,
+    "_ncs_mcp_original_converter",
+    _CURRENT_FASTMCP_CONVERT_TO_CONTENT,
+)
+
+
+def _convert_to_content_with_markdown(result: Any):
+    markdown = _payload_markdown(result)
+    if markdown:
+        return [TextContent(type="text", text=markdown)]
+    return _ORIGINAL_FASTMCP_CONVERT_TO_CONTENT(result)
+
+
+setattr(
+    _convert_to_content_with_markdown,
+    "_ncs_mcp_original_converter",
+    _ORIGINAL_FASTMCP_CONVERT_TO_CONTENT,
+)
+fastmcp_func_metadata._convert_to_content = _convert_to_content_with_markdown
 
 _RECOMMENDATION_LIMITER_LOCK = threading.Lock()
 _RECOMMENDATION_LIMITERS: dict[int, threading.BoundedSemaphore] = {}
@@ -566,6 +620,83 @@ def exact_filter(clauses: list[str], params: list[Any], column: str, value: str 
         params.append(value)
 
 
+def _clean_markdown_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", "" if value is None else str(value)).strip()
+
+
+def _markdown_cell(value: Any) -> str:
+    text = _clean_markdown_text(value)
+    if not text:
+        return "-"
+    return text.replace("|", "\\|")
+
+
+def _short_markdown_text(value: Any, *, max_chars: int = 40) -> str:
+    text = _clean_markdown_text(value)
+    if len(text) <= max_chars:
+        return text
+    return f"{text[: max_chars - 1]}…"
+
+
+def _markdown_table(headers: list[str], rows: list[list[Any]]) -> str:
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join("---" for _ in headers) + " |",
+    ]
+    for row in rows:
+        lines.append("| " + " | ".join(_markdown_cell(cell) for cell in row) + " |")
+    return "\n".join(lines)
+
+
+def _returned_total_line(total_count: int | None, returned_count: int | None = None) -> str | None:
+    if total_count is None and returned_count is None:
+        return None
+    if total_count is None:
+        total_count = returned_count
+    if returned_count is None:
+        returned_count = total_count
+    return f"{int(total_count)}건 중 {int(returned_count)}건 표시"
+
+
+def _append_markdown_footer(lines: list[str], audit: dict[str, Any] | None) -> str:
+    generated_at = audit.get("generated_at") if isinstance(audit, dict) else None
+    lines.append("")
+    if generated_at:
+        lines.append(f"audit.generated_at: `{generated_at}`")
+    lines.append(PUBLIC_SOURCE_FOOTER)
+    return "\n".join(line for line in lines if line is not None)
+
+
+_PUBLIC_MARKDOWN_RENDERERS: dict[
+    str,
+    Callable[[dict[str, Any]], str | None],
+] = {}
+
+
+def _render_tool_response_markdown(
+    result: dict[str, Any],
+    *,
+    renderer: str | None = None,
+) -> str | None:
+    existing = _content_text_from_payload(result)
+    if existing:
+        return _append_markdown_footer([existing], result.get("audit"))
+    if result.get("ok") is False:
+        error = result.get("error")
+        if isinstance(error, dict):
+            lines = [f"오류 코드: `{error.get('code')}`"]
+            if error.get("message"):
+                lines.append(_clean_markdown_text(error.get("message")))
+            return _append_markdown_footer(lines, result.get("audit"))
+        return None
+    render_func = _PUBLIC_MARKDOWN_RENDERERS.get(renderer or "")
+    if render_func is not None:
+        rendered = render_func(result)
+        if rendered:
+            return rendered
+    return None
+
+
 def tool_response(
     payload: dict[str, Any],
     *,
@@ -573,6 +704,7 @@ def tool_response(
     audit: dict[str, Any] | None = None,
     ok: bool | None = None,
     include_data_alias: bool = True,
+    renderer: str | None = None,
 ) -> dict[str, Any]:
     """Add the v1 MCP ok/data/error/audit envelope without removing legacy keys."""
     result = dict(payload)
@@ -606,7 +738,10 @@ def tool_response(
             "generated_at": now_utc(),
         },
     )
-    return result
+    return RenderedToolPayload(
+        result,
+        markdown=_render_tool_response_markdown(result, renderer=renderer),
+    )
 
 
 def _missing_aihr_plan_query_route_fields(route: Any) -> list[str]:
@@ -688,12 +823,24 @@ def guard_public_tool(func):
     @wraps(func)
     def guarded(*args, **kwargs):
         try:
-            return func(*args, **kwargs)
+            response = func(*args, **kwargs)
+            if isinstance(response, dict):
+                return tool_response(
+                    response,
+                    include_data_alias="data" in response,
+                    renderer=func.__name__,
+                )
+            return response
         except Exception:
-            return error_response(
+            response = error_response(
                 "tool_execution_failed",
                 tool_name=func.__name__,
                 message="The tool failed while reading its configured NCS data.",
+            )
+            return tool_response(
+                response,
+                include_data_alias="data" in response,
+                renderer=func.__name__,
             )
 
     return guarded
