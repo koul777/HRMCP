@@ -12,7 +12,7 @@ class PackageMetadataTests(unittest.TestCase):
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
         for requirement in (
-            '"mcp>=1.26,<2"',
+            '"mcp>=1.26,<=1.29.1"',
             '"openpyxl>=3.1,<4"',
             '"requests>=2.32,<3"',
             '"python-dotenv>=1,<2"',
