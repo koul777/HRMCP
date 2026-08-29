@@ -745,6 +745,25 @@ class PublicMcpPayloadContractTests(unittest.TestCase):
         self.assertTrue(search_text.endswith(SOURCE_FOOTER), search_text)
         self.assertRegex(search_text, re.escape(EXACT_UNIT))
 
+    def test_ncs_unit_detail_markdown_stays_under_budget_and_preserves_ids(self) -> None:
+        detail_response = server.ncs_unit_detail(
+            unit_code=EXACT_UNIT,
+            include=["elements", "criteria", "ksa"],
+        )
+        first_element_id = detail_response["elements"][0]["element_id"]
+        first_criteria_id = detail_response["elements"][0]["performance_criteria"][0]["criteria_id"]
+        detail_wire, detail_text = self._call_tool_wire(
+            "ncs_unit_detail",
+            {"unit_code": EXACT_UNIT, "include": ["elements", "criteria", "ksa"]},
+        )
+        self.assertNotIn("structuredContent", detail_wire)
+        self.assertLessEqual(len(detail_text), MAX_MARKDOWN_TEXT_CHARS["ncs_unit_detail"])
+        self.assertTrue(detail_text.endswith(SOURCE_FOOTER), detail_text)
+        self.assertRegex(detail_text, re.escape(EXACT_UNIT))
+        self.assertIn("| 요소ID | 수행준거ID | 수행준거 |", detail_text)
+        self.assertRegex(detail_text, rf"\|\s*{first_element_id}\s*\|")
+        self.assertRegex(detail_text, rf"\|\s*{first_criteria_id}\s*\|")
+
 
     def test_qualification_without_collection_status_remains_usable(self) -> None:
         conn = connect(self.db_path)

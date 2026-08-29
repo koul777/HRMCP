@@ -768,6 +768,129 @@ def _render_ncs_search_markdown(result: dict[str, Any]) -> str | None:
 _PUBLIC_MARKDOWN_RENDERERS["ncs_search"] = _render_ncs_search_markdown
 
 
+def _render_ncs_unit_detail_markdown(result: dict[str, Any]) -> str | None:
+    unit = result.get("unit")
+    elements = result.get("elements")
+    if not isinstance(unit, dict) or not isinstance(elements, list):
+        return None
+    visible_elements = elements[:8]
+    detail_meta = result.get("detail_meta")
+    detail_counts = (
+        detail_meta.get("counts", {})
+        if isinstance(detail_meta, dict)
+        else {}
+    )
+
+    def total_count(key: str, fallback: int) -> int:
+        count_meta = detail_counts.get(key)
+        if isinstance(count_meta, dict) and count_meta.get("total_count") is not None:
+            return int(count_meta["total_count"])
+        return fallback
+
+    lines = [
+        f"## 능력단위 상세: {_short_markdown_text(unit.get('unit_name'), max_chars=64)}"
+    ]
+    lines.append("")
+    lines.append(
+        _markdown_table(
+            ["능력단위코드", "수준", "분류경로"],
+            [
+                [
+                    unit.get("unit_code"),
+                    unit.get("unit_level"),
+                    _classification_path_text(unit.get("classification")),
+                ]
+            ],
+        )
+    )
+    lines.append("")
+    lines.append("### 능력단위요소")
+    lines.append(
+        _returned_total_line(
+            total_count("elements", len(elements)),
+            len(visible_elements),
+        )
+        or ""
+    )
+    lines.append("")
+    element_rows: list[list[Any]] = []
+    for element in visible_elements:
+        criteria = element.get("performance_criteria") or []
+        ksa = element.get("ksa") or []
+        element_rows.append(
+            [
+                element.get("element_id"),
+                element.get("element_name"),
+                element.get("element_level"),
+                len(criteria),
+                len(ksa),
+            ]
+        )
+    lines.append(
+        _markdown_table(
+            ["요소ID", "요소명", "수준", "수행준거 수", "KSA 수"],
+            element_rows,
+        )
+    )
+    lines.append("")
+    lines.append("### 요소별 수행준거")
+    criteria_rows: list[list[Any]] = []
+    for element in visible_elements:
+        for criterion in (element.get("performance_criteria") or [])[:1]:
+            criteria_rows.append(
+                [
+                    element.get("element_id"),
+                    criterion.get("criteria_id"),
+                    _short_markdown_text(criterion.get("text"), max_chars=46),
+                ]
+            )
+    criteria_total = total_count(
+        "performance_criteria",
+        sum(len(element.get("performance_criteria") or []) for element in elements),
+    )
+    lines.append(_returned_total_line(criteria_total, len(criteria_rows)) or "")
+    lines.append("")
+    lines.append(
+        _markdown_table(
+            ["요소ID", "수행준거ID", "수행준거"],
+            criteria_rows,
+        )
+    )
+    lines.append("")
+    lines.append("### KSA 구분")
+    ksa_rows: list[list[Any]] = []
+    for element in visible_elements:
+        for item in element.get("ksa") or []:
+            if len(ksa_rows) >= 8:
+                break
+            ksa_rows.append(
+                [
+                    element.get("element_id"),
+                    item.get("ksa_type"),
+                    item.get("ksa_id"),
+                    _short_markdown_text(item.get("text"), max_chars=40),
+                ]
+            )
+        if len(ksa_rows) >= 8:
+            break
+    ksa_total = total_count(
+        "ksa",
+        sum(len(element.get("ksa") or []) for element in elements),
+    )
+    lines.append(_returned_total_line(ksa_total, len(ksa_rows)) or "")
+    lines.append("")
+    lines.append(
+        _markdown_table(
+            ["요소ID", "KSA 유형", "KSA ID", "내용"],
+            ksa_rows,
+        )
+    )
+    return _append_markdown_footer(lines, result.get("audit"))
+
+
+_PUBLIC_MARKDOWN_RENDERERS["ncs_unit_detail"] = _render_ncs_unit_detail_markdown
+
+
 def _render_tool_response_markdown(
     result: dict[str, Any],
     *,
