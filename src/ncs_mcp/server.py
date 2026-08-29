@@ -774,6 +774,14 @@ def _render_ncs_unit_detail_markdown(result: dict[str, Any]) -> str | None:
     if not isinstance(unit, dict) or not isinstance(elements, list):
         return None
     visible_elements = elements[:8]
+    criteria_requested = any(
+        isinstance(element, dict) and "performance_criteria" in element
+        for element in elements
+    )
+    ksa_requested = any(
+        isinstance(element, dict) and "ksa" in element
+        for element in elements
+    )
     detail_meta = result.get("detail_meta")
     detail_counts = (
         detail_meta.get("counts", {})
@@ -813,78 +821,84 @@ def _render_ncs_unit_detail_markdown(result: dict[str, Any]) -> str | None:
         or ""
     )
     lines.append("")
+    element_headers = ["요소ID", "요소명", "수준"]
+    if criteria_requested:
+        element_headers.append("수행준거 수")
+    if ksa_requested:
+        element_headers.append("KSA 수")
     element_rows: list[list[Any]] = []
     for element in visible_elements:
-        criteria = element.get("performance_criteria") or []
-        ksa = element.get("ksa") or []
-        element_rows.append(
-            [
-                element.get("element_id"),
-                element.get("element_name"),
-                element.get("element_level"),
-                len(criteria),
-                len(ksa),
-            ]
-        )
+        element_row = [
+            element.get("element_id"),
+            element.get("element_name"),
+            element.get("element_level"),
+        ]
+        if criteria_requested:
+            element_row.append(len(element.get("performance_criteria") or []))
+        if ksa_requested:
+            element_row.append(len(element.get("ksa") or []))
+        element_rows.append(element_row)
     lines.append(
         _markdown_table(
-            ["요소ID", "요소명", "수준", "수행준거 수", "KSA 수"],
+            element_headers,
             element_rows,
         )
     )
-    lines.append("")
-    lines.append("### 요소별 수행준거")
-    criteria_rows: list[list[Any]] = []
-    for element in visible_elements:
-        for criterion in (element.get("performance_criteria") or [])[:1]:
-            criteria_rows.append(
-                [
-                    element.get("element_id"),
-                    criterion.get("criteria_id"),
-                    _short_markdown_text(criterion.get("text"), max_chars=46),
-                ]
-            )
-    criteria_total = total_count(
-        "performance_criteria",
-        sum(len(element.get("performance_criteria") or []) for element in elements),
-    )
-    lines.append(_returned_total_line(criteria_total, len(criteria_rows)) or "")
-    lines.append("")
-    lines.append(
-        _markdown_table(
-            ["요소ID", "수행준거ID", "수행준거"],
-            criteria_rows,
+    if criteria_requested:
+        lines.append("")
+        lines.append("### 요소별 수행준거")
+        criteria_rows: list[list[Any]] = []
+        for element in visible_elements:
+            for criterion in (element.get("performance_criteria") or [])[:1]:
+                criteria_rows.append(
+                    [
+                        element.get("element_id"),
+                        criterion.get("criteria_id"),
+                        _short_markdown_text(criterion.get("text"), max_chars=46),
+                    ]
+                )
+        criteria_total = total_count(
+            "performance_criteria",
+            sum(len(element.get("performance_criteria") or []) for element in elements),
         )
-    )
-    lines.append("")
-    lines.append("### KSA 구분")
-    ksa_rows: list[list[Any]] = []
-    for element in visible_elements:
-        for item in element.get("ksa") or []:
+        lines.append(_returned_total_line(criteria_total, len(criteria_rows)) or "")
+        lines.append("")
+        lines.append(
+            _markdown_table(
+                ["요소ID", "수행준거ID", "수행준거"],
+                criteria_rows,
+            )
+        )
+    if ksa_requested:
+        lines.append("")
+        lines.append("### KSA 구분")
+        ksa_rows: list[list[Any]] = []
+        for element in visible_elements:
+            for item in element.get("ksa") or []:
+                if len(ksa_rows) >= 8:
+                    break
+                ksa_rows.append(
+                    [
+                        element.get("element_id"),
+                        item.get("ksa_type"),
+                        item.get("ksa_id"),
+                        _short_markdown_text(item.get("text"), max_chars=40),
+                    ]
+                )
             if len(ksa_rows) >= 8:
                 break
-            ksa_rows.append(
-                [
-                    element.get("element_id"),
-                    item.get("ksa_type"),
-                    item.get("ksa_id"),
-                    _short_markdown_text(item.get("text"), max_chars=40),
-                ]
-            )
-        if len(ksa_rows) >= 8:
-            break
-    ksa_total = total_count(
-        "ksa",
-        sum(len(element.get("ksa") or []) for element in elements),
-    )
-    lines.append(_returned_total_line(ksa_total, len(ksa_rows)) or "")
-    lines.append("")
-    lines.append(
-        _markdown_table(
-            ["요소ID", "KSA 유형", "KSA ID", "내용"],
-            ksa_rows,
+        ksa_total = total_count(
+            "ksa",
+            sum(len(element.get("ksa") or []) for element in elements),
         )
-    )
+        lines.append(_returned_total_line(ksa_total, len(ksa_rows)) or "")
+        lines.append("")
+        lines.append(
+            _markdown_table(
+                ["요소ID", "KSA 유형", "KSA ID", "내용"],
+                ksa_rows,
+            )
+        )
     return _append_markdown_footer(lines, result.get("audit"))
 
 

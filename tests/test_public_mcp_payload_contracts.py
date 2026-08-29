@@ -764,6 +764,44 @@ class PublicMcpPayloadContractTests(unittest.TestCase):
         self.assertRegex(detail_text, rf"\|\s*{first_element_id}\s*\|")
         self.assertRegex(detail_text, rf"\|\s*{first_criteria_id}\s*\|")
 
+    def test_ncs_unit_detail_partial_includes_render_only_requested_sections(self) -> None:
+        cases = (
+            (
+                ["elements"],
+                ("| 요소ID | 요소명 | 수준 |",),
+                ("수행준거", "KSA"),
+            ),
+            (
+                ["elements", "criteria"],
+                ("| 요소ID | 요소명 | 수준 | 수행준거 수 |", "### 요소별 수행준거"),
+                ("KSA",),
+            ),
+            (
+                ["elements", "ksa"],
+                ("| 요소ID | 요소명 | 수준 | KSA 수 |", "### KSA 구분"),
+                ("수행준거",),
+            ),
+            (
+                ["elements", "training", "qualification"],
+                ("| 요소ID | 요소명 | 수준 |",),
+                ("수행준거", "KSA"),
+            ),
+        )
+        for include, expected, excluded in cases:
+            with self.subTest(include=include):
+                wire, text = self._call_tool_wire(
+                    "ncs_unit_detail",
+                    {"unit_code": EXACT_UNIT, "include": include},
+                )
+                self.assertNotIn("structuredContent", wire)
+                self.assertLessEqual(len(text), MAX_MARKDOWN_TEXT_CHARS["ncs_unit_detail"])
+                self.assertRegex(text, re.escape(EXACT_UNIT))
+                self.assertTrue(text.endswith(SOURCE_FOOTER), text)
+                for marker in expected:
+                    self.assertIn(marker, text)
+                for marker in excluded:
+                    self.assertNotIn(marker, text)
+
     def test_ncs_training_markdown_stays_under_budget_and_preserves_ids(self) -> None:
         training_wire, training_text = self._call_tool_wire(
             "ncs_training",
