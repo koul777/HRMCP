@@ -298,6 +298,52 @@ class RemoteMcpTransportVerifierTests(unittest.TestCase):
         self.assertIn("tools_call_training_semantic", report["failures"])
         self.assertIn("tools_call_analysis_career_path_semantic", report["failures"])
 
+    def test_job_base_payload_and_latency_limits_block_release(self) -> None:
+        fake_request, _observed_protocols, _tool_calls = _successful_request_factory(
+            selected_protocol=verifier.PROTOCOL_VERSION
+        )
+
+        def oversized_request(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            response = fake_request(*args, **kwargs)
+            body = kwargs.get("body")
+            if not body or body == b"{not-json":
+                return response
+            payload = json.loads(body)
+            params = payload.get("params") or {}
+            arguments = params.get("arguments") or {}
+            if (
+                payload.get("method") == "tools/call"
+                and params.get("name") == "ncs_analysis"
+                and arguments.get("mode") == "job_base"
+            ):
+                return {
+                    "status": 200,
+                    "duration_seconds": 1.01,
+                    "payload": {
+                        "result": {
+                            "isError": False,
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": json.dumps(
+                                        {"ok": True, "padding": "x" * 2_100}
+                                    ),
+                                }
+                            ],
+                        }
+                    },
+                }
+            return response
+
+        with patch.object(verifier, "_request", side_effect=oversized_request):
+            report = verifier.verify("https://example.test/api/mcp", concurrency=1)
+
+        self.assertFalse(report["ok"])
+        self.assertIn(
+            "tools_call_analysis_job_base_payload_size", report["failures"]
+        )
+        self.assertIn("tools_call_analysis_job_base_duration", report["failures"])
+
 
 if __name__ == "__main__":
     unittest.main()

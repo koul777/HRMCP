@@ -50,8 +50,8 @@ from ncs_mcp.db import (
 from ncs_mcp.error_codes import error_metadata
 from ncs_mcp.helpers import DISCLAIMER, mask_sensitive_payload, not_found_response
 from ncs_mcp.job_base_api import (
+    count_job_base_links as job_base_count_links,
     fetch_job_base_page as job_base_fetch_page,
-    job_base_summary as job_base_cached_summary,
     search_job_base_links as job_base_search_links,
 )
 from ncs_mcp.ontology import MVP_JOB_NAME, MVP_MAJOR_CODE, ONTOLOGY_SCHEMA, query_sqf_duties, sqf_summary
@@ -215,6 +215,15 @@ PUBLIC_UNIT_ELEMENT_FIELDS = (
 )
 PUBLIC_CRITERIA_FIELDS = ("criteria_id", "criteria_no", "text")
 PUBLIC_KSA_FIELDS = ("ksa_id", "ksa_type", "ksa_no", "text")
+PUBLIC_JOB_BASE_LINK_LIMIT = 3
+PUBLIC_JOB_BASE_LINK_FIELDS = (
+    "unit_code",
+    "unit_name",
+    "competency_name",
+    "factor_name",
+    "link_method",
+    "confidence_score",
+)
 
 _RECOMMENDATION_LIMITER_LOCK = threading.Lock()
 _RECOMMENDATION_LIMITERS: dict[int, threading.BoundedSemaphore] = {}
@@ -2383,6 +2392,8 @@ def search_job_base_competencies(
     limit: int = 20,
 ) -> dict[str, Any]:
     """Search cached NCS job base competencies linked to NCS competency units."""
+    requested_limit = clamp_limit(limit, default=20, maximum=200)
+    applied_limit = min(requested_limit, PUBLIC_JOB_BASE_LINK_LIMIT)
     with open_db() as conn:
         raw_links = job_base_search_links(
             conn,
@@ -2390,26 +2401,31 @@ def search_job_base_competencies(
             competency_name=competency_name,
             factor_name=factor_name,
             major_code=major_code,
-            limit=limit,
+            limit=applied_limit + 1,
         )
-        job_base_fields = (
-            "unit_code",
-            "job_base_competency_id",
-            "job_base_factor_id",
-            "competency_name",
-            "factor_name",
-            "unit_name",
-            "major_code",
-            "major_name",
-            "link_method",
-            "confidence_score",
-            "review_status",
+        truncated = len(raw_links) > applied_limit
+        total_count = (
+            job_base_count_links(
+                conn,
+                unit_code=unit_code,
+                competency_name=competency_name,
+                factor_name=factor_name,
+                major_code=major_code,
+            )
+            if truncated
+            else len(raw_links)
         )
         links = [
-            {field: row.get(field) for field in job_base_fields}
-            for row in raw_links
+            {field: row.get(field) for field in PUBLIC_JOB_BASE_LINK_FIELDS}
+            for row in raw_links[:applied_limit]
         ]
-        summary = job_base_cached_summary(conn, limit=10)
+        summary = {
+            "returned_count": len(links),
+            "total_count": total_count,
+            "truncated": total_count > len(links),
+            "requested_limit": requested_limit,
+            "applied_limit": applied_limit,
+        }
     return tool_response(
         {
             "job_base_links": links,

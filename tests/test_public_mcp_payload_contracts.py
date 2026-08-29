@@ -718,6 +718,55 @@ class PublicMcpPayloadContractTests(unittest.TestCase):
                 "method": "ncs_unit_name_fallback",
             },
         )
+        self.assertEqual(
+            set(response["job_base_links"][0]),
+            set(server.PUBLIC_JOB_BASE_LINK_FIELDS),
+        )
+        self.assertEqual(
+            response["summary"],
+            {
+                "returned_count": 1,
+                "total_count": 1,
+                "truncated": False,
+                "requested_limit": 3,
+                "applied_limit": 3,
+            },
+        )
+        self.assertLessEqual(_json_size(response), 2_000)
+
+    def test_job_base_payload_caps_links_and_reports_truncation(self) -> None:
+        raw_rows = [
+            {
+                "unit_code": EXACT_UNIT,
+                "unit_name": RANK_QUERY,
+                "job_base_competency_id": index,
+                "job_base_factor_id": index,
+                "competency_name": f"공통역량 {index}",
+                "factor_name": f"하위요소 {index}",
+                "major_code": "01",
+                "major_name": "경영",
+                "link_method": "unit_code_exact",
+                "confidence_score": 1.0,
+                "review_status": "auto_linked",
+                "source_payload": PRIVATE_SENTINEL,
+            }
+            for index in range(1, 5)
+        ]
+        with (
+            patch.object(server, "job_base_search_links", return_value=raw_rows),
+            patch.object(server, "job_base_count_links", return_value=9),
+        ):
+            response = server.search_job_base_competencies(
+                unit_code=EXACT_UNIT,
+                limit=20,
+            )
+
+        self.assertEqual(len(response["job_base_links"]), 3)
+        self.assertEqual(response["summary"]["total_count"], 9)
+        self.assertTrue(response["summary"]["truncated"])
+        self.assertEqual(response["summary"]["applied_limit"], 3)
+        self.assertNotIn(PRIVATE_SENTINEL, json.dumps(response, ensure_ascii=False))
+        self.assertLessEqual(_json_size(response), 2_000)
 
     def test_career_query_is_applied_and_ontology_exact_name_ranks_first(self) -> None:
         career = server.ncs_analysis(mode="career_path", query="인사기획", limit=10)

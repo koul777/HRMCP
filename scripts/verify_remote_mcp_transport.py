@@ -245,12 +245,18 @@ def _tool_call_assessment(response: dict[str, Any]) -> dict[str, Any]:
     tool_is_error = isinstance(rpc_result, dict) and rpc_result.get("isError") is True
     tool_payload = _tool_content_payload(rpc_payload)
     semantic_ok = isinstance(tool_payload, dict) and tool_payload.get("ok") is True
+    payload_chars = (
+        len(json.dumps(tool_payload, ensure_ascii=False, separators=(",", ":")))
+        if isinstance(tool_payload, dict)
+        else None
+    )
     raw_exception = _contains_raw_exception(rpc_payload)
     return {
         **_safe_response(response),
         "jsonrpc_error": rpc_error,
         "tool_result_is_error": tool_is_error,
         "semantic_ok": semantic_ok,
+        "payload_chars": payload_chars,
         "raw_exception_detected": raw_exception,
         "response_body_logged": False,
     }
@@ -507,6 +513,14 @@ def verify(
             failures.append(f"{failure_prefix}_semantic")
         if item["raw_exception_detected"]:
             failures.append(f"{failure_prefix}_raw_exception")
+        if check_name == "analysis_job_base":
+            if (
+                not isinstance(item.get("payload_chars"), int)
+                or item["payload_chars"] > 2_000
+            ):
+                failures.append(f"{failure_prefix}_payload_size")
+            if item["duration_seconds"] >= 1.0:
+                failures.append(f"{failure_prefix}_duration")
     if checks["unsupported_protocol"]["status"] != 400:
         failures.append("unsupported_protocol")
     if checks["invalid_json"]["status"] != 400:

@@ -368,15 +368,13 @@ def job_base_summary(conn: sqlite3.Connection, *, limit: int = 20) -> dict[str, 
     }
 
 
-def search_job_base_links(
-    conn: sqlite3.Connection,
+def _job_base_link_filters(
     *,
-    unit_code: str | None = None,
-    competency_name: str | None = None,
-    factor_name: str | None = None,
-    major_code: str | None = None,
-    limit: int = 20,
-) -> list[dict[str, Any]]:
+    unit_code: str | None,
+    competency_name: str | None,
+    factor_name: str | None,
+    major_code: str | None,
+) -> tuple[str, list[Any]]:
     clauses: list[str] = []
     params: list[Any] = []
     if unit_code:
@@ -391,11 +389,64 @@ def search_job_base_links(
     if major_code:
         clauses.append("cls.major_code = ?")
         params.append(major_code)
-    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    return (f"WHERE {' AND '.join(clauses)}" if clauses else ""), params
+
+
+def count_job_base_links(
+    conn: sqlite3.Connection,
+    *,
+    unit_code: str | None = None,
+    competency_name: str | None = None,
+    factor_name: str | None = None,
+    major_code: str | None = None,
+) -> int:
+    """Count job-base links for bounded public pagination metadata."""
+
+    where, params = _job_base_link_filters(
+        unit_code=unit_code,
+        competency_name=competency_name,
+        factor_name=factor_name,
+        major_code=major_code,
+    )
+    row = conn.execute(
+        f"""
+        SELECT COUNT(*)
+        FROM ncs_unit_job_base_links l
+        JOIN ncs_job_base_competencies c
+          ON c.job_base_competency_id = l.job_base_competency_id
+        LEFT JOIN ncs_job_base_factors f
+          ON f.job_base_factor_id = l.job_base_factor_id
+        LEFT JOIN competency_units cu ON cu.unit_code = l.unit_code
+        LEFT JOIN classifications cls ON cls.classification_id = cu.classification_id
+        {where}
+        """,
+        params,
+    ).fetchone()
+    return int(row[0] or 0) if row else 0
+
+
+def search_job_base_links(
+    conn: sqlite3.Connection,
+    *,
+    unit_code: str | None = None,
+    competency_name: str | None = None,
+    factor_name: str | None = None,
+    major_code: str | None = None,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    where, params = _job_base_link_filters(
+        unit_code=unit_code,
+        competency_name=competency_name,
+        factor_name=factor_name,
+        major_code=major_code,
+    )
     rows = conn.execute(
         f"""
         SELECT
-            l.*, c.competency_name, f.factor_name,
+            l.link_id, l.unit_code,
+            l.job_base_competency_id, l.job_base_factor_id,
+            l.link_method, l.confidence_score, l.review_status,
+            c.competency_name, f.factor_name,
             cu.unit_name_raw AS unit_name,
             cls.major_code, cls.major_name,
             cls.middle_code, cls.middle_name,

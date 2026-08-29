@@ -14,6 +14,7 @@ if str(SRC) not in sys.path:
 
 from ncs_mcp.db import connect, initialize_database, now_utc
 from ncs_mcp.job_base_api import (
+    count_job_base_links,
     job_base_profile_for_units,
     job_base_summary,
     parse_job_base_xml,
@@ -117,6 +118,7 @@ class JobBaseApiTests(unittest.TestCase):
             )
             summary = job_base_summary(conn)
             links = search_job_base_links(conn, unit_code=unit_code)
+            link_count = count_job_base_links(conn, unit_code=unit_code)
             profile = job_base_profile_for_units(conn, {unit_code})
             conn.close()
 
@@ -134,6 +136,9 @@ class JobBaseApiTests(unittest.TestCase):
             self.assertEqual(summary["review_status_counts"], {"auto_linked": 2})
             self.assertEqual(len(summary["top_factors"]), 2)
             self.assertEqual(len(links), 2)
+            self.assertEqual(link_count, 2)
+            self.assertNotIn("source_payload", links[0])
+            self.assertNotIn("api_fetched_at", links[0])
             self.assertEqual({link["review_status"] for link in links}, {"auto_linked"})
             self.assertEqual(len(profile), 2)
             self.assertEqual(profile[0]["competency_name"], "조직이해능력")
