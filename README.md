@@ -128,18 +128,20 @@ AI의 검색과 결과물 작성을 뒷받침합니다.
 
 Claude의 원격 MCP 커스텀 커넥터는 Free·Pro·Max·Team·Enterprise 플랜에서 사용할 수
 있습니다. Free 플랜은 커스텀 커넥터를 1개까지 등록할 수 있습니다.
-자세한 최신 정책은 [Anthropic 공식 안내](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)를 참고하세요.
+자세한 최신 정책은 [Anthropic 공식 안내](https://support.claude.com/ko/articles/11175166-%EC%9B%90%EA%B2%A9-mcp%EB%A5%BC-%EC%82%AC%EC%9A%A9%ED%95%98%EC%97%AC-%EC%82%AC%EC%9A%A9%EC%9E%90-%EC%A0%95%EC%9D%98-%EC%BB%A4%EB%84%A5%ED%84%B0-%EC%8B%9C%EC%9E%91%ED%95%98%EA%B8%B0)와
+[Claude Academy의 현재 화면 안내](https://academy.claude.com/tutorials/connect-your-tools-to-unlock-a-smarter-more-capable-ai-companion)를 참고하세요.
 
-![Claude 설정에서 HRMCP 커스텀 커넥터를 추가하는 화면 예시](docs/images/setup/claude_hrmcp_connector_v2.png)
+**[Claude에 HRMCP 커넥터 추가하기](https://claude.ai/customize/connectors?modal=add-custom-connector&connectorName=HRMCP&connectorUrl=https%3A%2F%2Fncscope-ncs-mcp.vercel.app%2Fapi%2Fmcp)**
 
-> 화면 구성과 메뉴 이름은 Claude 버전 및 언어 설정에 따라 조금 다를 수 있습니다.
+> 위 링크는 Claude의 현재 커넥터 추가 화면을 열고 이름과 URL을 미리 입력합니다. 사용자가
+> 내용을 확인한 뒤 직접 추가해야 하며, 권한 확인을 건너뛰지 않습니다.
 
 ### 개인 플랜 (Free·Pro·Max)
 
-1. Claude에서 **Customize → Connectors** 로 이동합니다. 일부 화면에서는
-   **Settings → Connectors** 로 표시될 수 있습니다.
-2. 커넥터 옆의 **`+` → Add custom connector** 를 선택합니다.
-3. 아래 정보를 입력한 뒤 **추가(Add)** 를 클릭합니다.
+1. 위의 **Claude에 HRMCP 커넥터 추가하기** 링크를 열거나,
+   **Customize(사용자 정의) → Connectors(커넥터) → Add custom connector** 로 이동합니다.
+2. 아래 정보를 확인한 뒤 **추가(Add)** 를 클릭합니다. 커넥터 추가 창은 계정에 따라
+   한 화면 또는 두 단계로 표시될 수 있습니다.
 
 | 항목 | 입력값 |
 | --- | --- |
@@ -147,8 +149,9 @@ Claude의 원격 MCP 커스텀 커넥터는 Free·Pro·Max·Team·Enterprise 플
 | 원격 MCP 서버 URL | `https://ncscope-ncs-mcp.vercel.app/api/mcp` |
 | 인증 | 없음 — OAuth Client ID·Secret을 입력하지 않습니다. |
 
-연결 후 대화창 왼쪽 아래의 **`+` → Connectors** 에서 `HRMCP`를 켜면 해당 대화에서
-사용할 수 있습니다.
+연결 후 대화 입력창의 **Search and tools(검색 및 도구)** 에서 `HRMCP`를 켜면 해당
+대화에서 사용할 수 있습니다. 화면에 따라 슬라이더 모양 아이콘, `+` 또는 `/` 메뉴로
+검색 및 도구를 열 수 있습니다.
 
 ### Team·Enterprise 플랜
 
@@ -184,18 +187,23 @@ Claude의 원격 MCP 커스텀 커넥터는 Free·Pro·Max·Team·Enterprise 플
 
 #### Claude
 
-Claude에서는 `@HRMCP`를 입력하는 대신, 사용할 대화에서 왼쪽 아래 **`+` → Connectors** 로
-이동해 `HRMCP`를 켭니다. 채용공고와 직무기술서를 첨부한 뒤 다음과 같이 요청합니다.
+Claude에서는 `@HRMCP`를 입력하는 대신, 대화 입력창에서 **Search and tools(검색 및 도구)** 를
+열고 **Connectors(커넥터)** 영역의 `HRMCP`를 켭니다. 화면에 따라 슬라이더 모양 아이콘,
+`+` 또는 `/` 메뉴가 진입점으로 표시됩니다. 채용공고와 직무기술서를 첨부한 뒤 다음과 같이
+요청합니다.
 
-![Claude 대화에서 Connectors 메뉴를 열어 HRMCP를 활성화하고 요청하는 방법](docs/images/setup/claude_hrmcp_use.png)
+![Claude에서 검색 및 도구를 열어 HRMCP를 활성화하고 요청하는 메뉴 흐름](docs/images/setup/claude_hrmcp_flow.svg)
+
+> 위 이미지는 실제 Claude 화면을 복제한 스크린샷이 아니라, 여러 UI 버전에서 공통으로
+> 적용되는 메뉴 흐름을 정리한 안내도입니다.
 
 ```text
 첨부한 채용공고와 직무기술서를 참고하고 HRMCP의 NCS 데이터를 활용해 구조화된 행동면접 질문 10개를 작성해줘.
 각 질문별 평가요소, 추가 질문, 긍정적·부정적 행동지표도 함께 제시해줘.
 ```
 
-> Claude의 메뉴 구성과 이름은 버전 및 언어 설정에 따라 다를 수 있습니다. 일부 화면에서는
-> 왼쪽 아래 `+` 대신 `/`를 입력해 **Connectors → HRMCP**를 활성화할 수 있습니다.
+> `HRMCP`가 보이지 않으면 **Customize(사용자 정의) → Connectors(커넥터)** 에서 먼저
+> 연결했는지 확인하세요.
 
 ### 그 밖의 활용 예시
 
