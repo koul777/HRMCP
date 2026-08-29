@@ -687,6 +687,10 @@ def run_benchmark(
         {
             "NCS_DB_PATH": str(resolved_db_path),
             "NCS_MCP_READ_ONLY": "1",
+            # This benchmark intentionally exercises the advanced transition
+            # and education-planning facades.  Production may keep those tools
+            # hidden, so opt in only for the bounded benchmark process.
+            "NCS_MCP_ENABLE_ADVANCED_TOOLS": "1",
         }
     ):
         from ncs_mcp import server

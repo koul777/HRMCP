@@ -1111,7 +1111,10 @@ def ncs_analysis(
         )
     if not items:
         return not_found_response(f"{mode} 분석 결과가 없습니다.")
-    return {key: value for key, value in result.items() if key != "data"}
+    # Preserve the established public envelope, including the legacy ``data``
+    # alias.  ``structured_output=False`` removes FastMCP's wire-level
+    # ``structuredContent`` duplicate without changing this tool's JSON shape.
+    return result
 
 
 @mcp.tool()

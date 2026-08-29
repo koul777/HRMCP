@@ -8418,6 +8418,14 @@ class TrainingRecommendationTests(unittest.TestCase):
     def test_ncs_execute_tool_forces_recommendation_save_false(self) -> None:
         from ncs_mcp import server
 
+        advanced_env = patch.dict(
+            os.environ,
+            {"NCS_MCP_ENABLE_ADVANCED_TOOLS": "1"},
+            clear=False,
+        )
+        advanced_env.start()
+        self.addCleanup(advanced_env.stop)
+
         captured: dict[str, object] = {}
         plan_captured: dict[str, object] = {}
         explicit_captured: dict[str, object] = {}
@@ -8671,17 +8679,19 @@ class TrainingRecommendationTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(ready_response.status_code, 200)
-        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["status"], "degraded")
         self.assertEqual(ready_payload["status"], "ready")
         self.assertEqual(payload["name"], "ncs-mcp")
         self.assertEqual(payload["transport"], "streamable-http")
         self.assertEqual(payload["endpoint"], "/mcp")
-        self.assertEqual(payload["tools"]["exposed"], 11)
+        self.assertEqual(payload["tools"]["exposed"], 7)
         self.assertFalse(payload["runtime"]["operator_tools_enabled"])
         self.assertEqual(payload["tools"]["legacy_present"], 0)
         self.assertTrue(payload["runtime"]["database"]["configured"])
         self.assertTrue(payload["runtime"]["database"]["ready"])
         self.assertTrue(payload["runtime"]["database"]["openable"])
+        self.assertFalse(payload["runtime"]["database"]["public_tools_ready"])
+        self.assertTrue(payload["runtime"]["database"]["degraded_capabilities"])
         self.assertTrue(payload["runtime"]["api_keys"]["service_key_present"])
         self.assertNotIn(secret, json.dumps(payload, ensure_ascii=False))
 
@@ -8712,9 +8722,11 @@ class TrainingRecommendationTests(unittest.TestCase):
                     os.environ["NCS_DB_PATH"] = previous_db
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["status"], "degraded")
         self.assertEqual(payload["transport"], "sse")
         self.assertEqual(payload["endpoint"], "/sse")
+        self.assertTrue(payload["runtime"]["database"]["ready"])
+        self.assertFalse(payload["runtime"]["database"]["public_tools_ready"])
 
     def test_operator_tools_are_exposed_when_enabled_before_import(self) -> None:
         env = os.environ.copy()
