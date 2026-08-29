@@ -5,6 +5,8 @@
 !requirements.txt
 !pyproject.toml
 !uv.lock
+!build/
+!build/**/*.py
 !api/
 !api/__init__.py
 !api/health.py
