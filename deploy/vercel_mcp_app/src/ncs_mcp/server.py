@@ -146,7 +146,7 @@ READINESS_CAPABILITY_TABLES = {
         "ncs_job_base_factors",
         "ncs_unit_job_base_links",
     ),
-    "ontology": ("ontology_concepts",),
+    "ontology": ("ontology_concepts", "ontology_concept_aliases"),
 }
 READINESS_EXTRA_TABLES_ENV = "NCS_MCP_READINESS_EXTRA_TABLES"
 _SQLITE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -2856,20 +2856,25 @@ def search_ontology_concepts(
         ordering = """
             CASE
                 WHEN TRIM(oc.concept_name) = TRIM(?) COLLATE NOCASE THEN 0
-                WHEN oc.concept_name LIKE ? THEN 1
-                WHEN oc.concept_name LIKE ? THEN 2
                 WHEN EXISTS (
                     SELECT 1 FROM ontology_concept_aliases alias
                     WHERE alias.concept_id = oc.concept_id
                       AND TRIM(alias.alias_text) = TRIM(?) COLLATE NOCASE
-                ) THEN 3
+                ) THEN 1
+                WHEN oc.concept_name LIKE ? THEN 2
                 WHEN EXISTS (
                     SELECT 1 FROM ontology_concept_aliases alias
                     WHERE alias.concept_id = oc.concept_id
                       AND alias.alias_text LIKE ?
-                ) THEN 4
-                WHEN oc.definition LIKE ? THEN 5
-                ELSE 6
+                ) THEN 3
+                WHEN oc.concept_name LIKE ? THEN 4
+                WHEN EXISTS (
+                    SELECT 1 FROM ontology_concept_aliases alias
+                    WHERE alias.concept_id = oc.concept_id
+                      AND alias.alias_text LIKE ?
+                ) THEN 5
+                WHEN oc.definition LIKE ? THEN 6
+                ELSE 7
             END,
             CASE oc.review_status
                 WHEN 'human_reviewed' THEN 0
@@ -2883,10 +2888,11 @@ def search_ontology_concepts(
         """
         ordering_params: list[Any] = [
             query,
-            f"{query}%",
-            like,
             query,
             f"{query}%",
+            f"{query}%",
+            like,
+            like,
             like,
         ]
     else:
