@@ -133,13 +133,13 @@ Claude의 원격 MCP 커스텀 커넥터는 Free·Pro·Max·Team·Enterprise 플
 
 **[Claude에 HRMCP 커넥터 추가하기](https://claude.ai/customize/connectors?modal=add-custom-connector&connectorName=HRMCP&connectorUrl=https%3A%2F%2Fncscope-ncs-mcp.vercel.app%2Fapi%2Fmcp)**
 
-> 위 링크는 Claude의 현재 커넥터 추가 화면을 열고 이름과 URL을 미리 입력합니다. 사용자가
-> 내용을 확인한 뒤 직접 추가해야 하며, 권한 확인을 건너뛰지 않습니다.
+> 위 링크를 열면 커넥터 추가 화면에 이름과 URL이 미리 입력됩니다. 입력값을 확인한 뒤
+> **계속**을 눌러 등록을 진행하세요.
 
 ### 개인 플랜 (Free·Pro·Max)
 
-위의 바로가기 링크를 사용하면 아래 1~4단계를 건너뛰고 커넥터 추가 화면으로 이동할 수
-있습니다. Claude 웹 화면에서 직접 이동하려면 다음 순서를 따릅니다.
+위의 바로가기 링크를 사용하면 아래 1~6단계를 건너뛰고 7단계의 커넥터 등록 화면으로
+이동할 수 있습니다. Claude 웹 화면에서 직접 이동하려면 다음 순서를 따릅니다.
 
 1. Claude 홈 화면 왼쪽 아래의 **프로필**을 클릭합니다.
 
@@ -153,24 +153,28 @@ Claude의 원격 MCP 커스텀 커넥터는 Free·Pro·Max·Team·Enterprise 플
 
 ![Claude 설정 창에서 사용자 지정을 선택하는 화면](docs/images/setup/claude_hrmcp_setup_03_customize.png)
 
-4. 사용자 지정 화면 왼쪽에서 **커넥터**를 선택하고, 오른쪽 위의 **추가**를 클릭합니다.
+4. 사용자 지정 화면 왼쪽에서 **커넥터**를 선택합니다.
 
-![Claude 사용자 지정의 커넥터 화면에서 HRMCP 연결 상태와 추가 버튼을 확인하는 화면](docs/images/setup/claude_hrmcp_setup_04_connectors.png)
+5. 커넥터 목록에서 `HRMCP`를 찾습니다. `HRMCP` 행에 체크 표시가 보이면 연결된 상태이며,
+   Claude 대화에서 바로 사용할 수 있습니다.
 
-5. 커넥터 추가 창에 아래 값을 입력하고 **추가**를 클릭합니다. 추가 창은 계정에 따라 한
-   화면 또는 두 단계로 표시될 수 있습니다.
+6. 목록에 `HRMCP`가 없다면 오른쪽 위의 **추가**를 클릭합니다.
 
-| 항목 | 입력값 |
-| --- | --- |
-| 이름 | `HRMCP` |
-| 원격 MCP 서버 URL | `https://ncscope-ncs-mcp.vercel.app/api/mcp` |
-| 인증 | 없음 — OAuth Client ID·Secret을 입력하지 않습니다. |
+![Claude 커넥터 목록에서 기존 HRMCP 연결 상태를 확인하고 없을 때 추가하는 화면](docs/images/setup/claude_hrmcp_setup_04_connectors.png)
 
-6. 커넥터 목록의 `HRMCP` 행에 체크 표시가 보이면 연결이 완료된 상태입니다.
+7. **추가**를 누르면 **커스텀 커넥터 추가** 창이 열립니다. **이름**에 `HRMCP`를 입력합니다.
 
-> 위 스크린샷은 현재 Claude 웹 화면을 기준으로 작성했으며, 개인 정보와 대화 제목은
-> 알아볼 수 없도록 모자이크 처리했습니다. Claude 업데이트나 계정 유형에 따라 메뉴 배치나
-> 버튼 이름이 조금 달라질 수 있습니다.
+8. **원격 MCP 서버 URL**에 `https://ncscope-ncs-mcp.vercel.app/api/mcp`를 입력합니다.
+
+9. 두 값을 확인한 뒤 **계속**을 클릭해 연결 절차를 진행합니다.
+
+![Claude 커스텀 커넥터 추가 창에서 이름과 원격 MCP 서버 URL을 입력하는 화면](docs/images/setup/claude_hrmcp_setup_05_add_custom_connector.png)
+
+**계속**을 누르면 연결 설정이 진행됩니다. 확인 단계가 표시되면 내용을 확인해 등록을
+마칩니다. HRMCP는 인증이 필요하지 않으므로 OAuth Client ID·Secret은 입력하지 않습니다.
+커넥터 목록으로 돌아왔을 때 `HRMCP` 행에 체크 표시가 보이면 등록과 연결이 완료된 것입니다.
+
+> Claude 업데이트나 계정 유형에 따라 메뉴 배치나 버튼 이름이 조금 달라질 수 있습니다.
 
 ### Team·Enterprise 플랜
 
