@@ -331,7 +331,15 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($target)) {
             $target = 'production'
           }
-          $arguments = @('deploy', '--prebuilt', '--yes', '--token', $env:VERCEL_TOKEN)
+          $arguments = @(
+            'deploy',
+            '--prebuilt',
+            '--yes',
+            '--token',
+            $env:VERCEL_TOKEN,
+            '--env',
+            "NCS_MCP_BUILD_ID=$env:GITHUB_SHA"
+          )
           if ($target -eq 'production') {
             $arguments += @('--prod', '--skip-domain')
           }

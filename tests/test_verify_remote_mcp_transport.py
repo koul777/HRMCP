@@ -53,7 +53,15 @@ def _successful_request_factory(
             return {
                 "status": 200,
                 "duration_seconds": 0.01,
-                "payload": {"result": {"protocolVersion": selected_protocol}},
+                "payload": {
+                    "result": {
+                        "protocolVersion": selected_protocol,
+                        "serverInfo": {
+                            "name": "ncs-mcp",
+                            "version": "0.1.0+git.0123456789abcdef",
+                        },
+                    }
+                },
             }
         if rpc_method == "notifications/initialized":
             return {"status": 202, "duration_seconds": 0.01}
@@ -123,6 +131,7 @@ class RemoteMcpTransportVerifierTests(unittest.TestCase):
             "The current public production MCP URL failed transport or public-tool smoke verification.",
             workflow,
         )
+        self.assertIn('"NCS_MCP_BUILD_ID=$env:GITHUB_SHA"', workflow)
         self.assertLess(
             workflow.index("No source projection change was detected; deployment and baseline promotion were skipped."),
             workflow.index("The current public production MCP URL failed transport or public-tool smoke verification."),
@@ -143,6 +152,11 @@ class RemoteMcpTransportVerifierTests(unittest.TestCase):
             )
 
         self.assertTrue(report["ok"], report)
+        self.assertEqual(
+            report["checks"]["initialize"]["server_version"],
+            "0.1.0+git.0123456789abcdef",
+        )
+        self.assertTrue(report["checks"]["initialize"]["build_identifier_present"])
         self.assertEqual(report["protocol_version"], selected_protocol)
         self.assertGreaterEqual(observed_protocols.count(selected_protocol), 12)
         self.assertIn("2099-01-01", observed_protocols)
