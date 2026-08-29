@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+# DATA USE WARNING:
+# This collector reads SQF library pages/files directly from ncs.go.kr.
+# These posts and attachments are legacy/reference-only and are not active HRMCP
+# serving evidence. Do not assume that an open-data API license covers this direct
+# site collection path. Before redistribution, public serving, or snapshot
+# inclusion, verify post/file-level KOGL/public-use terms and third-party rights.
+
 import argparse
 import hashlib
 import html

@@ -22,7 +22,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable
 
+import mcp.server.fastmcp.utilities.func_metadata as fastmcp_func_metadata
 from mcp.server.fastmcp import FastMCP
+from mcp.types import TextContent
 from starlette.responses import JSONResponse
 
 from ncs_mcp.config import load_settings
@@ -224,6 +226,58 @@ PUBLIC_JOB_BASE_LINK_FIELDS = (
     "link_method",
     "confidence_score",
 )
+PUBLIC_SOURCE_FOOTER = "출처: 한국산업인력공단 NCS (공공데이터포털). 표준 원문: ncs.go.kr"
+_RENDERED_MARKDOWN_ATTR = "_mcp_markdown"
+
+
+class RenderedToolPayload(dict[str, Any]):
+    """Dict payload that also carries wire-only markdown for MCP text content."""
+
+    def __init__(self, *args: Any, markdown: str | None = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        setattr(self, _RENDERED_MARKDOWN_ATTR, markdown)
+
+
+def _payload_markdown(result: Any) -> str | None:
+    return getattr(result, _RENDERED_MARKDOWN_ATTR, None)
+
+
+def _content_text_from_payload(result: Any) -> str | None:
+    if not isinstance(result, dict):
+        return None
+    content = result.get("content")
+    if not isinstance(content, list):
+        return None
+    text_parts = [
+        str(item.get("text", "")).strip()
+        for item in content
+        if isinstance(item, dict) and item.get("type") == "text"
+    ]
+    joined = "\n\n".join(part for part in text_parts if part)
+    return joined or None
+
+
+_CURRENT_FASTMCP_CONVERT_TO_CONTENT = fastmcp_func_metadata._convert_to_content
+_ORIGINAL_FASTMCP_CONVERT_TO_CONTENT = getattr(
+    _CURRENT_FASTMCP_CONVERT_TO_CONTENT,
+    "_ncs_mcp_original_converter",
+    _CURRENT_FASTMCP_CONVERT_TO_CONTENT,
+)
+
+
+def _convert_to_content_with_markdown(result: Any):
+    markdown = _payload_markdown(result)
+    if markdown:
+        return [TextContent(type="text", text=markdown)]
+    return _ORIGINAL_FASTMCP_CONVERT_TO_CONTENT(result)
+
+
+setattr(
+    _convert_to_content_with_markdown,
+    "_ncs_mcp_original_converter",
+    _ORIGINAL_FASTMCP_CONVERT_TO_CONTENT,
+)
+fastmcp_func_metadata._convert_to_content = _convert_to_content_with_markdown
 
 _RECOMMENDATION_LIMITER_LOCK = threading.Lock()
 _RECOMMENDATION_LIMITERS: dict[int, threading.BoundedSemaphore] = {}
@@ -566,6 +620,526 @@ def exact_filter(clauses: list[str], params: list[Any], column: str, value: str 
         params.append(value)
 
 
+def _clean_markdown_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", "" if value is None else str(value)).strip()
+
+
+def _markdown_cell(value: Any) -> str:
+    text = _clean_markdown_text(value)
+    if not text:
+        return "-"
+    return text.replace("|", "\\|")
+
+
+def _short_markdown_text(value: Any, *, max_chars: int = 40) -> str:
+    text = _clean_markdown_text(value)
+    if len(text) <= max_chars:
+        return text
+    return f"{text[: max_chars - 1]}…"
+
+
+def _markdown_table(headers: list[str], rows: list[list[Any]]) -> str:
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join("---" for _ in headers) + " |",
+    ]
+    for row in rows:
+        lines.append("| " + " | ".join(_markdown_cell(cell) for cell in row) + " |")
+    return "\n".join(lines)
+
+
+def _returned_total_line(total_count: int | None, returned_count: int | None = None) -> str | None:
+    if total_count is None and returned_count is None:
+        return None
+    if total_count is None:
+        total_count = returned_count
+    if returned_count is None:
+        returned_count = total_count
+    return f"{int(total_count)}건 중 {int(returned_count)}건 표시"
+
+
+def _append_markdown_footer(lines: list[str], audit: dict[str, Any] | None) -> str:
+    generated_at = audit.get("generated_at") if isinstance(audit, dict) else None
+    lines.append("")
+    if generated_at:
+        lines.append(f"audit.generated_at: `{generated_at}`")
+    lines.append(PUBLIC_SOURCE_FOOTER)
+    return "\n".join(line for line in lines if line is not None)
+
+
+_PUBLIC_MARKDOWN_RENDERERS: dict[
+    str,
+    Callable[[dict[str, Any]], str | None],
+] = {}
+
+
+def _classification_path_text(path: dict[str, Any] | None) -> str:
+    if not isinstance(path, dict):
+        return "-"
+    values = [
+        path.get("major"),
+        path.get("middle"),
+        path.get("small"),
+        path.get("sub"),
+    ]
+    parts = [
+        _clean_markdown_text(value)
+        for value in values
+        if _clean_markdown_text(value)
+    ]
+    return " > ".join(parts) or "-"
+
+
+def _render_ncs_search_markdown(result: dict[str, Any]) -> str | None:
+    rows = result.get("results")
+    query = _clean_markdown_text(result.get("query")) or "(분류 목록)"
+    classifications = result.get("classifications")
+    if isinstance(classifications, list) and classifications:
+        visible = classifications[:5]
+        lines = [
+            "## NCS 분류 목록",
+            _returned_total_line(len(classifications), len(visible)) or "",
+            "",
+        ]
+        lines.append(
+            _markdown_table(
+                ["분류ID", "분류경로", "능력단위 수"],
+                [
+                    [
+                        row.get("classification_id"),
+                        _classification_path_text(row),
+                        row.get("unit_count"),
+                    ]
+                    for row in visible
+                ],
+            )
+        )
+        return _append_markdown_footer(lines, result.get("audit"))
+    if not isinstance(rows, list) or not rows:
+        return None
+    visible = rows[:5]
+    table_rows: list[list[Any]] = []
+    other_rows: list[list[Any]] = []
+    for row in visible:
+        if row.get("type") != "unit":
+            path = row.get("path") if isinstance(row.get("path"), dict) else {}
+            other_rows.append(
+                [
+                    row.get("type"),
+                    _short_markdown_text(row.get("text"), max_chars=42),
+                    path.get("unit_code"),
+                    path.get("element_id"),
+                    row.get("id"),
+                ]
+            )
+        else:
+            table_rows.append(
+                [
+                    row.get("text"),
+                    row.get("unit_level"),
+                    _classification_path_text(row.get("path")),
+                    row.get("id"),
+                ]
+            )
+    lines = [f"## NCS 검색 결과: {query}"]
+    count_line = _returned_total_line(len(rows), len(visible))
+    if count_line:
+        lines.append(count_line)
+    lines.append("")
+    if table_rows:
+        lines.append(
+            _markdown_table(
+                ["능력단위명", "수준", "분류경로", "능력단위코드"],
+                table_rows,
+            )
+        )
+    if other_rows:
+        if table_rows:
+            lines.extend(["", "### 기타 근거", ""])
+        lines.append(
+            _markdown_table(
+                ["유형", "내용", "능력단위코드", "요소ID", "식별자"],
+                other_rows,
+            )
+        )
+    return _append_markdown_footer(lines, result.get("audit"))
+
+
+_PUBLIC_MARKDOWN_RENDERERS["ncs_search"] = _render_ncs_search_markdown
+
+
+def _render_ncs_unit_detail_markdown(result: dict[str, Any]) -> str | None:
+    unit = result.get("unit")
+    elements = result.get("elements")
+    if not isinstance(unit, dict) or not isinstance(elements, list):
+        return None
+    visible_elements = elements[:8]
+    detail_meta = result.get("detail_meta")
+    detail_counts = (
+        detail_meta.get("counts", {})
+        if isinstance(detail_meta, dict)
+        else {}
+    )
+
+    def total_count(key: str, fallback: int) -> int:
+        count_meta = detail_counts.get(key)
+        if isinstance(count_meta, dict) and count_meta.get("total_count") is not None:
+            return int(count_meta["total_count"])
+        return fallback
+
+    lines = [
+        f"## 능력단위 상세: {_short_markdown_text(unit.get('unit_name'), max_chars=64)}"
+    ]
+    lines.append("")
+    lines.append(
+        _markdown_table(
+            ["능력단위코드", "수준", "분류경로"],
+            [
+                [
+                    unit.get("unit_code"),
+                    unit.get("unit_level"),
+                    _classification_path_text(unit.get("classification")),
+                ]
+            ],
+        )
+    )
+    lines.append("")
+    lines.append("### 능력단위요소")
+    lines.append(
+        _returned_total_line(
+            total_count("elements", len(elements)),
+            len(visible_elements),
+        )
+        or ""
+    )
+    lines.append("")
+    element_rows: list[list[Any]] = []
+    for element in visible_elements:
+        criteria = element.get("performance_criteria") or []
+        ksa = element.get("ksa") or []
+        element_rows.append(
+            [
+                element.get("element_id"),
+                element.get("element_name"),
+                element.get("element_level"),
+                len(criteria),
+                len(ksa),
+            ]
+        )
+    lines.append(
+        _markdown_table(
+            ["요소ID", "요소명", "수준", "수행준거 수", "KSA 수"],
+            element_rows,
+        )
+    )
+    lines.append("")
+    lines.append("### 요소별 수행준거")
+    criteria_rows: list[list[Any]] = []
+    for element in visible_elements:
+        for criterion in (element.get("performance_criteria") or [])[:1]:
+            criteria_rows.append(
+                [
+                    element.get("element_id"),
+                    criterion.get("criteria_id"),
+                    _short_markdown_text(criterion.get("text"), max_chars=46),
+                ]
+            )
+    criteria_total = total_count(
+        "performance_criteria",
+        sum(len(element.get("performance_criteria") or []) for element in elements),
+    )
+    lines.append(_returned_total_line(criteria_total, len(criteria_rows)) or "")
+    lines.append("")
+    lines.append(
+        _markdown_table(
+            ["요소ID", "수행준거ID", "수행준거"],
+            criteria_rows,
+        )
+    )
+    lines.append("")
+    lines.append("### KSA 구분")
+    ksa_rows: list[list[Any]] = []
+    for element in visible_elements:
+        for item in element.get("ksa") or []:
+            if len(ksa_rows) >= 8:
+                break
+            ksa_rows.append(
+                [
+                    element.get("element_id"),
+                    item.get("ksa_type"),
+                    item.get("ksa_id"),
+                    _short_markdown_text(item.get("text"), max_chars=40),
+                ]
+            )
+        if len(ksa_rows) >= 8:
+            break
+    ksa_total = total_count(
+        "ksa",
+        sum(len(element.get("ksa") or []) for element in elements),
+    )
+    lines.append(_returned_total_line(ksa_total, len(ksa_rows)) or "")
+    lines.append("")
+    lines.append(
+        _markdown_table(
+            ["요소ID", "KSA 유형", "KSA ID", "내용"],
+            ksa_rows,
+        )
+    )
+    return _append_markdown_footer(lines, result.get("audit"))
+
+
+_PUBLIC_MARKDOWN_RENDERERS["ncs_unit_detail"] = _render_ncs_unit_detail_markdown
+
+
+def _training_course_row(item: dict[str, Any]) -> dict[str, Any]:
+    course = item.get("training_course")
+    if isinstance(course, dict):
+        return course
+    return item
+
+
+def _render_ncs_training_markdown(result: dict[str, Any]) -> str | None:
+    training_courses = result.get("training_courses")
+    if isinstance(training_courses, list):
+        lines = ["## NCS 훈련과정"]
+        count_line = _returned_total_line(len(training_courses), min(len(training_courses), 3))
+        if count_line:
+            lines.append(count_line)
+        lines.append("")
+        rows = []
+        for item in training_courses[:3]:
+            course = _training_course_row(item)
+            rows.append(
+                [
+                    course.get("training_course_id"),
+                    _short_markdown_text(course.get("compe_unit_name"), max_chars=42),
+                    course.get("train_time"),
+                    _short_markdown_text(course.get("meth_name"), max_chars=32),
+                ]
+            )
+        lines.append(
+            _markdown_table(
+                ["과정ID", "과정명", "훈련시간", "훈련방법"],
+                rows,
+            )
+        )
+        return _append_markdown_footer(lines, result.get("audit"))
+    course = result.get("training_course")
+    if not isinstance(course, dict):
+        return None
+    lines = [
+        f"## 훈련과정 상세: {_short_markdown_text(course.get('compe_unit_name'), max_chars=60)}",
+        "",
+    ]
+    lines.append(
+        _markdown_table(
+            ["과정ID", "과정명", "훈련시간", "훈련방법"],
+            [[
+                course.get("training_course_id"),
+                course.get("compe_unit_name"),
+                course.get("train_time"),
+                course.get("meth_name"),
+            ]],
+        )
+    )
+    link_meta = result.get("link_meta")
+    if isinstance(link_meta, dict):
+        lines.extend(["", "### 연결 요약", ""])
+        for key in (
+            "unit_links",
+            "concept_links",
+            "element_links",
+            "goal_concept_links",
+            "delivery_relations",
+        ):
+            meta = link_meta.get(key)
+            if not isinstance(meta, dict):
+                continue
+            count_line = _returned_total_line(
+                meta.get("total_count"),
+                meta.get("returned_count"),
+            )
+            if count_line:
+                lines.append(f"- `{key}`: {count_line}")
+    evidence_rows: list[list[Any]] = []
+    evidence_specs = (
+        ("unit_links", "능력단위"),
+        ("element_links", "능력단위요소"),
+        ("concept_links", "온톨로지 개념"),
+        ("goal_concept_links", "훈련목표 개념"),
+    )
+    for key, label in evidence_specs:
+        rows = result.get(key)
+        if not isinstance(rows, list) or not rows:
+            continue
+        row = rows[0]
+        evidence_rows.append(
+            [
+                label,
+                row.get("unit_code"),
+                row.get("element_id"),
+                row.get("concept_id"),
+                _short_markdown_text(
+                    row.get("element_name")
+                    or row.get("concept_name")
+                    or row.get("link_method"),
+                    max_chars=34,
+                ),
+            ]
+        )
+    if evidence_rows:
+        lines.extend(["", "### 연결 식별자", ""])
+        lines.append(
+            _markdown_table(
+                ["연결", "능력단위코드", "요소ID", "개념ID", "근거"],
+                evidence_rows,
+            )
+        )
+    return _append_markdown_footer(lines, result.get("audit"))
+
+
+_PUBLIC_MARKDOWN_RENDERERS["ncs_training"] = _render_ncs_training_markdown
+
+
+def _render_ncs_analysis_markdown(result: dict[str, Any]) -> str | None:
+    if isinstance(result.get("career_paths"), list):
+        rows = result["career_paths"]
+        lines = ["## 경력개발경로 분석"]
+        count_line = _returned_total_line(len(rows), min(len(rows), 5))
+        if count_line:
+            lines.append(count_line)
+        lines.extend(
+            [
+                "",
+                _markdown_table(
+                    ["경로ID", "직무명", "능력명", "직위", "능력단위코드"],
+                    [
+                        [
+                            row.get("career_path_id"),
+                            _short_markdown_text(row.get("job_name"), max_chars=28),
+                            _short_markdown_text(row.get("competency_name"), max_chars=30),
+                            _short_markdown_text(row.get("position_name"), max_chars=24),
+                            row.get("matched_unit_code"),
+                        ]
+                        for row in rows[:5]
+                    ],
+                ),
+            ]
+        )
+        return _append_markdown_footer(lines, result.get("audit"))
+    if isinstance(result.get("qualification_links"), list):
+        rows = result["qualification_links"]
+        lines = ["## 자격 연계 분석"]
+        count_line = _returned_total_line(len(rows), min(len(rows), 5))
+        if count_line:
+            lines.append(count_line)
+        lines.extend(
+            [
+                "",
+                _markdown_table(
+                    ["자격코드", "자격명", "능력단위코드", "최소시간"],
+                    [
+                        [
+                            row.get("jm_cd"),
+                            _short_markdown_text(row.get("jm_nm"), max_chars=32),
+                            row.get("unit_code"),
+                            row.get("min_edu_trng_tm"),
+                        ]
+                        for row in rows[:5]
+                    ],
+                ),
+            ]
+        )
+        return _append_markdown_footer(lines, result.get("audit"))
+    if isinstance(result.get("job_base_links"), list):
+        rows = result["job_base_links"]
+        summary = result.get("summary")
+        lines = ["## 직업기초능력 분석"]
+        if isinstance(summary, dict):
+            count_line = _returned_total_line(summary.get("total_count"), summary.get("returned_count"))
+            if count_line:
+                lines.append(count_line)
+        lines.extend(
+            [
+                "",
+                _markdown_table(
+                    ["능력단위코드", "직업기초능력", "하위요소", "신뢰도"],
+                    [
+                        [
+                            row.get("unit_code"),
+                            _short_markdown_text(row.get("competency_name"), max_chars=30),
+                            _short_markdown_text(row.get("factor_name"), max_chars=30),
+                            row.get("confidence_score"),
+                        ]
+                        for row in rows[:3]
+                    ],
+                ),
+            ]
+        )
+        query_resolution = result.get("query_resolution")
+        if isinstance(query_resolution, dict):
+            lines.extend(
+                [
+                    "",
+                    f"질의 보정: `{query_resolution.get('input_query')}` -> `{query_resolution.get('resolved_unit_code')}`",
+                ]
+            )
+        return _append_markdown_footer(lines, result.get("audit"))
+    if isinstance(result.get("concepts"), list):
+        rows = result["concepts"]
+        lines = ["## 온톨로지 분석"]
+        count_line = _returned_total_line(len(rows), min(len(rows), 5))
+        if count_line:
+            lines.append(count_line)
+        lines.extend(
+            [
+                "",
+                _markdown_table(
+                    ["개념ID", "개념명", "유형", "관계 수", "수행준거 링크 수"],
+                    [
+                        [
+                            row.get("concept_id"),
+                            _short_markdown_text(row.get("concept_name"), max_chars=36),
+                            row.get("concept_type"),
+                            row.get("relation_count"),
+                            row.get("criteria_link_count"),
+                        ]
+                        for row in rows[:5]
+                    ],
+                ),
+            ]
+        )
+        return _append_markdown_footer(lines, result.get("audit"))
+    return None
+
+
+_PUBLIC_MARKDOWN_RENDERERS["ncs_analysis"] = _render_ncs_analysis_markdown
+
+
+def _render_tool_response_markdown(
+    result: dict[str, Any],
+    *,
+    renderer: str | None = None,
+) -> str | None:
+    existing = _content_text_from_payload(result)
+    if existing:
+        return _append_markdown_footer([existing], result.get("audit"))
+    if result.get("ok") is False:
+        error = result.get("error")
+        if isinstance(error, dict):
+            lines = [f"오류 코드: `{error.get('code')}`"]
+            if error.get("message"):
+                lines.append(_clean_markdown_text(error.get("message")))
+            return _append_markdown_footer(lines, result.get("audit"))
+        return None
+    render_func = _PUBLIC_MARKDOWN_RENDERERS.get(renderer or "")
+    if render_func is not None:
+        rendered = render_func(result)
+        if rendered:
+            return rendered
+    return None
+
+
 def tool_response(
     payload: dict[str, Any],
     *,
@@ -573,6 +1147,7 @@ def tool_response(
     audit: dict[str, Any] | None = None,
     ok: bool | None = None,
     include_data_alias: bool = True,
+    renderer: str | None = None,
 ) -> dict[str, Any]:
     """Add the v1 MCP ok/data/error/audit envelope without removing legacy keys."""
     result = dict(payload)
@@ -606,7 +1181,10 @@ def tool_response(
             "generated_at": now_utc(),
         },
     )
-    return result
+    return RenderedToolPayload(
+        result,
+        markdown=_render_tool_response_markdown(result, renderer=renderer),
+    )
 
 
 def _missing_aihr_plan_query_route_fields(route: Any) -> list[str]:
@@ -688,12 +1266,24 @@ def guard_public_tool(func):
     @wraps(func)
     def guarded(*args, **kwargs):
         try:
-            return func(*args, **kwargs)
+            response = func(*args, **kwargs)
+            if isinstance(response, dict):
+                return tool_response(
+                    response,
+                    include_data_alias="data" in response,
+                    renderer=func.__name__,
+                )
+            return response
         except Exception:
-            return error_response(
+            response = error_response(
                 "tool_execution_failed",
                 tool_name=func.__name__,
                 message="The tool failed while reading its configured NCS data.",
+            )
+            return tool_response(
+                response,
+                include_data_alias="data" in response,
+                renderer=func.__name__,
             )
 
     return guarded
@@ -1791,6 +2381,7 @@ def search_ncs(query: str, scope: str = "all", limit: int = 50) -> dict[str, Any
             rows = conn.execute(
                 """
                 SELECT cu.unit_code, cu.unit_name_raw, cu.api_definition,
+                       cu.unit_level_raw,
                        c.major_code, c.major_name,
                        c.middle_code, c.middle_name,
                        c.small_code, c.small_name,
@@ -1841,6 +2432,7 @@ def search_ncs(query: str, scope: str = "all", limit: int = 50) -> dict[str, Any
                         "type": "unit",
                         "id": row["unit_code"],
                         "text": row["unit_name_raw"],
+                        "unit_level": row["unit_level_raw"],
                         "path": unit_path(row),
                         "api_definition": row["api_definition"],
                     }
