@@ -13,10 +13,16 @@ from scripts import verify_remote_mcp_transport as verifier
 
 ROOT = Path(__file__).resolve().parents[1]
 SMOKE_UNIT_CODE = "0202020101_23v3"
+SMOKE_QUALIFICATION_UNIT_CODE = "1501020111_16v3"
 
 
 def _markdown_tool_text(name: str, arguments: dict[str, Any]) -> str:
     if name == "ncs_search":
+        unit_code = (
+            SMOKE_QUALIFICATION_UNIT_CODE
+            if arguments.get("query") == SMOKE_QUALIFICATION_UNIT_CODE
+            else SMOKE_UNIT_CODE
+        )
         body = "\n".join(
             [
                 "## NCS 검색 결과: 인사기획",
@@ -24,7 +30,7 @@ def _markdown_tool_text(name: str, arguments: dict[str, Any]) -> str:
                 "",
                 "| 능력단위명 | 수준 | 분류경로 | 능력단위코드 |",
                 "| --- | --- | --- | --- |",
-                f"| 인사기획 | 6 | 경영·회계·사무 > 인사·조직 | `{SMOKE_UNIT_CODE}` |",
+                f"| 인사기획 | 6 | 경영·회계·사무 > 인사·조직 | `{unit_code}` |",
             ]
         )
     elif name == "ncs_unit_detail":
@@ -56,7 +62,7 @@ def _markdown_tool_text(name: str, arguments: dict[str, Any]) -> str:
                 "",
                 "| 자격코드 | 자격명 | 능력단위코드 | 최소시간 |",
                 "| --- | --- | --- | --- |",
-                f"| jm-1 | 인사 자격 | `{SMOKE_UNIT_CODE}` | 40 |",
+                f"| jm-1 | 인사 자격 | `{arguments.get('unit_code') or SMOKE_QUALIFICATION_UNIT_CODE}` | 40 |",
             ]
         )
     elif name == "ncs_analysis":
@@ -139,10 +145,22 @@ def _successful_request_factory(
                 tool_calls.append((name, arguments))
             tool_payload: dict[str, Any] = {"ok": True, "tool": name}
             if name == "ncs_search":
-                tool_payload["results"] = [{"type": "unit", "id": SMOKE_UNIT_CODE}]
+                unit_code = (
+                    SMOKE_QUALIFICATION_UNIT_CODE
+                    if arguments.get("query")
+                    == SMOKE_QUALIFICATION_UNIT_CODE
+                    else SMOKE_UNIT_CODE
+                )
+                tool_payload["results"] = [{"type": "unit", "id": unit_code}]
             if name == "ncs_analysis" and arguments.get("mode") == "qualification":
                 tool_payload["qualification_links"] = [
-                    {"unit_code": SMOKE_UNIT_CODE, "qualification_name": "sample"}
+                    {
+                        "unit_code": (
+                            arguments.get("unit_code")
+                            or SMOKE_QUALIFICATION_UNIT_CODE
+                        ),
+                        "qualification_name": "sample",
+                    }
                 ]
             text = (
                 _markdown_tool_text(name, arguments)
@@ -244,12 +262,44 @@ class RemoteMcpTransportVerifierTests(unittest.TestCase):
                 {"mode": mode, "query": verifier.SMOKE_UNIT_QUERY, "limit": 1},
                 analysis_arguments,
             )
-        self.assertEqual(report["tool_smoke"]["tools_call_count"], 10)
+        self.assertEqual(report["tool_smoke"]["tools_call_count"], 12)
         self.assertTrue(report["tool_smoke"]["smoke_unit_discovered"])
+        self.assertTrue(
+            report["tool_smoke"]["qualification_summary_unit_discovered"]
+        )
+        self.assertTrue(
+            report["tool_smoke"]["qualification_search_chained_from_summary"]
+        )
+        self.assertTrue(report["tool_smoke"]["qualification_unit_discovered"])
+        self.assertTrue(
+            report["tool_smoke"]["qualification_unit_chained_from_search"]
+        )
+        self.assertFalse(
+            report["tool_smoke"]["qualification_unit_code_value_logged"]
+        )
         unit_detail_arguments = next(
             arguments for name, arguments in tool_calls if name == "ncs_unit_detail"
         )
         self.assertEqual(unit_detail_arguments["unit_code"], SMOKE_UNIT_CODE)
+        qualification_arguments = next(
+            arguments
+            for name, arguments in tool_calls
+            if name == "ncs_analysis"
+            and arguments.get("mode") == "qualification"
+            and arguments.get("unit_code")
+        )
+        self.assertEqual(
+            qualification_arguments,
+            {
+                "mode": "qualification",
+                "unit_code": SMOKE_QUALIFICATION_UNIT_CODE,
+                "limit": 1,
+            },
+        )
+        qualification_check = report["checks"]["tools_call_analysis_qualification"]
+        self.assertTrue(qualification_check["unit_code_argument_present"])
+        self.assertTrue(qualification_check["unit_code_matches_search_result"])
+        self.assertFalse(qualification_check["unit_code_value_logged"])
         self.assertEqual(
             report["checks"]["tools_call_search"]["response_format"],
             "markdown",
@@ -263,6 +313,81 @@ class RemoteMcpTransportVerifierTests(unittest.TestCase):
         self.assertNotIn('\"payload\"', rendered)
         self.assertNotIn('\"_payload\"', rendered)
         self.assertNotIn("Mcp-Session-Id", rendered)
+        self.assertNotIn(SMOKE_QUALIFICATION_UNIT_CODE, rendered)
+
+    def test_broad_qualification_success_cannot_mask_unit_lookup_failure(self) -> None:
+        fake_request, _observed_protocols, tool_calls = _successful_request_factory(
+            selected_protocol=verifier.PROTOCOL_VERSION
+        )
+
+        def unit_lookup_fails(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            response = fake_request(*args, **kwargs)
+            body = kwargs.get("body")
+            if not body or body == b"{not-json":
+                return response
+            payload = json.loads(body)
+            params = payload.get("params") or {}
+            arguments = params.get("arguments") or {}
+            if (
+                payload.get("method") == "tools/call"
+                and params.get("name") == "ncs_analysis"
+                and arguments.get("mode") == "qualification"
+                and arguments.get("unit_code")
+            ):
+                return {
+                    "status": 200,
+                    "duration_seconds": 0.01,
+                    "payload": {
+                        "result": {
+                            "isError": False,
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "\n".join(
+                                        [
+                                            "[NOT_FOUND] qualification 분석 결과가 없습니다.",
+                                            "LLM은 추측 또는 생성을 하지 마세요.",
+                                            "",
+                                            verifier.PUBLIC_SOURCE_FOOTER,
+                                        ]
+                                    ),
+                                }
+                            ],
+                        }
+                    },
+                }
+            return response
+
+        with patch.object(verifier, "_request", side_effect=unit_lookup_fails):
+            report = verifier.verify("https://example.test/api/mcp", concurrency=1)
+
+        qualification_calls = [
+            arguments
+            for name, arguments in tool_calls
+            if name == "ncs_analysis" and arguments.get("mode") == "qualification"
+        ]
+        self.assertEqual(len(qualification_calls), 2)
+        self.assertNotIn("unit_code", qualification_calls[0])
+        self.assertEqual(
+            qualification_calls[1].get("unit_code"),
+            SMOKE_QUALIFICATION_UNIT_CODE,
+        )
+        self.assertFalse(report["ok"])
+        self.assertIn(
+            "tools_call_analysis_qualification_semantic", report["failures"]
+        )
+        self.assertIn(
+            "tools_call_analysis_qualification_empty", report["failures"]
+        )
+        self.assertTrue(
+            report["checks"]["tools_call_analysis_qualification"][
+                "unit_code_matches_search_result"
+            ]
+        )
+        self.assertNotIn(
+            SMOKE_QUALIFICATION_UNIT_CODE,
+            json.dumps(report, ensure_ascii=False),
+        )
 
     def test_raw_python_exception_in_tool_result_fails_release_gate(self) -> None:
         fake_request, _observed_protocols, _tool_calls = _successful_request_factory(

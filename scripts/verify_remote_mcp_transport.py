@@ -49,6 +49,12 @@ NOT_FOUND_MARKER = "[NOT_FOUND]"
 MARKDOWN_ERROR_PREFIX = "오류 코드:"
 SMOKE_UNIT_QUERY = "인사기획"
 SMOKE_UNIT_CODE_PLACEHOLDER = "__DISCOVERED_SMOKE_UNIT_CODE__"
+SMOKE_QUALIFICATION_SEARCH_QUERY_PLACEHOLDER = (
+    "__DISCOVERED_QUALIFICATION_SUMMARY_UNIT_CODE__"
+)
+SMOKE_QUALIFICATION_UNIT_CODE_PLACEHOLDER = (
+    "__DISCOVERED_SMOKE_QUALIFICATION_UNIT_CODE__"
+)
 TOOL_SMOKE_CALLS: tuple[tuple[str, str, dict[str, Any]], ...] = (
     (
         "discover",
@@ -84,9 +90,27 @@ TOOL_SMOKE_CALLS: tuple[tuple[str, str, dict[str, Any]], ...] = (
         {"mode": "career_path", "query": SMOKE_UNIT_QUERY, "limit": 1},
     ),
     (
-        "analysis_qualification",
+        "analysis_qualification_summary",
         "ncs_analysis",
         {"mode": "qualification", "limit": 1},
+    ),
+    (
+        "qualification_unit_search",
+        "ncs_search",
+        {
+            "query": SMOKE_QUALIFICATION_SEARCH_QUERY_PLACEHOLDER,
+            "scope": "unit",
+            "limit": 1,
+        },
+    ),
+    (
+        "analysis_qualification",
+        "ncs_analysis",
+        {
+            "mode": "qualification",
+            "unit_code": SMOKE_QUALIFICATION_UNIT_CODE_PLACEHOLDER,
+            "limit": 1,
+        },
     ),
     (
         "analysis_job_base",
@@ -110,6 +134,7 @@ TOOL_SMOKE_CALLS: tuple[tuple[str, str, dict[str, Any]], ...] = (
     ),
 )
 TOOL_SMOKE_REQUIRED_NONEMPTY_FIELDS = {
+    "analysis_qualification_summary": "qualification_links",
     "analysis_qualification": "qualification_links",
 }
 
@@ -343,6 +368,23 @@ def _first_unit_code_from_response(rpc_payload: Any) -> str | None:
     return None
 
 
+def _first_qualification_unit_code_from_response(rpc_payload: Any) -> str | None:
+    tool_payload = _tool_content_payload(rpc_payload)
+    if isinstance(tool_payload, dict):
+        rows = tool_payload.get("qualification_links")
+        data = tool_payload.get("data")
+        if not isinstance(rows, list) and isinstance(data, dict):
+            rows = data.get("qualification_links")
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict) or not row.get("unit_code"):
+                    continue
+                unit_code = _clean_markdown_identifier(str(row["unit_code"]))
+                if unit_code:
+                    return unit_code
+    return _first_unit_code_from_response(rpc_payload)
+
+
 def _markdown_qualification_data_present(text: str | None) -> bool:
     if not text or "## 자격 연계 분석" not in text:
         return False
@@ -373,10 +415,16 @@ def _resolve_smoke_arguments(
     arguments: dict[str, Any],
     *,
     discovered_unit_code: str | None,
+    qualification_summary_unit_code: str | None,
+    discovered_qualification_unit_code: str | None,
 ) -> dict[str, Any]:
     resolved = dict(arguments)
     if resolved.get("unit_code") == SMOKE_UNIT_CODE_PLACEHOLDER:
         resolved["unit_code"] = discovered_unit_code or ""
+    if resolved.get("query") == SMOKE_QUALIFICATION_SEARCH_QUERY_PLACEHOLDER:
+        resolved["query"] = qualification_summary_unit_code or ""
+    if resolved.get("unit_code") == SMOKE_QUALIFICATION_UNIT_CODE_PLACEHOLDER:
+        resolved["unit_code"] = discovered_qualification_unit_code or ""
     return resolved
 
 
@@ -625,6 +673,10 @@ def verify(
     }
 
     discovered_unit_code: str | None = None
+    qualification_summary_unit_code: str | None = None
+    discovered_qualification_unit_code: str | None = None
+    qualification_search_chained_from_summary = False
+    qualification_unit_chained_from_search = False
     for request_id, (check_name, tool_name, arguments) in enumerate(
         TOOL_SMOKE_CALLS,
         start=10,
@@ -632,6 +684,8 @@ def verify(
         resolved_arguments = _resolve_smoke_arguments(
             arguments,
             discovered_unit_code=discovered_unit_code,
+            qualification_summary_unit_code=qualification_summary_unit_code,
+            discovered_qualification_unit_code=discovered_qualification_unit_code,
         )
         response = _tool_call(
             url,
@@ -645,7 +699,28 @@ def verify(
             discovered_unit_code = _first_unit_code_from_response(
                 _response_payload(response)
             )
-        checks[f"tools_call_{check_name}"] = {
+        elif check_name == "analysis_qualification_summary":
+            qualification_summary_unit_code = (
+                _first_qualification_unit_code_from_response(
+                    _response_payload(response)
+                )
+            )
+        elif check_name == "qualification_unit_search":
+            qualification_search_chained_from_summary = bool(
+                qualification_summary_unit_code
+                and resolved_arguments.get("query")
+                == qualification_summary_unit_code
+            )
+            discovered_qualification_unit_code = _first_unit_code_from_response(
+                _response_payload(response)
+            )
+        elif check_name == "analysis_qualification":
+            qualification_unit_chained_from_search = bool(
+                discovered_qualification_unit_code
+                and resolved_arguments.get("unit_code")
+                == discovered_qualification_unit_code
+            )
+        check = {
             "tool_name": tool_name,
             **_tool_call_assessment(
                 response,
@@ -660,6 +735,20 @@ def verify(
                 ),
             ),
         }
+        if check_name == "analysis_qualification":
+            check.update(
+                {
+                    "unit_code_argument_present": bool(
+                        resolved_arguments.get("unit_code")
+                    ),
+                    "unit_code_source": "tools_call_qualification_unit_search",
+                    "unit_code_matches_search_result": (
+                        qualification_unit_chained_from_search
+                    ),
+                    "unit_code_value_logged": False,
+                }
+            )
+        checks[f"tools_call_{check_name}"] = check
 
     checks["unsupported_protocol"] = _safe_response(_request(
         url,
@@ -723,6 +812,14 @@ def verify(
         failures.append("tools_list_raw_exception")
     if discovered_unit_code is None:
         failures.append("smoke_unit_discovery")
+    if qualification_summary_unit_code is None:
+        failures.append("qualification_summary_unit_discovery")
+    if not qualification_search_chained_from_summary:
+        failures.append("qualification_summary_to_search_chaining")
+    if discovered_qualification_unit_code is None:
+        failures.append("qualification_smoke_unit_discovery")
+    if not qualification_unit_chained_from_search:
+        failures.append("qualification_smoke_unit_chaining")
     for check_name, _tool_name, _arguments in TOOL_SMOKE_CALLS:
         item = checks[f"tools_call_{check_name}"]
         failure_prefix = f"tools_call_{check_name}"
@@ -766,6 +863,22 @@ def verify(
         "tools_call_count": len(TOOL_SMOKE_CALLS),
         "analysis_modes_checked": ["career_path", "qualification", "job_base", "ontology"],
         "smoke_unit_discovered": discovered_unit_code is not None,
+        "qualification_unit_search_strategy": (
+            "broad_qualification_to_exact_unit_code_search"
+        ),
+        "qualification_summary_unit_discovered": (
+            qualification_summary_unit_code is not None
+        ),
+        "qualification_search_chained_from_summary": (
+            qualification_search_chained_from_summary
+        ),
+        "qualification_unit_discovered": (
+            discovered_qualification_unit_code is not None
+        ),
+        "qualification_unit_chained_from_search": (
+            qualification_unit_chained_from_search
+        ),
+        "qualification_unit_code_value_logged": False,
         "all_response_bodies_redacted": True,
         "session_id_values_logged": False,
     }
