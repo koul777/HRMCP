@@ -12,11 +12,65 @@ from scripts import verify_remote_mcp_transport as verifier
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SMOKE_UNIT_CODE = "0202020101_23v3"
+
+
+def _markdown_tool_text(name: str, arguments: dict[str, Any]) -> str:
+    if name == "ncs_search":
+        body = "\n".join(
+            [
+                "## NCS 검색 결과: 인사기획",
+                "1건 중 1건 표시",
+                "",
+                "| 능력단위명 | 수준 | 분류경로 | 능력단위코드 |",
+                "| --- | --- | --- | --- |",
+                f"| 인사기획 | 6 | 경영·회계·사무 > 인사·조직 | `{SMOKE_UNIT_CODE}` |",
+            ]
+        )
+    elif name == "ncs_unit_detail":
+        body = "\n".join(
+            [
+                "## 능력단위 상세: 인사기획",
+                "",
+                "| 능력단위코드 | 수준 | 분류경로 |",
+                "| --- | --- | --- |",
+                f"| `{arguments.get('unit_code')}` | 6 | 경영·회계·사무 > 인사·조직 |",
+            ]
+        )
+    elif name == "ncs_training":
+        body = "\n".join(
+            [
+                "## NCS 훈련과정",
+                "1건 중 1건 표시",
+                "",
+                "| 과정ID | 과정명 | 훈련시간 | 훈련방법 |",
+                "| --- | --- | --- | --- |",
+                "| course-1 | 인사기획 | 40 | 집체교육 |",
+            ]
+        )
+    elif name == "ncs_analysis" and arguments.get("mode") == "qualification":
+        body = "\n".join(
+            [
+                "## 자격 연계 분석",
+                "1건 중 1건 표시",
+                "",
+                "| 자격코드 | 자격명 | 능력단위코드 | 최소시간 |",
+                "| --- | --- | --- | --- |",
+                f"| jm-1 | 인사 자격 | `{SMOKE_UNIT_CODE}` | 40 |",
+            ]
+        )
+    elif name == "ncs_analysis":
+        mode = str(arguments.get("mode") or "analysis")
+        body = f"## NCS 분석: {mode}\n\n검증 데이터 1건"
+    else:
+        body = f"## {name}\n\n검증 데이터 1건"
+    return f"{body}\n\n{verifier.PUBLIC_SOURCE_FOOTER}"
 
 
 def _successful_request_factory(
     *,
     selected_protocol: str,
+    wire_format: str = "markdown",
 ) -> tuple[
     Callable[..., dict[str, Any]],
     list[str | None],
@@ -85,13 +139,16 @@ def _successful_request_factory(
                 tool_calls.append((name, arguments))
             tool_payload: dict[str, Any] = {"ok": True, "tool": name}
             if name == "ncs_search":
-                tool_payload["results"] = [
-                    {"type": "unit", "id": "dynamic-unit-code"}
-                ]
+                tool_payload["results"] = [{"type": "unit", "id": SMOKE_UNIT_CODE}]
             if name == "ncs_analysis" and arguments.get("mode") == "qualification":
                 tool_payload["qualification_links"] = [
-                    {"unit_code": "dynamic-unit-code", "qualification_name": "sample"}
+                    {"unit_code": SMOKE_UNIT_CODE, "qualification_name": "sample"}
                 ]
+            text = (
+                _markdown_tool_text(name, arguments)
+                if wire_format == "markdown"
+                else json.dumps(tool_payload)
+            )
             return {
                 "status": 200,
                 "duration_seconds": 0.01,
@@ -101,7 +158,7 @@ def _successful_request_factory(
                         "content": [
                             {
                                 "type": "text",
-                                "text": json.dumps(tool_payload),
+                                "text": text,
                             }
                         ],
                     }
@@ -192,7 +249,14 @@ class RemoteMcpTransportVerifierTests(unittest.TestCase):
         unit_detail_arguments = next(
             arguments for name, arguments in tool_calls if name == "ncs_unit_detail"
         )
-        self.assertEqual(unit_detail_arguments["unit_code"], "dynamic-unit-code")
+        self.assertEqual(unit_detail_arguments["unit_code"], SMOKE_UNIT_CODE)
+        self.assertEqual(
+            report["checks"]["tools_call_search"]["response_format"],
+            "markdown",
+        )
+        self.assertTrue(
+            report["checks"]["tools_call_search"]["source_footer_present"]
+        )
         self.assertTrue(report["tool_smoke"]["all_response_bodies_redacted"])
         self.assertFalse(report["tool_smoke"]["session_id_values_logged"])
         rendered = json.dumps(report, ensure_ascii=False)
@@ -249,6 +313,24 @@ class RemoteMcpTransportVerifierTests(unittest.TestCase):
         rendered = json.dumps(report, ensure_ascii=False)
         self.assertNotIn("qualification_status", rendered)
         self.assertNotIn("Error executing tool", rendered)
+
+    def test_legacy_json_text_responses_remain_supported(self) -> None:
+        fake_request, _observed_protocols, _tool_calls = _successful_request_factory(
+            selected_protocol=verifier.PROTOCOL_VERSION,
+            wire_format="json",
+        )
+
+        with patch.object(verifier, "_request", side_effect=fake_request):
+            report = verifier.verify("https://example.test/api/mcp", concurrency=1)
+
+        self.assertTrue(report["ok"], report)
+        self.assertEqual(
+            report["checks"]["tools_call_search"]["response_format"],
+            "json_text",
+        )
+        self.assertFalse(
+            report["checks"]["tools_call_search"]["source_footer_present"]
+        )
 
     def test_http_jsonrpc_and_semantic_failures_all_block_release(self) -> None:
         fake_request, _observed_protocols, _tool_calls = _successful_request_factory(
@@ -320,6 +402,11 @@ class RemoteMcpTransportVerifierTests(unittest.TestCase):
                 and params.get("name") == "ncs_analysis"
                 and arguments.get("mode") == "job_base"
             ):
+                text = (
+                    "## 직업기초능력 분석\n\n"
+                    + ("x" * 2_100)
+                    + f"\n\n{verifier.PUBLIC_SOURCE_FOOTER}"
+                )
                 return {
                     "status": 200,
                     "duration_seconds": 1.01,
@@ -329,9 +416,7 @@ class RemoteMcpTransportVerifierTests(unittest.TestCase):
                             "content": [
                                 {
                                     "type": "text",
-                                    "text": json.dumps(
-                                        {"ok": True, "padding": "x" * 2_100}
-                                    ),
+                                    "text": text,
                                 }
                             ],
                         }
@@ -366,7 +451,17 @@ class RemoteMcpTransportVerifierTests(unittest.TestCase):
                 and params.get("name") == "ncs_analysis"
                 and arguments.get("mode") == "qualification"
             ):
-                tool_payload = {"ok": True, "qualification_links": []}
+                text = "\n".join(
+                    [
+                        "## 자격 연계 분석",
+                        "0건 중 0건 표시",
+                        "",
+                        "| 자격코드 | 자격명 | 능력단위코드 | 최소시간 |",
+                        "| --- | --- | --- | --- |",
+                        "",
+                        verifier.PUBLIC_SOURCE_FOOTER,
+                    ]
+                )
                 return {
                     "status": 200,
                     "duration_seconds": 0.01,
@@ -374,7 +469,7 @@ class RemoteMcpTransportVerifierTests(unittest.TestCase):
                         "result": {
                             "isError": False,
                             "content": [
-                                {"type": "text", "text": json.dumps(tool_payload)}
+                                {"type": "text", "text": text}
                             ],
                         }
                     },
@@ -393,6 +488,154 @@ class RemoteMcpTransportVerifierTests(unittest.TestCase):
                 "expected_data_present"
             ]
         )
+
+    def test_structured_content_blocks_release_even_with_valid_markdown(self) -> None:
+        fake_request, _observed_protocols, _tool_calls = _successful_request_factory(
+            selected_protocol=verifier.PROTOCOL_VERSION
+        )
+
+        def duplicated_request(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            response = fake_request(*args, **kwargs)
+            body = kwargs.get("body")
+            if not body or body == b"{not-json":
+                return response
+            payload = json.loads(body)
+            params = payload.get("params") or {}
+            arguments = params.get("arguments") or {}
+            if (
+                payload.get("method") == "tools/call"
+                and params.get("name") == "ncs_analysis"
+                and arguments.get("mode") == "qualification"
+            ):
+                response["payload"]["result"]["structuredContent"] = {
+                    "ok": True,
+                    "qualification_links": [{"unit_code": SMOKE_UNIT_CODE}],
+                }
+            return response
+
+        with patch.object(verifier, "_request", side_effect=duplicated_request):
+            report = verifier.verify("https://example.test/api/mcp", concurrency=1)
+
+        self.assertFalse(report["ok"])
+        self.assertIn(
+            "tools_call_analysis_qualification_structured_content",
+            report["failures"],
+        )
+        self.assertTrue(
+            report["checks"]["tools_call_analysis_qualification"][
+                "structured_content_present"
+            ]
+        )
+
+    def test_meta_tool_structured_content_is_observed_without_blocking(self) -> None:
+        fake_request, _observed_protocols, _tool_calls = _successful_request_factory(
+            selected_protocol=verifier.PROTOCOL_VERSION
+        )
+
+        def meta_structured_request(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            response = fake_request(*args, **kwargs)
+            body = kwargs.get("body")
+            if not body or body == b"{not-json":
+                return response
+            payload = json.loads(body)
+            params = payload.get("params") or {}
+            if (
+                payload.get("method") == "tools/call"
+                and params.get("name") == "ncs_discover_tools"
+            ):
+                response["payload"]["result"]["structuredContent"] = {
+                    "ok": True,
+                    "tool": "ncs_discover_tools",
+                }
+                response["payload"]["result"]["content"][0]["text"] = (
+                    "meta tool output without a footer"
+                )
+            return response
+
+        with patch.object(verifier, "_request", side_effect=meta_structured_request):
+            report = verifier.verify("https://example.test/api/mcp", concurrency=1)
+
+        self.assertTrue(report["ok"], report)
+        check = report["checks"]["tools_call_discover"]
+        self.assertTrue(check["structured_content_present"])
+        self.assertFalse(check["structured_content_forbidden"])
+        self.assertFalse(check["markdown_footer_required"])
+        self.assertFalse(check["source_footer_present"])
+
+    def test_markdown_without_fixed_source_footer_fails_semantic_gate(self) -> None:
+        fake_request, _observed_protocols, _tool_calls = _successful_request_factory(
+            selected_protocol=verifier.PROTOCOL_VERSION
+        )
+
+        def footerless_request(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            response = fake_request(*args, **kwargs)
+            body = kwargs.get("body")
+            if not body or body == b"{not-json":
+                return response
+            payload = json.loads(body)
+            params = payload.get("params") or {}
+            arguments = params.get("arguments") or {}
+            if (
+                payload.get("method") == "tools/call"
+                and params.get("name") == "ncs_analysis"
+                and arguments.get("mode") == "career_path"
+            ):
+                response["payload"]["result"]["content"][0]["text"] = (
+                    "## 경력개발경로 분석\n\n검증 데이터 1건"
+                )
+            return response
+
+        with patch.object(verifier, "_request", side_effect=footerless_request):
+            report = verifier.verify("https://example.test/api/mcp", concurrency=1)
+
+        self.assertFalse(report["ok"])
+        self.assertIn(
+            "tools_call_analysis_career_path_semantic",
+            report["failures"],
+        )
+        self.assertFalse(
+            report["checks"]["tools_call_analysis_career_path"][
+                "source_footer_present"
+            ]
+        )
+
+    def test_not_found_markdown_fails_without_leaking_response_text(self) -> None:
+        fake_request, _observed_protocols, _tool_calls = _successful_request_factory(
+            selected_protocol=verifier.PROTOCOL_VERSION
+        )
+
+        def not_found_request(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            response = fake_request(*args, **kwargs)
+            body = kwargs.get("body")
+            if not body or body == b"{not-json":
+                return response
+            payload = json.loads(body)
+            params = payload.get("params") or {}
+            arguments = params.get("arguments") or {}
+            if (
+                payload.get("method") == "tools/call"
+                and params.get("name") == "ncs_analysis"
+                and arguments.get("mode") == "ontology"
+            ):
+                response["payload"]["result"]["content"][0]["text"] = "\n".join(
+                    [
+                        "[NOT_FOUND] ontology 분석 결과가 없습니다.",
+                        "LLM은 추측 또는 생성을 하지 마세요.",
+                        "",
+                        verifier.PUBLIC_SOURCE_FOOTER,
+                    ]
+                )
+            return response
+
+        with patch.object(verifier, "_request", side_effect=not_found_request):
+            report = verifier.verify("https://example.test/api/mcp", concurrency=1)
+
+        self.assertFalse(report["ok"])
+        self.assertIn("tools_call_analysis_ontology_semantic", report["failures"])
+        self.assertTrue(
+            report["checks"]["tools_call_analysis_ontology"]["not_found_detected"]
+        )
+        self.assertNotIn(verifier.NOT_FOUND_MARKER, json.dumps(report, ensure_ascii=False))
 
 
 if __name__ == "__main__":

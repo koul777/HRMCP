@@ -22,6 +22,19 @@ EXPECTED_PUBLIC_TOOLS = {
     "ncs_unit_detail",
     "recommend_training_for_task",
 }
+STRUCTURED_CONTENT_FORBIDDEN_TOOLS = {
+    "ncs_analysis",
+    "ncs_search",
+    "ncs_training",
+    "ncs_unit_detail",
+    "recommend_training_for_task",
+}
+MARKDOWN_FOOTER_REQUIRED_TOOLS = {
+    "ncs_analysis",
+    "ncs_search",
+    "ncs_training",
+    "ncs_unit_detail",
+}
 RAW_EXCEPTION_MARKERS = (
     "error executing tool",
     "traceback (most recent call last)",
@@ -29,6 +42,11 @@ RAW_EXCEPTION_MARKERS = (
     "no such table:",
     "python exception",
 )
+PUBLIC_SOURCE_FOOTER = (
+    "출처: 한국산업인력공단 NCS (공공데이터포털). 표준 원문: ncs.go.kr"
+)
+NOT_FOUND_MARKER = "[NOT_FOUND]"
+MARKDOWN_ERROR_PREFIX = "오류 코드:"
 SMOKE_UNIT_QUERY = "인사기획"
 SMOKE_UNIT_CODE_PLACEHOLDER = "__DISCOVERED_SMOKE_UNIT_CODE__"
 TOOL_SMOKE_CALLS: tuple[tuple[str, str, dict[str, Any]], ...] = (
@@ -188,6 +206,23 @@ def _contains_raw_exception(value: Any) -> bool:
     return any(marker in rendered for marker in RAW_EXCEPTION_MARKERS)
 
 
+def _tool_text_content(rpc_payload: Any) -> str | None:
+    """Return private tools/call text content without adding it to reports."""
+    if not isinstance(rpc_payload, dict):
+        return None
+    result = rpc_payload.get("result")
+    if not isinstance(result, dict):
+        return None
+    parts: list[str] = []
+    for block in result.get("content") or []:
+        if not isinstance(block, dict) or block.get("type") != "text":
+            continue
+        text = block.get("text")
+        if isinstance(text, str) and text.strip():
+            parts.append(text.strip())
+    return "\n\n".join(parts) or None
+
+
 def _tool_content_payload(rpc_payload: Any) -> dict[str, Any] | None:
     if not isinstance(rpc_payload, dict):
         return None
@@ -212,6 +247,61 @@ def _tool_content_payload(rpc_payload: Any) -> dict[str, Any] | None:
     return None
 
 
+def _markdown_cells(line: str) -> list[str]:
+    stripped = line.strip()
+    if not (stripped.startswith("|") and stripped.endswith("|")):
+        return []
+    return [
+        cell.replace(r"\|", "|").strip()
+        for cell in re.split(r"(?<!\\)\|", stripped[1:-1])
+    ]
+
+
+def _is_markdown_separator(cells: list[str]) -> bool:
+    return bool(cells) and all(
+        re.fullmatch(r":?-{3,}:?", cell.replace(" ", "")) is not None
+        for cell in cells
+    )
+
+
+def _markdown_tables(text: str | None) -> list[tuple[list[str], list[list[str]]]]:
+    if not text:
+        return []
+    lines = text.splitlines()
+    tables: list[tuple[list[str], list[list[str]]]] = []
+    index = 0
+    while index + 1 < len(lines):
+        headers = _markdown_cells(lines[index])
+        separator = _markdown_cells(lines[index + 1])
+        if (
+            not headers
+            or len(separator) != len(headers)
+            or not _is_markdown_separator(separator)
+        ):
+            index += 1
+            continue
+        rows: list[list[str]] = []
+        cursor = index + 2
+        while cursor < len(lines):
+            cells = _markdown_cells(lines[cursor])
+            if len(cells) != len(headers):
+                break
+            rows.append(cells)
+            cursor += 1
+        tables.append((headers, rows))
+        index = cursor
+    return tables
+
+
+def _clean_markdown_identifier(value: str) -> str | None:
+    candidate = value.strip().strip("`").strip()
+    if candidate in {"", "-"}:
+        return None
+    if re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z._-]{2,63}", candidate) is None:
+        return None
+    return candidate
+
+
 def _first_unit_code(tool_payload: dict[str, Any] | None) -> str | None:
     if not isinstance(tool_payload, dict):
         return None
@@ -225,9 +315,58 @@ def _first_unit_code(tool_payload: dict[str, Any] | None) -> str | None:
         if not isinstance(row, dict) or row.get("type") not in {"unit", "competency_unit"}:
             continue
         value = row.get("unit_code") or row.get("id")
-        if value and str(value).strip():
-            return str(value).strip()
+        if value:
+            unit_code = _clean_markdown_identifier(str(value))
+            if unit_code:
+                return unit_code
     return None
+
+
+def _first_unit_code_from_response(rpc_payload: Any) -> str | None:
+    legacy_code = _first_unit_code(_tool_content_payload(rpc_payload))
+    if legacy_code:
+        return legacy_code
+    text = _tool_text_content(rpc_payload)
+    for headers, rows in _markdown_tables(text):
+        normalized_headers = [header.casefold().replace(" ", "") for header in headers]
+        try:
+            unit_code_index = normalized_headers.index("능력단위코드")
+        except ValueError:
+            try:
+                unit_code_index = normalized_headers.index("unit_code")
+            except ValueError:
+                continue
+        for row in rows:
+            unit_code = _clean_markdown_identifier(row[unit_code_index])
+            if unit_code:
+                return unit_code
+    return None
+
+
+def _markdown_qualification_data_present(text: str | None) -> bool:
+    if not text or "## 자격 연계 분석" not in text:
+        return False
+    count_present = any(
+        int(match.group("total")) > 0 and int(match.group("returned")) > 0
+        for match in re.finditer(
+            r"(?P<total>\d+)건\s+중\s+(?P<returned>\d+)건\s+표시",
+            text,
+        )
+    )
+    if not count_present:
+        return False
+    for headers, rows in _markdown_tables(text):
+        normalized_headers = [header.casefold().replace(" ", "") for header in headers]
+        identity_headers = ("자격코드", "자격명", "능력단위코드")
+        if not set(identity_headers).issubset(normalized_headers):
+            continue
+        identity_indexes = [normalized_headers.index(header) for header in identity_headers]
+        if any(
+            any(row[index].strip().strip("`") not in {"", "-"} for index in identity_indexes)
+            for row in rows
+        ):
+            return True
+    return False
 
 
 def _resolve_smoke_arguments(
@@ -245,28 +384,75 @@ def _tool_call_assessment(
     response: dict[str, Any],
     *,
     expected_nonempty_field: str | None = None,
+    structured_content_forbidden: bool = True,
+    markdown_footer_required: bool = True,
 ) -> dict[str, Any]:
     rpc_payload = _response_payload(response)
     rpc_error = isinstance(rpc_payload, dict) and isinstance(rpc_payload.get("error"), dict)
     rpc_result = rpc_payload.get("result") if isinstance(rpc_payload, dict) else None
     tool_is_error = isinstance(rpc_result, dict) and rpc_result.get("isError") is True
-    tool_payload = _tool_content_payload(rpc_payload)
-    semantic_ok = isinstance(tool_payload, dict) and tool_payload.get("ok") is True
-    payload_chars = (
-        len(json.dumps(tool_payload, ensure_ascii=False, separators=(",", ":")))
-        if isinstance(tool_payload, dict)
-        else None
+    tool_is_explicit_success = (
+        isinstance(rpc_result, dict) and rpc_result.get("isError") is False
     )
+    structured_content_present = (
+        isinstance(rpc_result, dict) and "structuredContent" in rpc_result
+    )
+    text_content = _tool_text_content(rpc_payload)
+    tool_payload = _tool_content_payload(rpc_payload)
     raw_exception = _contains_raw_exception(rpc_payload)
+    not_found_detected = bool(text_content and NOT_FOUND_MARKER in text_content)
+    markdown_error_detected = bool(
+        text_content and text_content.lstrip().startswith(MARKDOWN_ERROR_PREFIX)
+    )
+    source_footer_present = bool(
+        text_content and text_content.rstrip().endswith(PUBLIC_SOURCE_FOOTER)
+    )
+    legacy_json_ok = isinstance(tool_payload, dict) and tool_payload.get("ok") is True
+    markdown_ok = bool(
+        text_content
+        and tool_is_explicit_success
+        and (source_footer_present or not markdown_footer_required)
+        and not not_found_detected
+        and not markdown_error_detected
+    )
+    semantic_ok = bool(
+        not rpc_error
+        and not tool_is_error
+        and not (structured_content_forbidden and structured_content_present)
+        and not raw_exception
+        and not not_found_detected
+        and (legacy_json_ok or markdown_ok)
+    )
+    payload_chars = (
+        len(text_content)
+        if text_content is not None
+        else (
+            len(json.dumps(tool_payload, ensure_ascii=False, separators=(",", ":")))
+            if isinstance(tool_payload, dict)
+            else None
+        )
+    )
     expected_value: Any = None
     if isinstance(tool_payload, dict) and expected_nonempty_field:
         expected_value = tool_payload.get(expected_nonempty_field)
         if expected_value is None and isinstance(tool_payload.get("data"), dict):
             expected_value = tool_payload["data"].get(expected_nonempty_field)
-    expected_data_present = (
-        isinstance(expected_value, list) and len(expected_value) > 0
-        if expected_nonempty_field
-        else None
+    expected_data_present: bool | None = None
+    if expected_nonempty_field:
+        expected_data_present = isinstance(expected_value, list) and len(expected_value) > 0
+        if (
+            not expected_data_present
+            and expected_nonempty_field == "qualification_links"
+        ):
+            expected_data_present = _markdown_qualification_data_present(text_content)
+    response_format = (
+        "json_text"
+        if legacy_json_ok and text_content is not None
+        else "markdown"
+        if text_content is not None
+        else "structured"
+        if structured_content_present
+        else "unknown"
     )
     return {
         **_safe_response(response),
@@ -275,6 +461,13 @@ def _tool_call_assessment(
         "semantic_ok": semantic_ok,
         "payload_chars": payload_chars,
         "raw_exception_detected": raw_exception,
+        "not_found_detected": not_found_detected,
+        "markdown_error_detected": markdown_error_detected,
+        "source_footer_present": source_footer_present,
+        "markdown_footer_required": markdown_footer_required,
+        "structured_content_present": structured_content_present,
+        "structured_content_forbidden": structured_content_forbidden,
+        "response_format": response_format,
         "expected_nonempty_field": expected_nonempty_field,
         "expected_data_present": expected_data_present,
         "response_body_logged": False,
@@ -449,8 +642,8 @@ def verify(
             timeout=request_timeout,
         )
         if check_name == "search":
-            discovered_unit_code = _first_unit_code(
-                _tool_content_payload(_response_payload(response))
+            discovered_unit_code = _first_unit_code_from_response(
+                _response_payload(response)
             )
         checks[f"tools_call_{check_name}"] = {
             "tool_name": tool_name,
@@ -458,6 +651,12 @@ def verify(
                 response,
                 expected_nonempty_field=TOOL_SMOKE_REQUIRED_NONEMPTY_FIELDS.get(
                     check_name
+                ),
+                structured_content_forbidden=(
+                    tool_name in STRUCTURED_CONTENT_FORBIDDEN_TOOLS
+                ),
+                markdown_footer_required=(
+                    tool_name in MARKDOWN_FOOTER_REQUIRED_TOOLS
                 ),
             ),
         }
@@ -533,6 +732,8 @@ def verify(
             failures.append(f"{failure_prefix}_jsonrpc")
         if item["tool_result_is_error"]:
             failures.append(f"{failure_prefix}_tool_error")
+        if item["structured_content_forbidden"] and item["structured_content_present"]:
+            failures.append(f"{failure_prefix}_structured_content")
         if not item["semantic_ok"]:
             failures.append(f"{failure_prefix}_semantic")
         if item["raw_exception_detected"]:
