@@ -1,8 +1,10 @@
 /*
 !.vercelignore
+!.python-version
 !vercel.json
 !requirements.txt
 !pyproject.toml
+!uv.lock
 !api/
 !api/__init__.py
 !api/health.py
