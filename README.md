@@ -53,6 +53,21 @@ AI의 검색과 결과물 작성을 뒷받침합니다.
 
 ---
 
+## 📌 최근 운영 업데이트
+
+- **2026-08-30**: 공개 MCP 기준 URL을 `https://ncs-mcp-bridge-mini2.vercel.app/api/mcp`로 일원화했습니다. 이전 구버전 엔드포인트 `https://ncs-mcp-bridge.vercel.app/api/mcp`는 현재 `404`로 종료되며 신규 연결에 사용하지 않습니다.
+- **2026-08-30**: Vercel 릴리스 워크플로에 배포 후 원격 스모크 게이트를 추가했습니다. `GET 405 종료`, `initialize`, `tools/list`, 공개 7개 도구 호출, `ncs_analysis`의 `career_path`·`qualification`·`job_base`·`ontology` 4개 모드를 실제 URL에 대해 검증합니다.
+- **2026-08-30**: 운영 스모크는 `.github/workflows/vercel-snapshot-release.yml`과 `scripts/verify_remote_mcp_transport.py`가 담당합니다. 스냅샷 테이블 누락, raw exception 노출, 공개 도구 응답 회귀가 발생하면 production 승격 전에 릴리스를 중단합니다.
+- **2026-08-30**: `initialize`의 `serverInfo.version`에 Git 커밋 SHA, Vercel 배포 ID 또는 스냅샷 해시를 포함해 신·구 배포를 식별할 수 있게 했습니다.
+- **2026-08-30**: `ncs_analysis(mode="job_base")` 응답을 필드 화이트리스트와 링크 상한으로 제한하고, 원격 스모크에서 2,000자·1초 계약을 검사하도록 했습니다.
+- **2026-08-30**: Vercel compact snapshot의 qualification 계약을 강화했습니다. `ncs_qualification_items`와 `ncs_unit_qualification_links`가 없거나 비어 있으면 패키지 검증과 production 승격이 실패합니다.
+- **2026-08-30**: 저장소가 연결하는 NCS API·파일 원천을 전수 구분하고, 공식 레코드·엔드포인트·저장 테이블·이용조건을 [데이터 출처·이용조건 고지](DATA_SOURCE_NOTICE.md)에 기록했습니다.
+
+위 mini2 URL은 현재 공개 MCP의 canonical endpoint입니다. 원격 transport와 핵심 도구 계약은 자동으로
+검증하지만, 전체 AI-HR 제품의 안정 릴리스 판정과 코드 라이선스 선택은 별도 승인 절차로 남아 있습니다.
+
+---
+
 ## 💡 HRMCP로 할 수 있는 일
 
 - **구조화된 면접 질문 설계** — 채용공고와 직무기술서를 바탕으로 행동면접 질문, 추가 질문,
@@ -364,10 +379,29 @@ NCS API 키는 이 저장소 외부에서 발급합니다. 공공데이터포털
 
 ---
 
-## 📄 라이선스 및 면책
+## 📄 코드 라이선스·데이터 출처·면책
 
-HRMCP의 추천·생성 결과는 교육·업무 설계를 돕는 참고 자료이며, 공식 자격·라이선스·채용·법적·규정
-판단이 아닙니다. NCS 원천 데이터의 권리는 원 저작권자(한국산업인력공단 등)에 있습니다.
+프로젝트 코드와 원천 데이터의 이용조건은 서로 다릅니다. 현재 저장소 코드의 라이선스는 권한 있는
+소유자가 아직 선택하지 않았으므로, 루트 `LICENSE`가 추가되기 전까지 오픈소스 또는 재배포 가능한
+패키지로 간주하지 않습니다.
+
+### 연결된 외부 데이터 원천
+
+| 구분 | 공식 출처·연결 | 현재 역할 |
+| --- | --- | --- |
+| NCS 정보망 Excel DB | NCS 누리집에서 취득한 `ncs_info_network_db_2026_02.xlsx` | 분류·능력단위·요소·수행준거·원천 KSA의 canonical 기반 |
+| NCS 기준정보 API | [공공데이터포털 15128213](https://www.data.go.kr/data/15128213/openapi.do), `hrdkapi/NCS004·005·006` | 직무·능력단위 정의 보강과 요소 검증 |
+| NCS 훈련과정 API | [공공데이터포털 15086447](https://www.data.go.kr/data/15086447/openapi.do), `ncsTrainingCource/openapi18` | 훈련목표·시간·시설·방법을 교육추천 근거로 연결 |
+| 능력단위별 자격 API | [공공데이터포털 15074404](https://www.data.go.kr/data/15074404/openapi.do), `ncsClCdJm/getNcsClCdJmList` | 능력단위와 자격 종목의 보조 근거 |
+| NCS 직업기초능력 API | [공공데이터포털 15086440](https://www.data.go.kr/data/15086440/openapi.do), `ncsJobBase/openapi19` | 공통·부족 기초역량의 보조 근거 |
+| NCS 경력개발경로 CSV | NCS 누리집 파일을 `ncs_career_paths`로 import | 직무 전환·성장 단계의 보조 근거 |
+
+CQ-Net NCS 관련 정보, 학습모듈, SQF 관련 API·자료실 코드는 레거시·참조용이며 현재 공개 HRMCP의
+기본 추천 경로에 사용하지 않습니다. API별 공식 이용허락 표시, 파일별 공공누리 확인 상태, 코드
+연결 지점과 저장 테이블은 [데이터 출처·이용조건 고지](DATA_SOURCE_NOTICE.md)에 하나씩 정리했습니다.
+
+HRMCP의 추천·생성 결과는 교육·업무 설계를 돕는 참고 자료이며, 공식 NCS 정의·자격 인정·채용·법적·규정
+판단이 아닙니다. NCS 원천 데이터의 권리는 한국산업인력공단 등 각 원 권리자에게 있습니다.
 
 ---
 
