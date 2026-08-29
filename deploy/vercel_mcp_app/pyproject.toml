@@ -21,6 +21,9 @@ Repository = "https://github.com/koul777/HRMCP"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.vercel]
+entrypoint = "api.index:app"
+
 [project.scripts]
 ncs-mcp = "ncs_mcp.server:main"
 ncs-institutional-chat = "ncs_mcp.institutional_chat:main"
