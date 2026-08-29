@@ -113,7 +113,7 @@ ChatGPT와 Claude는 HRMCP를 연결하는 메뉴와 명칭이 다릅니다. 사
   - **서버 URL:** 아래 HTTPS MCP 주소를 그대로 복사해 붙여넣기
 
     ```text
-    https://ncscope-ncs-mcp.vercel.app/api/mcp
+    https://ncs-mcp-bridge-mini2.vercel.app/api/mcp
     ```
 
 - **인증 방식:** `인증 없음` 선택 (드롭다운의 `∨`를 클릭해 선택)
@@ -159,7 +159,7 @@ Claude 웹 화면에서 다음 순서에 따라 커넥터를 직접 추가합니
 
 6. **추가**를 누르면 **커스텀 커넥터 추가** 창이 열립니다. **이름**에 `HRMCP`를 입력합니다.
 
-7. **원격 MCP 서버 URL**에 `https://ncscope-ncs-mcp.vercel.app/api/mcp`를 입력합니다.
+7. **원격 MCP 서버 URL**에 `https://ncs-mcp-bridge-mini2.vercel.app/api/mcp`를 입력합니다.
 
 8. 두 값을 확인한 뒤 **계속**을 클릭해 등록을 진행합니다.
 
@@ -194,19 +194,16 @@ Claude 웹 화면에서 다음 순서에 따라 커넥터를 직접 추가합니
 ![@HRMCP를 선택하는 방법](docs/images/setup/1_5.jpg)
 
 ```text
-@HRMCP 붙임 공고문, 직무기술서를 참고해서 구조화된 면접 질문 10개를 뽑아줘. 행동면접으로.
+@HRMCP 첨부한 채용공고와 직무기술서를 참고해 구조화된 행동면접 질문 10개를 작성해줘.
+각 질문별 평가요소, 추가 질문, 긍정적·부정적 행동지표도 함께 제시해줘.
 ```
 
 ![ChatGPT에서 HRMCP를 활용한 면접 질문 생성 결과](docs/images/setup/1_6.jpg)
 
 ### Claude에서 사용하기 — NCS 직무기술서 작성
 
-Claude에서 **설정 → 사용자 지정 → 커넥터**로 이동해 `HRMCP` 행의 체크 표시를 확인합니다.
-
-![Claude에서 HRMCP 커넥터의 연결 상태를 확인하는 화면](docs/images/setup/claude_hrmcp_use_01_connected.png)
-
-연결 상태를 확인한 뒤 새 대화에서 다음과 같이 요청합니다. Claude에서는 `@HRMCP`를 붙일
-필요가 없습니다. 도구 사용 권한 확인 창이 표시되면 내용을 확인한 뒤 허용합니다.
+새 대화에서 다음과 같이 요청합니다. Claude에서는 `@HRMCP`를 붙일 필요가 없습니다.
+도구 사용 권한 확인 창이 표시되면 내용을 확인한 뒤 허용합니다.
 
 ```text
 HRMCP 인사기획 직무기술서를 워드로 만들어줘
@@ -237,10 +234,10 @@ DOCX 문서로 생성하고, 결과를 미리 보거나 다운로드하는 활�
 
 | 항목 | 값 |
 | --- | --- |
-| MCP 서버 URL | `https://ncscope-ncs-mcp.vercel.app/api/mcp` |
+| MCP 서버 URL | `https://ncs-mcp-bridge-mini2.vercel.app/api/mcp` |
 | 인증 | 없음 (Auth: None) |
-| 상태 확인(health) | `https://ncscope-ncs-mcp.vercel.app/api/health` |
-| 준비 확인(ready) | `https://ncscope-ncs-mcp.vercel.app/api/ready` |
+| 상태 확인(health) | `https://ncs-mcp-bridge-mini2.vercel.app/api/health` |
+| 준비 확인(ready) | `https://ncs-mcp-bridge-mini2.vercel.app/api/ready` |
 
 ChatGPT Custom GPT(Agent/Tools) 설정에서는 아래 JSON의 `url`만 넣으면 됩니다.
 
@@ -248,7 +245,7 @@ ChatGPT Custom GPT(Agent/Tools) 설정에서는 아래 JSON의 `url`만 넣으�
 {
   "mcpServers": {
     "hrmcp": {
-      "url": "https://ncscope-ncs-mcp.vercel.app/api/mcp"
+      "url": "https://ncs-mcp-bridge-mini2.vercel.app/api/mcp"
     }
   }
 }
@@ -308,13 +305,19 @@ NCS Excel/원천 데이터
 ChatGPT 연결은 주소 한 줄(`/api/mcp`)만 넣으면 됩니다. 전체 배포 가이드는
 `docs/README_VERCEL_HTTPS.md`를 참고하세요.
 
-- `vercel.json`이 함수 진입점(`api/index.py`)을 정의합니다.
-- `api/mcp.py`가 `ncs_mcp.server`의 `app`(ASGI)을 export하고 서빙 DB를 부트스트랩합니다.
-- 서빙 DB(약 117MB)는 **커밋되지 않으며**, GitHub Release 자산으로 배포되어 런타임에
-  `NCS_DB_URL`로 다운로드됩니다.
-  - 릴리스: <https://github.com/koul777/HRMCP/releases/tag/ncs-serving-2026-02>
+- 기준 입력은 운영자가 준비한 단일 canonical DB `data/processed/ncs.db`
+  (12,648,931,328 bytes)입니다. Publisher가 이를 stage·verify한 뒤 compact SQLite
+  (425,758,720 bytes)와 `api/ncs_ontology_compact.zip`(120,785,873 bytes), manifest
+  쌍을 원자적으로 publish합니다. 실패하면 기존 쌍을 rollback합니다.
+- `deploy/vercel_mcp_app/vercel.json`은 함수 진입점(`api/index.py`)과 ZIP/manifest
+  포함 규칙을 정의합니다. 측정된 production function bundle은 131.54MB입니다.
+- `api/mcp.py`는 시작 시 ZIP과 manifest를 검증한 뒤 `/tmp/ncs_ontology_compact.db`에
+  DB를 materialize하여 read-only로 엽니다. 요청 시 NCS API를 수집하거나 AI 모델을
+  호출하지 않습니다. `NCS_DB_URL`은 표준 배포 의존성이 아닙니다.
+- 현재 production MCP URL은 `https://ncs-mcp-bridge-mini2.vercel.app/api/mcp`이고,
+  배포 식별자는 `dpl_94usxf3AP6AjSdN8cySr1bu9fJK7`입니다.
 
-Vercel 환경변수 (아래 중 `NCS_DB_URL` 외에는 `vercel.json`에 이미 포함):
+Vercel 런타임 설정은 `deploy/vercel_mcp_app/vercel.json`에 포함되어 있습니다.
 
 ```text
 NCS_MCP_READ_ONLY=1
@@ -322,14 +325,27 @@ NCS_MCP_ENABLE_OPERATOR_TOOLS=0
 NCS_MCP_DISABLE_DNS_REBINDING_PROTECTION=1
 NCS_MCP_STREAMABLE_HTTP_PATH=/mcp
 NCS_MCP_MAX_CONCURRENT_RECOMMENDATIONS=2
-NCS_DB_PATH=/tmp/ncs_interview_serving.db
-NCS_DB_URL=https://github.com/koul777/HRMCP/releases/download/ncs-serving-2026-02/ncs_interview_serving_release.db
+NCS_MCP_READINESS_EXTRA_TABLES=ontology_concepts,...,ncs_unit_standard_training
 ```
 
 ```powershell
-vercel env add NCS_DB_URL production   # Release 자산 URL 붙여넣기
+cd deploy\vercel_mcp_app
+vercel deploy
 vercel deploy --prod
 ```
+
+새 원천 DB로 교체할 때는 API 수집·품질 게이트·체크포인트와 자격 API의 운영자 승인을
+별도 upstream 파이프라인에서 마친 뒤, 그 결과인 단일 canonical DB를 Publisher 입력으로
+사용합니다.
+
+```powershell
+python scripts\publish_vercel_snapshot.py --source data\processed\ncs.db
+```
+
+필요하면 `--deploy-root`, `--dry-run`, `--report`를 추가할 수 있습니다. Publisher는
+검증된 ZIP과 manifest만 `deploy/vercel_mcp_app/api/`에 함께 publish하며, 자체적으로 API를
+수집하거나 Vercel을 배포하지 않습니다. 별도 출력 경로가 필요한 경우에만 low-level
+`build_vercel_snapshot.py`를 사용하세요.
 
 ### API 키 발급
 
@@ -349,3 +365,82 @@ NCS API 키는 이 저장소 외부에서 발급합니다. 공공데이터포털
 
 HRMCP의 추천·생성 결과는 교육·업무 설계를 돕는 참고 자료이며, 공식 자격·라이선스·채용·법적·규정
 판단이 아닙니다. NCS 원천 데이터의 권리는 원 저작권자(한국산업인력공단 등)에 있습니다.
+
+---
+
+## 🧠 온톨로지 DB 구축·성능·HRMCP 작업
+
+HRMCP는 전체 운영 DB를 함수에 직접 넣지 않습니다. 운영자가 준비한 단일 canonical
+`data/processed/ncs.db`(12,648,931,328 bytes)를 결정론적 Builder가 compact SQLite
+(425,758,720 bytes)와 ZIP 배포 입력(120,785,873 bytes)으로 만듭니다. Vercel 함수는
+ZIP과 manifest를 검증해 `/tmp`에 읽기 전용 DB를 materialize합니다. 이는 같은 canonical
+입력에서 같은 배포 산출물을 재현하고, 함수 번들을 작게 유지하면서 온톨로지·교육추천 근거를
+함께 제공하기 위한 구조입니다.
+
+Builder는 AI를 내장하거나 추론을 위임하는 도구가 아닙니다. canonical DB 하나를 export,
+package, verify하는 고정 파이프라인입니다. Vercel 런타임도 AI 모델 호출이나 API 수집을
+수행하지 않습니다. API 갱신은 체크포인트·품질 게이트·guarded 실행을 갖춘 upstream
+파이프라인에서 처리하며, 자격 API는 운영자 승인이 필요합니다. 그 결과가 canonical DB가
+된 뒤에만 Builder 입력으로 사용됩니다.
+
+![NCS 원천 데이터로 온톨로지 경량 DB를 구축하고 HRMCP의 직무기술서·구조화 행동면접·교육훈련 설계를 지원하는 흐름](docs/images/hrmcp_ontology_impact.png)
+
+### 구축된 데이터
+
+| 데이터 | 포함 건수 | HRMCP에서의 역할 |
+| --- | ---: | --- |
+| NCS 능력단위 | 13,435건 | 직무와 가장 가까운 능력단위를 찾는 기본 축 |
+| 수행준거 | 196,658건 | 면접 질문, 직무기술서, 교육 추천의 세부 근거 |
+| 원천 KSA | 574,279건 | 직무 수행에 필요한 지식·기술·태도 원문 근거 |
+| 원자 KSA | 644,384건 | KSA를 더 잘게 나눠 검색과 연결 정확도를 높이는 단위 |
+| 온톨로지 개념 | 533,909건 | 다양한 표현을 대표 개념으로 통합하는 축 |
+| 온톨로지 별칭 | 1,795건 | 검토된 별칭을 통한 보조 검색 축 |
+| 개념 라벨 후보 | 755건 | 검토 가능한 표현 후보와 검색 확장 근거 |
+| 수행준거-개념 연결(논리 건수) | 3,025,498건 | 질문·추천 결과를 수행준거 근거와 직접 연결 |
+| 온톨로지 관계(논리 건수) | 3,235,434건 | 지식·기술·태도 간 연관성을 구조적으로 조회 |
+| 교육과정 | 11,819건 | 교육훈련 계획 수립의 대상 과정 |
+| 교육과정-능력단위 링크 | 11,816건 | 교육과정이 어떤 능력단위를 다루는지 확인 |
+| 교육과정-개념 링크 | 479,583건 | 교육과정과 역량 개념의 직접 연결 근거 |
+| 교육과정-능력단위요소 링크 | 100,659건 | 과정이 다루는 실제 수행 범위 확인 |
+| 훈련목표-개념 링크 | 348,877건 | 과정 목표와 요구 역량 사이의 설명 근거 |
+| 훈련 운영·전달 관계 | 69,162건 | 시간·방법·시설 적합성의 근거 |
+| 경력개발경로 | 12,864건 | 직무 전환과 성장 경로 참고 |
+| 자격 종목 | 1,039건 | 관련 자격 정보를 보조 근거로 제공 |
+| 직업기초능력 링크 | 230,920건 | 공통 역량과 기초능력 설명 보강 |
+| Gold scenario / review | 100건 / 11건 | 전환 추천 품질 점검용 검증 세트 |
+
+### 무엇이 개선되었나
+
+- **검색 범위 확장**: 직무명이나 과정명 문자열 일치만이 아니라 능력단위, 수행준거, KSA 개념,
+  별칭, 훈련목표까지 함께 조회할 수 있습니다.
+- **답변의 구체성 강화**: 구조화된 행동면접 질문, 직무기술서, 교육훈련 계획을 만들 때 수행준거와
+  KSA, 과정 목표를 한 흐름으로 묶어 제시할 수 있습니다.
+- **설명 가능성 강화**: 어떤 질문이나 교육과정을 왜 제안했는지 NCS 단위, KSA, 온톨로지 개념,
+  훈련목표 연결까지 함께 보여줄 수 있습니다.
+- **인접 근거 탐색 강화**: enriched 수행준거-개념 색인과 온톨로지 관계가 직무 전환 및
+  인접 역량 탐색을 위한 설명 가능한 근거를 제공합니다.
+- **배포 안정성 강화**: compact ZIP과 manifest를 검증한 뒤 `/tmp`의 read-only SQLite를
+  열고, readiness 계약으로 핵심 온톨로지 테이블의 최소 행 수까지 확인합니다.
+
+여기서 성능 개선은 응답속도가 무조건 빨라졌다는 뜻이 아니라, **검색 가능한 근거의 범위,
+결과의 구체성, 추천 이유의 추적 가능성, 배포 시 데이터 가용성**이 개선됐다는 의미입니다.
+
+### 새 데이터로 할 수 있는 작업
+
+- **NCS 기반 직무기술서 작성**: 능력단위·수행준거·KSA를 일관된 구조로 정리합니다.
+- **구조화 행동면접 설계**: 질문별 평가요소, 추가 질문, 긍정적·부정적 행동지표를 직무 KSA와
+  연결해 작성합니다.
+- **직무별 KSA 분석**: 해당 직무가 요구하는 지식·기술·태도와 그 원천 근거를 확인합니다.
+- **교육훈련 계획 수립**: 부족 KSA와 교육과정의 훈련목표·수준·시간·방법을 함께 검토합니다.
+- **추천 근거 검토**: HR 담당자가 결과에 사용된 NCS·KSA·교육과정 연결을 확인하고 초안을
+  수정할 수 있습니다.
+
+### 경량판의 범위와 한계
+
+Vercel 배포판은 전체 운영 DB를 그대로 노출하지는 않습니다. `review_audit_log`,
+`ksa_meaning_candidates`, 각종 원천 수집 로그와 레거시 SQF 참조 테이블은 제외했고,
+압축·역색인 구조로 필요한 관계만 서빙합니다. 검토되지 않은 개념 정의를 자동 승인하지 않으며,
+원천 KSA를 덮어쓰지 않습니다. 사람 검토를 거친 라벨 별칭 742건만 병합했으며, 이는 자동화된
+승인이 아닙니다. 나머지 라벨 후보와 정의는 검토 상태를 유지합니다.
+HRMCP의 결과는 채용 여부를 자동 판정하는 결과가 아니라 HR 담당자가 검토할 수 있는 NCS 기반
+초안과 근거입니다.

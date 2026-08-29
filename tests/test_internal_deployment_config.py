@@ -101,16 +101,32 @@ class InternalDeploymentConfigTests(unittest.TestCase):
             with self.subTest(marker=marker):
                 self.assertIn(marker, text)
 
-    def test_mcp_client_examples_use_active_ncs_product_names(self) -> None:
+    def test_vercel_snapshot_release_workflow_uses_single_db_builder_flow(self) -> None:
+        text = (
+            ROOT / ".github" / "workflows" / "vercel-snapshot-release.yml"
+        ).read_text(encoding="utf-8")
+
+        for marker in (
+            "runs-on: [self-hosted, windows]",
+            "NCS_SOURCE_DB_URL",
+            "scripts\\publish_vercel_snapshot.py",
+            "vercel build --yes --token $env:VERCEL_TOKEN",
+            "functions\\python.func",
+            "scripts\\verify_remote_mcp_transport.py",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, text)
+
+    def test_mcp_client_examples_use_hrmcp_name(self) -> None:
         stdio = json.loads((ROOT / "mcp" / "ncs-mcp.json").read_text(encoding="utf-8"))
         http = json.loads(
             (ROOT / "mcp" / "ncs-mcp-http.json").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(set(stdio["mcpServers"]), {"ncs-training"})
-        self.assertEqual(set(http["mcpServers"]), {"ncs-training-http"})
+        self.assertEqual(set(stdio["mcpServers"]), {"hrmcp"})
+        self.assertEqual(set(http["mcpServers"]), {"hrmcp"})
         self.assertEqual(
-            http["mcpServers"]["ncs-training-http"]["url"],
+            http["mcpServers"]["hrmcp"]["url"],
             "http://127.0.0.1:8766/mcp",
         )
 

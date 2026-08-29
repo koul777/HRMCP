@@ -1,0 +1,152 @@
+name: Vercel Snapshot Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy_target:
+        description: "Vercel deployment target"
+        required: true
+        default: production
+        type: choice
+        options:
+          - preview
+          - production
+      source_db_url:
+        description: "Optional override URL for the canonical source DB"
+        required: false
+        type: string
+      source_db_sha256:
+        description: "Optional SHA-256 for the downloaded canonical source DB"
+        required: false
+        type: string
+  schedule:
+    - cron: "30 19 * * *"
+
+concurrency:
+  group: vercel-snapshot-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build compact snapshot and deploy to Vercel
+    runs-on: [self-hosted, windows]
+    permissions:
+      contents: read
+    env:
+      PYTHONUTF8: "1"
+      NCS_SOURCE_DB_URL: ${{ secrets.NCS_SOURCE_DB_URL }}
+      NCS_SOURCE_DB_SHA256: ${{ secrets.NCS_SOURCE_DB_SHA256 }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Python package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip check
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
+
+      - name: Download canonical source DB
+        shell: powershell
+        run: |
+          $sourceUrl = "${{ github.event.inputs.source_db_url }}"
+          if ([string]::IsNullOrWhiteSpace($sourceUrl)) {
+            $sourceUrl = $env:NCS_SOURCE_DB_URL
+          }
+          if ([string]::IsNullOrWhiteSpace($sourceUrl)) {
+            throw "NCS_SOURCE_DB_URL must be set as a workflow input or repository secret."
+          }
+          $sourceSha = "${{ github.event.inputs.source_db_sha256 }}"
+          if ([string]::IsNullOrWhiteSpace($sourceSha)) {
+            $sourceSha = $env:NCS_SOURCE_DB_SHA256
+          }
+          $sourcePath = Join-Path $env:RUNNER_TEMP "ncs-source.db"
+          Invoke-WebRequest -Uri $sourceUrl -OutFile $sourcePath
+          if (-not [string]::IsNullOrWhiteSpace($sourceSha)) {
+            $actual = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $sourceSha.Trim().ToLowerInvariant()) {
+              throw "Downloaded source DB SHA-256 does not match the configured value."
+            }
+          }
+          "SOURCE_DB_PATH=$sourcePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build compact snapshot
+        shell: powershell
+        run: |
+          $buildDir = Join-Path $env:RUNNER_TEMP "vercel-snapshot-build"
+          New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
+          $report = Join-Path $buildDir "vercel_snapshot_publish_report.json"
+          python scripts\publish_vercel_snapshot.py `
+            --source "$env:SOURCE_DB_PATH" `
+            --deploy-root deploy\vercel_mcp_app `
+            --report "$report"
+          "BUILD_DIR=$buildDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Assemble Vercel function bundle
+        working-directory: deploy/vercel_mcp_app
+        shell: powershell
+        run: vercel build --yes --token $env:VERCEL_TOKEN
+
+      - name: Verify deployable bundle
+        shell: powershell
+        run: |
+          python scripts\verify_vercel_compact_package.py `
+            --archive deploy\vercel_mcp_app\api\ncs_ontology_compact.zip `
+            --manifest deploy\vercel_mcp_app\api\ncs_ontology_compact.manifest.json `
+            --function-bundle deploy\vercel_mcp_app\.vercel\output\functions\python.func `
+            --out reports\vercel_compact_package_verify_${{ github.run_id }}.json
+
+      - name: Deploy to Vercel
+        id: deploy
+        working-directory: deploy/vercel_mcp_app
+        shell: powershell
+        run: |
+          $deployTarget = "${{ github.event.inputs.deploy_target }}"
+          if ([string]::IsNullOrWhiteSpace($deployTarget)) {
+            $deployTarget = "production"
+          }
+          if ($deployTarget -eq "preview") {
+            $deployUrl = (vercel deploy --yes --token $env:VERCEL_TOKEN | Select-Object -Last 1).Trim()
+          } else {
+            $deployUrl = (vercel deploy --prod --yes --token $env:VERCEL_TOKEN | Select-Object -Last 1).Trim()
+          }
+          if (-not $deployUrl.StartsWith("https://")) {
+            throw "Vercel deploy did not return a deployment URL."
+          }
+          "deploy_url=$deployUrl" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Verify remote MCP transport
+        shell: powershell
+        run: |
+          python scripts\verify_remote_mcp_transport.py `
+            "${{ steps.deploy.outputs.deploy_url }}/api/mcp" `
+            --concurrency 5 `
+            --out reports\remote_mcp_transport_verify_${{ github.run_id }}.json
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: vercel-snapshot-release-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/vercel-snapshot-build
+            reports/vercel_compact_package_verify_${{ github.run_id }}.json
+            reports/remote_mcp_transport_verify_${{ github.run_id }}.json
