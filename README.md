@@ -57,8 +57,11 @@ AI의 검색과 결과물 작성을 뒷받침합니다.
 
 - **2026-08-30**: 공개 MCP 기준 URL을 `https://ncs-mcp-bridge-mini2.vercel.app/api/mcp`로 일원화했습니다. 이전 구버전 엔드포인트 `https://ncs-mcp-bridge.vercel.app/api/mcp`는 현재 `404`로 종료되며 신규 연결에 사용하지 않습니다.
 - **2026-08-30**: 서버가 사용하지 않는 독립 `GET /api/mcp` SSE 연결을 열어 둔 채 30초 뒤 종료되던 문제를 수정했습니다. 지원하지 않는 GET은 즉시 `405 Method Not Allowed`로 끝내고, `POST` 기반 `initialize`·`tools/list`·`tools/call` 계약은 유지합니다.
+- **2026-08-30**: `ncs_search`·`ncs_unit_detail`·`ncs_training`·`ncs_analysis`의 도구 응답을 원시 JSON 문자열 대신 간결한 마크다운으로 제공합니다. 후속 호출에 필요한 `unit_code`·`element_id`·`criteria_id`·`training_course_id`·`concept_id`는 독립 식별자로 유지하고, 중복 `structuredContent`는 제거했습니다.
 - **2026-08-30**: 전체 canonical `ncs.db`를 Vercel에 직접 싣지 않고, 온톨로지·KSA·수행준거·교육추천 근거를 포함한 compact SQLite(425,758,720 bytes)와 배포 ZIP(120,785,873 bytes)으로 만드는 결정론적 Builder·Refresh Builder를 정리했습니다.
+- **2026-08-30**: Vercel 함수 검증기가 빌드 폴더의 물리 파일뿐 아니라 `.vc-config.json`의 `filePathMap`까지 확인하도록 강화했습니다. 원본 `.db`·SQLite sidecar·금지 디렉터리 참조가 하나라도 있거나 실제 매핑 총량이 상한을 넘으면 배포를 중단합니다.
 - **2026-08-30**: Vercel 릴리스 워크플로에 배포 후 원격 스모크 게이트를 추가했습니다. `GET 405 종료`, `initialize`, `tools/list`, 공개 7개 도구 호출, `ncs_analysis`의 `career_path`·`qualification`·`job_base`·`ontology` 4개 모드를 실제 URL에 대해 검증합니다.
+- **2026-08-30**: qualification 스모크를 `광역 자격 조회 → 반환된 능력단위코드 정확 검색 → 해당 능력단위의 자격 조회` 체인으로 확장했습니다. 광역 결과만 존재하고 실제 단위별 조회가 깨진 배포는 승격하지 않으며, 검증 보고서에는 조회 코드와 응답 본문을 기록하지 않습니다.
 - **2026-08-30**: 운영 스모크는 `.github/workflows/vercel-snapshot-release.yml`과 `scripts/verify_remote_mcp_transport.py`가 담당합니다. 스냅샷 테이블 누락, raw exception 노출, 공개 도구 응답 회귀가 발생하면 production 승격 전에 릴리스를 중단합니다.
 - **2026-08-30**: `initialize`의 `serverInfo.version`에 Git 커밋 SHA, Vercel 배포 ID 또는 스냅샷 해시를 포함해 신·구 배포를 식별할 수 있게 했습니다.
 - **2026-08-30**: `ncs_analysis(mode="job_base")` 응답을 필드 화이트리스트와 링크 상한으로 제한하고, 원격 스모크에서 2,000자·1초 계약을 검사하도록 했습니다.
@@ -494,6 +497,11 @@ Vercel에는 전체 운영 DB 대신 온톨로지와 교육 추천에 필요한 
 스냅샷**을 배포합니다. Builder와 Vercel 런타임은 AI 모델을 실행하거나 요청 시점에 NCS API를
 수집하지 않으며, 원 데이터 갱신·변경 감지·검증·배포는 별도의 재현 가능한 파이프라인에서
 처리합니다.
+
+릴리스는 추적된 파일만 복사한 clean staging에서 조립하며, 실제 Vercel `filePathMap`에서 원본 DB가
+0건인지 확인합니다. 현재 검증된 함수 매핑 총량은 169,354,715 bytes이고, 런타임에 펼쳐지는
+SQLite는 425,758,720 bytes입니다. 압축 해제 공간의 여유가 크지 않으므로 DB가 증가하면 Builder의
+축소 기준과 `/tmp` 사용량을 다시 점검해야 합니다.
 
 - [경량 DB Builder·Refresh Builder·Vercel 배포 절차](docs/VERCEL_SNAPSHOT_BUILDER.md)
 - [Vercel 배포 구조·전체 포함 데이터·운영 범위](docs/README_VERCEL_HTTPS.md)
