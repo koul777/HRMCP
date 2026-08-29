@@ -135,15 +135,9 @@ Claude의 원격 MCP 커스텀 커넥터는 Free·Pro·Max·Team·Enterprise 플
 자세한 최신 정책은 [Anthropic 공식 안내](https://support.claude.com/ko/articles/11175166-%EC%9B%90%EA%B2%A9-mcp%EB%A5%BC-%EC%82%AC%EC%9A%A9%ED%95%98%EC%97%AC-%EC%82%AC%EC%9A%A9%EC%9E%90-%EC%A0%95%EC%9D%98-%EC%BB%A4%EB%84%A5%ED%84%B0-%EC%8B%9C%EC%9E%91%ED%95%98%EA%B8%B0)와
 [Claude Academy의 현재 화면 안내](https://academy.claude.com/tutorials/connect-your-tools-to-unlock-a-smarter-more-capable-ai-companion)를 참고하세요.
 
-**[Claude에 HRMCP 커넥터 추가하기](https://claude.ai/customize/connectors?modal=add-custom-connector&connectorName=HRMCP&connectorUrl=https%3A%2F%2Fncscope-ncs-mcp.vercel.app%2Fapi%2Fmcp)**
-
-> 위 링크를 열면 커넥터 추가 화면에 이름과 URL이 미리 입력됩니다. 입력값을 확인한 뒤
-> **계속**을 눌러 등록을 진행하세요.
-
 #### 개인 플랜 (Free·Pro·Max)
 
-위의 바로가기 링크를 사용하면 아래 1~5단계를 건너뛰고 6단계의 커넥터 등록 화면으로
-이동할 수 있습니다. Claude 웹 화면에서 직접 이동하려면 다음 순서를 따릅니다.
+Claude 웹 화면에서 다음 순서에 따라 커넥터를 직접 추가합니다.
 
 1. Claude 홈 화면 왼쪽 아래의 **프로필**을 클릭합니다.
 
