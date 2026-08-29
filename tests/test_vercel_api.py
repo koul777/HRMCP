@@ -66,6 +66,7 @@ class VercelApiContractTests(unittest.TestCase):
             env["NCS_MCP_READ_ONLY"] = "1"
             env["NCS_MCP_ENABLE_OPERATOR_TOOLS"] = "0"
             env["NCS_MCP_DISABLE_DNS_REBINDING_PROTECTION"] = "1"
+            env["NCS_MCP_BUILD_ID"] = "0123456789abcdef0123456789abcdef01234567"
             local_python = ROOT / ".venv" / "Scripts" / "python.exe"
             python_executable = local_python if local_python.exists() else Path(sys.executable)
             completed = subprocess.run(
@@ -84,6 +85,10 @@ class VercelApiContractTests(unittest.TestCase):
         self.assertEqual(result["payload"]["jsonrpc"], "2.0")
         self.assertEqual(result["payload"]["id"], 1)
         self.assertEqual(result["payload"]["result"]["serverInfo"]["name"], "ncs-mcp")
+        self.assertEqual(
+            result["payload"]["result"]["serverInfo"]["version"],
+            "0.1.0+git.0123456789abcdef0123456789abcdef01234567",
+        )
 
     def test_mcp_fails_closed_when_vercel_compact_bundle_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

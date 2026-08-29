@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import socket
 import time
 import urllib.error
@@ -335,6 +336,12 @@ def verify(
     initialize_result = (
         initialize_payload.get("result") if isinstance(initialize_payload, dict) else None
     )
+    server_info = (
+        initialize_result.get("serverInfo")
+        if isinstance(initialize_result, dict)
+        and isinstance(initialize_result.get("serverInfo"), dict)
+        else {}
+    )
     checks["initialize"] = {
         **_safe_response(initialize_response),
         "jsonrpc_error": bool(
@@ -345,6 +352,14 @@ def verify(
             initialize_result.get("protocolVersion")
             if isinstance(initialize_result, dict)
             else None
+        ),
+        "server_name": server_info.get("name"),
+        "server_version": server_info.get("version"),
+        "build_identifier_present": bool(
+            re.fullmatch(
+                r"[^+]+\+(?:git|deploy|snapshot)\.[0-9A-Za-z.-]+",
+                str(server_info.get("version") or ""),
+            )
         ),
         "raw_exception_detected": _contains_raw_exception(initialize_payload),
         "response_body_logged": False,
@@ -463,6 +478,8 @@ def verify(
         failures.append("initialize")
     elif initialize.get("selected_protocol_version") != protocol_version:
         failures.append("initialize_protocol")
+    if not initialize.get("build_identifier_present"):
+        failures.append("initialize_build_identifier")
     if initialize["raw_exception_detected"]:
         failures.append("initialize_raw_exception")
     if checks["initialized_notification"]["status"] != 202:

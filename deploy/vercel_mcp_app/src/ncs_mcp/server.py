@@ -10,6 +10,7 @@ import sqlite3
 import threading
 import time
 from functools import wraps
+from importlib.metadata import PackageNotFoundError, version as package_version
 
 if __package__ in {None, ""}:  # pragma: no cover - direct script support
     import sys
@@ -89,6 +90,56 @@ from ncs_mcp.training_recommendation import (
 from ncs_mcp import tool_registry
 
 
+_BUILD_IDENTIFIER_RE = re.compile(r"[^0-9A-Za-z.-]+")
+
+
+def _package_release_version() -> str:
+    try:
+        return package_version("ncs-mcp")
+    except PackageNotFoundError:  # pragma: no cover - direct source execution
+        from ncs_mcp import __version__
+
+        return __version__
+
+
+def _compact_snapshot_identifier() -> str | None:
+    manifest_path = (
+        Path(__file__).resolve().parents[2]
+        / "api"
+        / "ncs_ontology_compact.manifest.json"
+    )
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    digest = str(payload.get("sqlite_sha256") or "").strip().lower()
+    if re.fullmatch(r"[0-9a-f]{64}", digest):
+        return digest[:12]
+    return None
+
+
+def resolve_mcp_server_version() -> str:
+    """Return a client-visible release identifier for initialize responses."""
+
+    release = _package_release_version()
+    candidates = (
+        ("git", os.getenv("NCS_MCP_BUILD_ID")),
+        ("git", os.getenv("VERCEL_GIT_COMMIT_SHA")),
+        ("deploy", os.getenv("VERCEL_DEPLOYMENT_ID")),
+    )
+    for label, raw_value in candidates:
+        value = _BUILD_IDENTIFIER_RE.sub("-", (raw_value or "").strip()).strip(".-")
+        if value:
+            return f"{release}+{label}.{value[:64]}"
+    snapshot_id = _compact_snapshot_identifier()
+    if snapshot_id:
+        return f"{release}+snapshot.{snapshot_id}"
+    return f"{release}+source.local"
+
+
+MCP_SERVER_VERSION = resolve_mcp_server_version()
+
+
 MCP_INSTRUCTIONS = """
 HRMCP는 국가직무능력표준(NCS)의 분류, 능력단위, 능력단위요소, 수행준거,
 지식·기술·태도(KSA), 훈련과정과 온톨로지 근거를 조회하는 읽기 중심 서버입니다.
@@ -102,6 +153,10 @@ recommend_training_for_task는 NCS 과업과 KSA를 바탕으로 교육 후보�
 
 
 mcp = FastMCP("ncs-mcp", instructions=MCP_INSTRUCTIONS)
+# FastMCP 1.26 does not expose the low-level server's version parameter.  Set
+# its public initialization field explicitly so clients can distinguish code
+# and snapshot deployments without changing any endpoint or tool contract.
+mcp._mcp_server.version = MCP_SERVER_VERSION
 
 CURRENT_TRANSPORT = "stdio"
 
