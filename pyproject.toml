@@ -20,6 +20,10 @@ dependencies = [
   "olefile>=0.47,<1",
 ]
 
+[project.urls]
+Homepage = "https://ncs-mcp-bridge-mini2.vercel.app"
+Repository = "https://github.com/koul777/HRMCP"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
