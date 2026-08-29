@@ -3,12 +3,18 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import sys
 import tempfile
 import unittest
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path, PurePosixPath
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+SRC = REPOSITORY_ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
 from ncs_mcp.vercel_snapshot import (
     COMPACT_ARCHIVE_NAME,
@@ -33,9 +39,6 @@ from scripts.verify_vercel_compact_package import (
     measure_function_bundle,
     verify_package,
 )
-
-
-REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 class VercelSnapshotTests(unittest.TestCase):

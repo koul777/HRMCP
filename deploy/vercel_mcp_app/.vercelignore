@@ -3,9 +3,14 @@
 !vercel.json
 !requirements.txt
 !pyproject.toml
-!api
+!api/
+!api/__init__.py
+!api/health.py
+!api/index.py
+!api/mcp.py
 !api/ncs_ontology_compact.zip
 !api/ncs_ontology_compact.manifest.json
+!api/ready.py
 !src
 !src/**/*.py
 api/*.db
