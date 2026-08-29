@@ -142,7 +142,7 @@ Claude의 원격 MCP 커스텀 커넥터는 Free·Pro·Max·Team·Enterprise 플
 
 #### 개인 플랜 (Free·Pro·Max)
 
-위의 바로가기 링크를 사용하면 아래 1~6단계를 건너뛰고 7단계의 커넥터 등록 화면으로
+위의 바로가기 링크를 사용하면 아래 1~5단계를 건너뛰고 6단계의 커넥터 등록 화면으로
 이동할 수 있습니다. Claude 웹 화면에서 직접 이동하려면 다음 순서를 따릅니다.
 
 1. Claude 홈 화면 왼쪽 아래의 **프로필**을 클릭합니다.
@@ -159,24 +159,20 @@ Claude의 원격 MCP 커스텀 커넥터는 Free·Pro·Max·Team·Enterprise 플
 
 4. 사용자 지정 화면 왼쪽에서 **커넥터**를 선택합니다.
 
-5. 커넥터 목록에서 `HRMCP`를 찾습니다. `HRMCP` 행에 체크 표시가 보이면 연결된 상태이며,
-   Claude 대화에서 바로 사용할 수 있습니다.
+5. 오른쪽 위의 **추가**를 클릭합니다.
 
-6. 목록에 `HRMCP`가 없다면 오른쪽 위의 **추가**를 클릭합니다.
+![Claude 사용자 지정의 커넥터 화면에서 추가 버튼을 선택하는 화면](docs/images/setup/claude_hrmcp_setup_04_connectors.png)
 
-![Claude 커넥터 목록에서 기존 HRMCP 연결 상태를 확인하고 없을 때 추가하는 화면](docs/images/setup/claude_hrmcp_setup_04_connectors.png)
+6. **추가**를 누르면 **커스텀 커넥터 추가** 창이 열립니다. **이름**에 `HRMCP`를 입력합니다.
 
-7. **추가**를 누르면 **커스텀 커넥터 추가** 창이 열립니다. **이름**에 `HRMCP`를 입력합니다.
+7. **원격 MCP 서버 URL**에 `https://ncscope-ncs-mcp.vercel.app/api/mcp`를 입력합니다.
 
-8. **원격 MCP 서버 URL**에 `https://ncscope-ncs-mcp.vercel.app/api/mcp`를 입력합니다.
-
-9. 두 값을 확인한 뒤 **계속**을 클릭해 연결 절차를 진행합니다.
+8. 두 값을 확인한 뒤 **계속**을 클릭해 등록을 진행합니다.
 
 ![Claude 커스텀 커넥터 추가 창에서 이름과 원격 MCP 서버 URL을 입력하는 화면](docs/images/setup/claude_hrmcp_setup_05_add_custom_connector.png)
 
 **계속**을 누르면 연결 설정이 진행됩니다. 확인 단계가 표시되면 내용을 확인해 등록을
 마칩니다. HRMCP는 인증이 필요하지 않으므로 OAuth Client ID·Secret은 입력하지 않습니다.
-커넥터 목록으로 돌아왔을 때 `HRMCP` 행에 체크 표시가 보이면 등록과 연결이 완료된 것입니다.
 
 > Claude 업데이트나 계정 유형에 따라 메뉴 배치나 버튼 이름이 조금 달라질 수 있습니다.
 
@@ -186,8 +182,7 @@ Claude의 원격 MCP 커스텀 커넥터는 Free·Pro·Max·Team·Enterprise 플
    이동합니다.
 2. **Add → Custom → Web** 을 선택하고 위의 원격 MCP 서버 URL을 입력합니다.
 3. OAuth 고급 설정은 비워 둔 채 **Add** 를 클릭해 조직에 등록합니다.
-4. 각 구성원은 **설정 → 사용자 지정 → 커넥터**에서 `HRMCP`를 찾아 **연결**을 클릭하고,
-   체크 표시로 연결 상태를 확인합니다.
+4. 각 구성원은 **설정 → 사용자 지정 → 커넥터**에서 `HRMCP`를 찾아 **연결**을 클릭합니다.
 
 ---
 
@@ -215,10 +210,14 @@ Claude의 원격 MCP 커스텀 커넥터는 Free·Pro·Max·Team·Enterprise 플
 
 #### Claude
 
-위의 연결 절차를 완료한 뒤 채용공고와 직무기술서를 첨부하고 다음과 같이 요청합니다.
-Claude에서는 `@HRMCP`를 붙일 필요가 없습니다. 요청문에 `HRMCP의 NCS 데이터를 활용해`라고
-명시하면 Claude가 연결된 HRMCP 도구를 사용해 답변을 작성합니다. 도구 사용 권한 확인 창이
-표시되면 내용을 확인한 뒤 허용합니다.
+Claude에서 **설정 → 사용자 지정 → 커넥터**로 이동해 `HRMCP` 행의 체크 표시를 확인합니다.
+
+![Claude에서 HRMCP 커넥터의 연결 상태를 확인하는 화면](docs/images/setup/claude_hrmcp_use_01_connected.png)
+
+연결 상태를 확인한 뒤 채용공고와 직무기술서를 첨부하고 다음과 같이 요청합니다. Claude에서는
+`@HRMCP`를 붙일 필요가 없습니다. 요청문에 `HRMCP의 NCS 데이터를 활용해`라고 명시하면
+Claude가 연결된 HRMCP 도구를 사용해 답변을 작성합니다. 도구 사용 권한 확인 창이 표시되면
+내용을 확인한 뒤 허용합니다.
 
 ```text
 첨부한 채용공고와 직무기술서를 참고하고 HRMCP의 NCS 데이터를 활용해 구조화된 행동면접 질문 10개를 작성해줘.
