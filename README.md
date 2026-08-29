@@ -56,6 +56,8 @@ AI의 검색과 결과물 작성을 뒷받침합니다.
 ## 📌 최근 운영 업데이트
 
 - **2026-08-30**: 공개 MCP 기준 URL을 `https://ncs-mcp-bridge-mini2.vercel.app/api/mcp`로 일원화했습니다. 이전 구버전 엔드포인트 `https://ncs-mcp-bridge.vercel.app/api/mcp`는 현재 `404`로 종료되며 신규 연결에 사용하지 않습니다.
+- **2026-08-30**: 서버가 사용하지 않는 독립 `GET /api/mcp` SSE 연결을 열어 둔 채 30초 뒤 종료되던 문제를 수정했습니다. 지원하지 않는 GET은 즉시 `405 Method Not Allowed`로 끝내고, `POST` 기반 `initialize`·`tools/list`·`tools/call` 계약은 유지합니다.
+- **2026-08-30**: 전체 canonical `ncs.db`를 Vercel에 직접 싣지 않고, 온톨로지·KSA·수행준거·교육추천 근거를 포함한 compact SQLite(425,758,720 bytes)와 배포 ZIP(120,785,873 bytes)으로 만드는 결정론적 Builder·Refresh Builder를 정리했습니다.
 - **2026-08-30**: Vercel 릴리스 워크플로에 배포 후 원격 스모크 게이트를 추가했습니다. `GET 405 종료`, `initialize`, `tools/list`, 공개 7개 도구 호출, `ncs_analysis`의 `career_path`·`qualification`·`job_base`·`ontology` 4개 모드를 실제 URL에 대해 검증합니다.
 - **2026-08-30**: 운영 스모크는 `.github/workflows/vercel-snapshot-release.yml`과 `scripts/verify_remote_mcp_transport.py`가 담당합니다. 스냅샷 테이블 누락, raw exception 노출, 공개 도구 응답 회귀가 발생하면 production 승격 전에 릴리스를 중단합니다.
 - **2026-08-30**: `initialize`의 `serverInfo.version`에 Git 커밋 SHA, Vercel 배포 ID 또는 스냅샷 해시를 포함해 신·구 배포를 식별할 수 있게 했습니다.
