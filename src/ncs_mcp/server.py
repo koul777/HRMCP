@@ -432,30 +432,22 @@ def database_readiness_metadata(db_path) -> dict[str, Any]:
             capabilities: dict[str, dict[str, Any]] = {}
             degraded_capabilities: list[str] = []
             for capability, table_names in READINESS_CAPABILITY_TABLES.items():
-                missing_tables = [
-                    table_name
-                    for table_name in table_names
-                    if not (
+                missing_tables: list[str] = []
+                empty_tables: list[str] = []
+                for table_name in table_names:
+                    table_state = (
                         result["core_tables"].get(table_name)
                         or result["public_tool_tables"].get(table_name)
                         or {}
-                    ).get("exists")
-                ]
-                empty_tables = [
-                    table_name
-                    for table_name in table_names
-                    if not missing_tables
-                    and not (
-                        result["core_tables"].get(table_name)
-                        or result["public_tool_tables"].get(table_name)
-                        or {}
-                    ).get("has_rows", bool(
-                        (
-                            result["core_tables"].get(table_name)
-                            or {}
-                        ).get("row_count")
-                    ))
-                ]
+                    )
+                    if not table_state.get("exists"):
+                        missing_tables.append(table_name)
+                        continue
+                    has_rows = table_state.get("has_rows")
+                    if has_rows is None:
+                        has_rows = int(table_state.get("row_count") or 0) > 0
+                    if not has_rows:
+                        empty_tables.append(table_name)
                 available = not missing_tables and not empty_tables
                 capabilities[capability] = {
                     "available": available,
