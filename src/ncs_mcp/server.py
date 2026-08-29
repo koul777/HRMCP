@@ -891,6 +891,116 @@ def _render_ncs_unit_detail_markdown(result: dict[str, Any]) -> str | None:
 _PUBLIC_MARKDOWN_RENDERERS["ncs_unit_detail"] = _render_ncs_unit_detail_markdown
 
 
+def _training_course_row(item: dict[str, Any]) -> dict[str, Any]:
+    course = item.get("training_course")
+    if isinstance(course, dict):
+        return course
+    return item
+
+
+def _render_ncs_training_markdown(result: dict[str, Any]) -> str | None:
+    training_courses = result.get("training_courses")
+    if isinstance(training_courses, list):
+        lines = ["## NCS 훈련과정"]
+        count_line = _returned_total_line(len(training_courses), min(len(training_courses), 3))
+        if count_line:
+            lines.append(count_line)
+        lines.append("")
+        rows = []
+        for item in training_courses[:3]:
+            course = _training_course_row(item)
+            rows.append(
+                [
+                    course.get("training_course_id"),
+                    _short_markdown_text(course.get("compe_unit_name"), max_chars=42),
+                    course.get("train_time"),
+                    _short_markdown_text(course.get("meth_name"), max_chars=32),
+                ]
+            )
+        lines.append(
+            _markdown_table(
+                ["과정ID", "과정명", "훈련시간", "훈련방법"],
+                rows,
+            )
+        )
+        return _append_markdown_footer(lines, result.get("audit"))
+    course = result.get("training_course")
+    if not isinstance(course, dict):
+        return None
+    lines = [
+        f"## 훈련과정 상세: {_short_markdown_text(course.get('compe_unit_name'), max_chars=60)}",
+        "",
+    ]
+    lines.append(
+        _markdown_table(
+            ["과정ID", "과정명", "훈련시간", "훈련방법"],
+            [[
+                course.get("training_course_id"),
+                course.get("compe_unit_name"),
+                course.get("train_time"),
+                course.get("meth_name"),
+            ]],
+        )
+    )
+    link_meta = result.get("link_meta")
+    if isinstance(link_meta, dict):
+        lines.extend(["", "### 연결 요약", ""])
+        for key in (
+            "unit_links",
+            "concept_links",
+            "element_links",
+            "goal_concept_links",
+            "delivery_relations",
+        ):
+            meta = link_meta.get(key)
+            if not isinstance(meta, dict):
+                continue
+            count_line = _returned_total_line(
+                meta.get("total_count"),
+                meta.get("returned_count"),
+            )
+            if count_line:
+                lines.append(f"- `{key}`: {count_line}")
+    evidence_rows: list[list[Any]] = []
+    evidence_specs = (
+        ("unit_links", "능력단위"),
+        ("element_links", "능력단위요소"),
+        ("concept_links", "온톨로지 개념"),
+        ("goal_concept_links", "훈련목표 개념"),
+    )
+    for key, label in evidence_specs:
+        rows = result.get(key)
+        if not isinstance(rows, list) or not rows:
+            continue
+        row = rows[0]
+        evidence_rows.append(
+            [
+                label,
+                row.get("unit_code"),
+                row.get("element_id"),
+                row.get("concept_id"),
+                _short_markdown_text(
+                    row.get("element_name")
+                    or row.get("concept_name")
+                    or row.get("link_method"),
+                    max_chars=34,
+                ),
+            ]
+        )
+    if evidence_rows:
+        lines.extend(["", "### 연결 식별자", ""])
+        lines.append(
+            _markdown_table(
+                ["연결", "능력단위코드", "요소ID", "개념ID", "근거"],
+                evidence_rows,
+            )
+        )
+    return _append_markdown_footer(lines, result.get("audit"))
+
+
+_PUBLIC_MARKDOWN_RENDERERS["ncs_training"] = _render_ncs_training_markdown
+
+
 def _render_tool_response_markdown(
     result: dict[str, Any],
     *,

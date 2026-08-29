@@ -79,6 +79,7 @@ SUMMARY_TRAINING_COURSE_FIELDS = (
     "compe_unit_level",
     "train_goal",
     "train_time",
+    "meth_name",
 )
 DEFINITION_TRUST_WEIGHT = {
     "human_reviewed": 1.0,

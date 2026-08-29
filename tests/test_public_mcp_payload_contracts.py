@@ -764,6 +764,34 @@ class PublicMcpPayloadContractTests(unittest.TestCase):
         self.assertRegex(detail_text, rf"\|\s*{first_element_id}\s*\|")
         self.assertRegex(detail_text, rf"\|\s*{first_criteria_id}\s*\|")
 
+    def test_ncs_training_markdown_stays_under_budget_and_preserves_ids(self) -> None:
+        training_wire, training_text = self._call_tool_wire(
+            "ncs_training",
+            {"limit": 3},
+        )
+        self.assertNotIn("structuredContent", training_wire)
+        self.assertLessEqual(len(training_text), MAX_MARKDOWN_TEXT_CHARS["ncs_training"])
+        self.assertTrue(training_text.endswith(SOURCE_FOOTER), training_text)
+        self.assertRegex(training_text, r"\|\s*과정ID\s*\|")
+        self.assertIn("훈련방법", training_text)
+        self.assertRegex(training_text, rf"\b{self.seed['course_ids'][0]}\b")
+
+        course_id = int(self.seed["link_course_id"])
+        detail = server.ncs_training(training_course_id=course_id)
+        unit_code = detail["unit_links"][0]["unit_code"]
+        element_id = detail["element_links"][0]["element_id"]
+        concept_id = detail["concept_links"][0]["concept_id"]
+        detail_wire, detail_text = self._call_tool_wire(
+            "ncs_training",
+            {"training_course_id": course_id},
+        )
+        self.assertNotIn("structuredContent", detail_wire)
+        self.assertLessEqual(len(detail_text), 3_000)
+        self.assertTrue(detail_text.endswith(SOURCE_FOOTER), detail_text)
+        self.assertIn("| 연결 | 능력단위코드 | 요소ID | 개념ID | 근거 |", detail_text)
+        for identifier in (course_id, unit_code, element_id, concept_id):
+            self.assertRegex(detail_text, rf"\b{re.escape(str(identifier))}\b")
+
 
     def test_qualification_without_collection_status_remains_usable(self) -> None:
         conn = connect(self.db_path)
