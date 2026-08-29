@@ -1,0 +1,70 @@
+HRMCP NOTICE
+============
+
+Last reviewed: 2026-08-30
+
+1. Repository license scope
+---------------------------
+
+Repository-authored source code and documentation are provided under the MIT
+License in LICENSE. That license does not relicense source data, generated
+databases, deployment snapshots, OCR models, vendored software, downloaded
+documents, images, or other third-party material. Those materials remain
+subject to their respective source terms and rights.
+
+The generated operational database and deployment snapshot ZIP are not tracked
+as Git source files. A release may nevertheless stage a verified compact
+SQLite snapshot and materialize it read-only in the Vercel runtime. Exclusion
+from Git and inclusion in a deployment artifact are therefore separate facts.
+
+2. NCS and public-data sources
+------------------------------
+
+HRMCP normalizes and links National Competency Standards (NCS) material whose
+source provider is principally the Human Resources Development Service of
+Korea (한국산업인력공단). As of the review date, the following official
+data.go.kr API records used by the active product display
+"이용허락범위 제한 없음" for those API records:
+
+- NCS reference information (record 15128213; hrdkapi/NCS004, NCS005, NCS006)
+- NCS training-course information (record 15086447; ncsTrainingCource/openapi18)
+- NCS competency-unit qualification items (record 15074404; ncsClCdJm)
+- NCS job-base competencies (record 15086440; ncsJobBase/openapi19)
+
+API access approval, credentials, traffic limits, attribution requirements,
+third-party rights, and current record terms still apply. This list does not
+mean that every file or web page used by the project has unrestricted terms.
+The full source-by-source inventory, official links, code paths, storage
+tables, product status, and verification caveats are maintained in
+DATA_SOURCE_NOTICE.md.
+
+3. Direct ncs.go.kr collection paths
+-------------------------------------
+
+The scripts/ncs_learning_module_*.py files handle learning-module pages or
+files obtained directly from ncs.go.kr. The NCS copyright policy identifies
+learning modules as KOGL Type 2 material, which prohibits commercial use, and
+individual files may contain third-party content. These legacy/reference
+artifacts are not active HRMCP serving evidence. Verify each file's current
+notice and third-party rights before redistribution, commercial use, or
+serving-snapshot inclusion.
+
+src/ncs_mcp/collect_sqf_library.py reads SQF library posts and attachments
+directly from ncs.go.kr. Those legacy/reference materials require post- and
+file-level rights review before redistribution or deployment inclusion. An
+open-data API record must not be assumed to govern a separate direct-download
+path.
+
+4. Other third-party material
+------------------------------
+
+- scripts/vendor/3d-force-graph-1.80.0.min.js retains its own MIT notice in
+  scripts/vendor/3d-force-graph-LICENSE.txt.
+- data/ocr/tessdata/*.traineddata and third-party or externally sourced images,
+  documents, and media are not relicensed by the repository MIT License unless
+  an applicable file-specific notice expressly says otherwise.
+
+HRMCP is not endorsed by the Human Resources Development Service of Korea,
+data.go.kr, or another source provider. Its output is non-official planning and
+review support, not an official NCS definition, qualification decision, hiring
+decision, or legal determination.

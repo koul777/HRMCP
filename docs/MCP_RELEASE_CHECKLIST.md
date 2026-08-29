@@ -29,10 +29,12 @@ Use `stable/internal release` only when the active release-readiness artifact ha
 qualification coverage, or provenance reconfirmation remains open.
 
 Internal deployment and external source distribution are separate decisions.
-The repository currently has no root license declaration or package license
-metadata. Do not publish it as an open-source or redistributable package until
-an authorized owner selects the license and confirms required third-party
-notices; automation must not make that legal decision.
+The root `LICENSE` and package metadata declare MIT for repository-authored code
+and documentation. `NOTICE` and `DATA_SOURCE_NOTICE.md` keep source-data,
+deployment-snapshot, OCR, vendored-code, downloaded-file, and other third-party
+rights outside that grant. Before a release, verify that all three files are
+present and current; do not describe the repository MIT license as relicensing
+NCS source data or direct `ncs.go.kr` downloads.
 
 ## 1. Secrets And Data Boundary
 

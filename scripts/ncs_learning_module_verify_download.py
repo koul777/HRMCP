@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+# DATA USE WARNING:
+# Artifacts handled by this script come from NCS learning-module pages/files on
+# ncs.go.kr. Treat them as legacy/reference-only, not active HRMCP serving data.
+# Do not assume the public-data portal API record governs files downloaded from
+# ncs.go.kr. Before redistribution, commercial use, or serving-snapshot inclusion,
+# verify the file-level KOGL/public-use notice and any third-party rights.
+
 import argparse
 import json
 from collections import Counter
