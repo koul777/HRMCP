@@ -26,9 +26,15 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Plan or explicitly apply the all-major append-only NCS API refresh."
     )
-    parser.add_argument("--db", type=Path, default=ROOT / "data" / "processed" / "ncs.db")
-    parser.add_argument("--source", action="append", choices=ALLOWED_SOURCES, dest="sources")
-    parser.add_argument("--apply", action="store_true", help="Permit local append-only API collection.")
+    parser.add_argument(
+        "--db", type=Path, default=ROOT / "data" / "processed" / "ncs.db"
+    )
+    parser.add_argument(
+        "--source", action="append", choices=ALLOWED_SOURCES, dest="sources"
+    )
+    parser.add_argument(
+        "--apply", action="store_true", help="Permit local append-only API collection."
+    )
     output_group = parser.add_mutually_exclusive_group()
     output_group.add_argument(
         "--output",
@@ -61,7 +67,12 @@ def main() -> int:
     )
     destination = write_refresh_evidence(report, args.out)
     print(destination)
-    return 0 if report.get("outcome") in {"plan_only", "succeeded_append_only", "completed_with_warnings"} else 2
+    return (
+        0
+        if report.get("outcome")
+        in {"plan_only", "succeeded_append_only", "completed_with_warnings"}
+        else 2
+    )
 
 
 if __name__ == "__main__":

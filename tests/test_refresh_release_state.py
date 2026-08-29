@@ -109,10 +109,13 @@ class RefreshReleaseStateTests(unittest.TestCase):
         }
 
     @staticmethod
-    def _verification_report() -> dict:
+    def _verification_report(
+        url: str = "https://production.example/api/mcp",
+    ) -> dict:
         return {
             "schema": "ncs_remote_mcp_transport_verification_v1",
             "ok": True,
+            "url": url,
             "failures": [],
             "checks": {"initialize": {"status": 200}},
         }
@@ -151,6 +154,27 @@ class RefreshReleaseStateTests(unittest.TestCase):
         self.assertFalse(report["ok"])
         self.assertIn(
             "remote_verification_failed",
+            {item["code"] for item in report["blockers"]},
+        )
+        self.assertFalse((self.state / "current.json").exists())
+
+    def test_failed_staged_verification_never_promotes(self) -> None:
+        staged = self._verification_report("https://staged.example/api/mcp")
+        staged["ok"] = False
+        staged["failures"] = ["tools_call_ontology"]
+        staged_path = self._write("staged-failed.json", staged)
+
+        report = promote_refresh_baseline(
+            refresh_report_path=self.refresh_path,
+            publish_report_path=self.publish_path,
+            staged_verification_path=staged_path,
+            remote_verification_path=self.verify_path,
+            state_dir=self.state,
+        )
+
+        self.assertFalse(report["ok"])
+        self.assertIn(
+            "staged_verification_failed",
             {item["code"] for item in report["blockers"]},
         )
         self.assertFalse((self.state / "current.json").exists())
@@ -198,6 +222,40 @@ class RefreshReleaseStateTests(unittest.TestCase):
         lineage = baseline.with_suffix(baseline.suffix + ".refresh.json")
         self.assertTrue(lineage.is_file())
         self.assertFalse(report["safety"]["automatic_deletion"])
+
+    def test_success_records_staged_and_production_verification_lineage(self) -> None:
+        staged_path = self._write(
+            "staged.json",
+            self._verification_report("https://staged.example/api/mcp"),
+        )
+
+        report = promote_refresh_baseline(
+            refresh_report_path=self.refresh_path,
+            publish_report_path=self.publish_path,
+            staged_verification_path=staged_path,
+            remote_verification_path=self.verify_path,
+            state_dir=self.state,
+        )
+
+        self.assertTrue(report["ok"])
+        self.assertEqual(
+            report["verification_targets"],
+            {
+                "staged": "https://staged.example/api/mcp",
+                "production": "https://production.example/api/mcp",
+            },
+        )
+        lineage = json.loads(
+            Path(report["lineage"]["path"]).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            lineage["verification_targets"]["staged"]["report"]["sha256"],
+            report["inputs"]["staged_verification"]["sha256"],
+        )
+        self.assertEqual(
+            lineage["verification_targets"]["production"]["report"]["sha256"],
+            report["inputs"]["remote_verification"]["sha256"],
+        )
 
     def test_pointer_hash_tamper_is_rejected(self) -> None:
         report = self._promote()
@@ -252,6 +310,10 @@ class RefreshReleaseStateTests(unittest.TestCase):
 
     def test_promotion_cli_writes_machine_readable_report(self) -> None:
         out = self.root / "promotion-report.json"
+        staged = self._write(
+            "staged-cli.json",
+            self._verification_report("https://staged.example/api/mcp"),
+        )
         with redirect_stdout(io.StringIO()):
             return_code = promotion_cli.main(
                 [
@@ -259,6 +321,8 @@ class RefreshReleaseStateTests(unittest.TestCase):
                     str(self.refresh_path),
                     "--publish-report",
                     str(self.publish_path),
+                    "--staged-verification",
+                    str(staged),
                     "--remote-verification",
                     str(self.verify_path),
                     "--state-dir",

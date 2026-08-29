@@ -9,7 +9,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class InternalDeploymentConfigTests(unittest.TestCase):
-    def test_institutional_chat_compose_uses_secret_files_and_private_port(self) -> None:
+    def test_institutional_chat_compose_uses_secret_files_and_private_port(
+        self,
+    ) -> None:
         text = (ROOT / "deploy" / "compose.institutional-chat.yml").read_text(
             encoding="utf-8"
         )
@@ -36,9 +38,9 @@ class InternalDeploymentConfigTests(unittest.TestCase):
         self.assertNotIn("NCS_CHAT_GATEWAY_SECRET:", text)
         self.assertNotIn("NCS_CHAT_AUDIT_HASH_SALT:", text)
 
-        env_text = (
-            ROOT / "deploy" / "institutional-chat.env.example"
-        ).read_text(encoding="utf-8")
+        env_text = (ROOT / "deploy" / "institutional-chat.env.example").read_text(
+            encoding="utf-8"
+        )
         self.assertIn("NCS_CHAT_GATEWAY_SECRET_FILE=", env_text)
         self.assertIn("NCS_CHAT_AUDIT_HASH_SALT_FILE=", env_text)
         self.assertNotIn("NCS_CHAT_GATEWAY_SECRET=", env_text)
@@ -48,14 +50,14 @@ class InternalDeploymentConfigTests(unittest.TestCase):
         text = (ROOT / "deploy" / "compose.internal.yml").read_text(encoding="utf-8")
 
         required_markers = (
-            'read_only: true',
-            '- ALL',
-            '- no-new-privileges:true',
+            "read_only: true",
+            "- ALL",
+            "- no-new-privileges:true",
             'NCS_MCP_READ_ONLY: "1"',
             'NCS_MCP_ENABLE_OPERATOR_TOOLS: "0"',
             'NCS_MCP_MAX_CONCURRENT_RECOMMENDATIONS: "2"',
             'NCS_MCP_ALLOW_REMOTE_BIND: "1"',
-            'target: /data/ncs.db',
+            "target: /data/ncs.db",
             '"127.0.0.1:${NCS_MCP_HOST_PORT:-8766}:8766"',
         )
         for marker in required_markers:
@@ -82,9 +84,7 @@ class InternalDeploymentConfigTests(unittest.TestCase):
         self.assertNotIn('port "${NCS_MCP_PORT}" --allow-remote-bind', text)
 
     def test_docker_ci_uses_hardened_read_only_service_runtime(self) -> None:
-        text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
-            encoding="utf-8"
-        )
+        text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
         for marker in (
             "--read-only --cap-drop ALL",
@@ -113,11 +113,14 @@ class InternalDeploymentConfigTests(unittest.TestCase):
             "scripts\\refresh_ncs_api_evidence.py",
             "scripts\\refresh_ncs_ontology.py",
             "scripts\\publish_vercel_snapshot.py",
+            "'deploy', '--prebuilt'",
             "--skip-domain",
             "vercel promote",
             "functions\\python.func",
             "scripts\\verify_remote_mcp_transport.py",
             "scripts\\promote_ncs_refresh_baseline.py",
+            '--staged-verification "$env:STAGED_REMOTE_REPORT"',
+            '--remote-verification "$env:FINAL_REMOTE_REPORT"',
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, text)
@@ -132,7 +135,9 @@ class InternalDeploymentConfigTests(unittest.TestCase):
         )
         self.assertIn("production baseline was intentionally left unchanged", text)
         self.assertNotIn("github.event.inputs.source_db_url", text)
-        self.assertIn("Remove generated release working copies\n        if: always()", text)
+        self.assertIn(
+            "Remove generated release working copies\n        if: always()", text
+        )
 
     def test_mcp_client_examples_use_hrmcp_name(self) -> None:
         stdio = json.loads((ROOT / "mcp" / "ncs-mcp.json").read_text(encoding="utf-8"))
@@ -157,7 +162,9 @@ class InternalDeploymentConfigTests(unittest.TestCase):
                 text = (ROOT / name).read_text(encoding="utf-8")
                 self.assertIn(
                     'if "%NCS_MCP_READ_ONLY%"=="" set NCS_MCP_READ_ONLY=1',
-                    text.replace('set "NCS_MCP_READ_ONLY=1"', "set NCS_MCP_READ_ONLY=1"),
+                    text.replace(
+                        'set "NCS_MCP_READ_ONLY=1"', "set NCS_MCP_READ_ONLY=1"
+                    ),
                 )
 
         http_text = (ROOT / "run_ncs_mcp_http.cmd").read_text(encoding="utf-8")
@@ -167,11 +174,11 @@ class InternalDeploymentConfigTests(unittest.TestCase):
         chat_text = (ROOT / "run_ncs_institutional_chat.cmd").read_text(
             encoding="utf-8"
         )
-        self.assertIn('NCS_MCP_READ_ONLY=1', chat_text)
-        self.assertIn('NCS_MCP_ENABLE_OPERATOR_TOOLS=0', chat_text)
-        self.assertIn('NCS_CHAT_HOST=127.0.0.1', chat_text)
-        self.assertIn('NCS_CHAT_ALLOW_REMOTE_BIND', chat_text)
-        self.assertIn('ncs_mcp.institutional_chat', chat_text)
+        self.assertIn("NCS_MCP_READ_ONLY=1", chat_text)
+        self.assertIn("NCS_MCP_ENABLE_OPERATOR_TOOLS=0", chat_text)
+        self.assertIn("NCS_CHAT_HOST=127.0.0.1", chat_text)
+        self.assertIn("NCS_CHAT_ALLOW_REMOTE_BIND", chat_text)
+        self.assertIn("ncs_mcp.institutional_chat", chat_text)
 
     def test_docs_do_not_recommend_unsafe_container_serving(self) -> None:
         for name in (

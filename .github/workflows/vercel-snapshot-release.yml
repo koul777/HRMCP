@@ -331,7 +331,7 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($target)) {
             $target = 'production'
           }
-          $arguments = @('deploy', '--yes', '--token', $env:VERCEL_TOKEN)
+          $arguments = @('deploy', '--prebuilt', '--yes', '--token', $env:VERCEL_TOKEN)
           if ($target -eq 'production') {
             $arguments += @('--prod', '--skip-domain')
           }
@@ -391,6 +391,7 @@ jobs:
           python scripts\promote_ncs_refresh_baseline.py `
             --refresh-report "$env:REFRESH_REPORT" `
             --publish-report "$env:PUBLISH_REPORT" `
+            --staged-verification "$env:STAGED_REMOTE_REPORT" `
             --remote-verification "$env:FINAL_REMOTE_REPORT" `
             --state-dir "$env:REFRESH_STATE_DIR" `
             --out "$env:BUILD_DIR\baseline_promotion_report.json"

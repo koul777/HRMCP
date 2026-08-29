@@ -30,7 +30,9 @@ from .training_recommendation import build_training_course_ontology_links
 
 
 ALLOWED_SOURCES = ("training-courses", "job-base")
-PROHIBITED_SOURCES = frozenset({"qualification", "qualifications", "ncs006", "elements", "element"})
+PROHIBITED_SOURCES = frozenset(
+    {"qualification", "qualifications", "ncs006", "elements", "element"}
+)
 TRUSTED_REVIEW_STATUSES = ("human_reviewed", "accepted", "reviewed")
 LOCK_SUFFIX = ".api-refresh.lock"
 DEFAULT_STATE_DIR = Path(__file__).resolve().parents[2] / ".state" / "ncs-api-refresh"
@@ -54,7 +56,12 @@ class RefreshLockError(RuntimeError):
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 
 def _truthy(value: str | None) -> bool:
@@ -107,8 +114,15 @@ def _resolve_prepared_output(
     if output_path is not None:
         candidate = Path(output_path).expanduser().resolve()
     else:
-        base_dir = Path(state_dir).expanduser().resolve() if state_dir is not None else DEFAULT_STATE_DIR
-        candidate = base_dir / f"ncs_refresh_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.db"
+        base_dir = (
+            Path(state_dir).expanduser().resolve()
+            if state_dir is not None
+            else DEFAULT_STATE_DIR
+        )
+        candidate = (
+            base_dir
+            / f"ncs_refresh_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.db"
+        )
     return candidate, _prepared_output_error(source_db, candidate)
 
 
@@ -130,11 +144,15 @@ def _prepare_working_copy(source_db: Path, prepared_output: Path) -> Path:
     """
 
     prepared_output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = prepared_output.with_name(f"{prepared_output.name}.building-{uuid.uuid4().hex}.tmp")
+    temporary = prepared_output.with_name(
+        f"{prepared_output.name}.building-{uuid.uuid4().hex}.tmp"
+    )
     source_conn: sqlite3.Connection | None = None
     destination_conn: sqlite3.Connection | None = None
     try:
-        source_conn = sqlite3.connect(f"file:{source_db.resolve().as_posix()}?mode=ro", uri=True)
+        source_conn = sqlite3.connect(
+            f"file:{source_db.resolve().as_posix()}?mode=ro", uri=True
+        )
         destination_conn = sqlite3.connect(temporary)
         source_conn.backup(destination_conn)
         quick_check = destination_conn.execute("PRAGMA quick_check").fetchall()
@@ -207,7 +225,9 @@ def trusted_review_status_counts(db_path: Path) -> dict[str, int]:
             columns = conn.execute(f"PRAGMA table_info({quoted_table})").fetchall()
             for column in columns:
                 column_name = str(column[1])
-                if column_name != "review_status" and not column_name.endswith("_review_status"):
+                if column_name != "review_status" and not column_name.endswith(
+                    "_review_status"
+                ):
                     continue
                 quoted_column = '"' + column_name.replace('"', '""') + '"'
                 rows = conn.execute(
@@ -300,7 +320,9 @@ def _base_evidence(
         "db_artifact": db_path.name,
         "mode": "apply" if apply else "plan_only",
         "sources": list(sources),
-        "credentials_present": {source: bool(credentials.get(source)) for source in sources},
+        "credentials_present": {
+            source: bool(credentials.get(source)) for source in sources
+        },
         "limits": {
             "allowed_sources": list(ALLOWED_SOURCES),
             "scope": "all_major_codes_discovered_from_db",
@@ -339,16 +361,26 @@ def refresh_ncs_api_evidence(
     A failed or unprovable source never implies deletion or stale-row cleanup.
     """
 
-    selected_sources = tuple(dict.fromkeys(str(source).strip() for source in sources if str(source).strip()))
+    selected_sources = tuple(
+        dict.fromkeys(str(source).strip() for source in sources if str(source).strip())
+    )
     resolved_db = Path(db_path).expanduser().resolve()
-    active_credentials = dict(_credentials_from_settings() if credentials is None else credentials)
-    evidence = _base_evidence(resolved_db, selected_sources, apply=apply, credentials=active_credentials)
+    active_credentials = dict(
+        _credentials_from_settings() if credentials is None else credentials
+    )
+    evidence = _base_evidence(
+        resolved_db, selected_sources, apply=apply, credentials=active_credentials
+    )
     preflight_errors: list[str] = []
     if not selected_sources:
         preflight_errors.append("at_least_one_source_is_required")
-    invalid_sources = [source for source in selected_sources if source not in ALLOWED_SOURCES]
+    invalid_sources = [
+        source for source in selected_sources if source not in ALLOWED_SOURCES
+    ]
     if invalid_sources:
-        preflight_errors.append("unsupported_or_prohibited_sources:" + ",".join(sorted(invalid_sources)))
+        preflight_errors.append(
+            "unsupported_or_prohibited_sources:" + ",".join(sorted(invalid_sources))
+        )
     db_error = _canonical_db_error(resolved_db)
     if db_error:
         preflight_errors.append(db_error)
@@ -360,21 +392,45 @@ def refresh_ncs_api_evidence(
         if source in ALLOWED_SOURCES and not active_credentials.get(source):
             preflight_errors.append(f"missing_credentials:{source}")
     if preflight_errors:
-        evidence.update({"outcome": "blocked_preflight", "preflight_errors": preflight_errors, "finished_at": _utc_now()})
+        evidence.update(
+            {
+                "outcome": "blocked_preflight",
+                "preflight_errors": preflight_errors,
+                "finished_at": _utc_now(),
+            }
+        )
         return evidence
 
     try:
         major_codes = discover_major_codes(resolved_db)
     except (sqlite3.Error, OSError):
-        evidence.update({"outcome": "blocked_preflight", "preflight_errors": ["major_code_discovery_failed"], "finished_at": _utc_now()})
+        evidence.update(
+            {
+                "outcome": "blocked_preflight",
+                "preflight_errors": ["major_code_discovery_failed"],
+                "finished_at": _utc_now(),
+            }
+        )
         return evidence
     if not major_codes:
-        evidence.update({"outcome": "blocked_preflight", "preflight_errors": ["no_major_codes_discovered"], "finished_at": _utc_now()})
+        evidence.update(
+            {
+                "outcome": "blocked_preflight",
+                "preflight_errors": ["no_major_codes_discovered"],
+                "finished_at": _utc_now(),
+            }
+        )
         return evidence
     evidence["major_codes"] = major_codes
     evidence["major_count"] = len(major_codes)
     if not apply:
-        evidence.update({"outcome": "plan_only", "writes_performed": False, "finished_at": _utc_now()})
+        evidence.update(
+            {
+                "outcome": "plan_only",
+                "writes_performed": False,
+                "finished_at": _utc_now(),
+            }
+        )
         return evidence
 
     prepared_output, output_error = _resolve_prepared_output(
@@ -386,12 +442,16 @@ def refresh_ncs_api_evidence(
         evidence.update(
             {
                 "outcome": "blocked_preflight",
-                "preflight_errors": [output_error or "prepared_output_resolution_failed"],
+                "preflight_errors": [
+                    output_error or "prepared_output_resolution_failed"
+                ],
                 "finished_at": _utc_now(),
             }
         )
         return evidence
-    evidence["failed_output_policy"] = "retain_for_operator_review" if retain_failed_output else "delete_failed_copy"
+    evidence["failed_output_policy"] = (
+        "retain_for_operator_review" if retain_failed_output else "delete_failed_copy"
+    )
 
     operations = callables or RefreshCallables()
     working_copy_created = False
@@ -413,7 +473,9 @@ def refresh_ncs_api_evidence(
                 "raw_ksa_sha256": before_raw_hash,
                 "trusted_review_status_counts": before_trusted,
             }
-            source_results: dict[str, list[dict[str, Any]]] = {source: [] for source in selected_sources}
+            source_results: dict[str, list[dict[str, Any]]] = {
+                source: [] for source in selected_sources
+            }
             source_unproven: list[str] = []
             source_failures: list[str] = []
             warnings: list[str] = []
@@ -447,12 +509,26 @@ def refresh_ncs_api_evidence(
                             safe_result = _safe_job_base_result(result)
                             proven = _job_base_completion_proven(result)
                             if safe_result["missing_local_units"]:
-                                warnings.append(f"job-base:{major_code}:missing_local_units")
-                        source_results[source].append({"major_code": major_code, "completion_proven": proven, **safe_result})
+                                warnings.append(
+                                    f"job-base:{major_code}:missing_local_units"
+                                )
+                        source_results[source].append(
+                            {
+                                "major_code": major_code,
+                                "completion_proven": proven,
+                                **safe_result,
+                            }
+                        )
                         if not proven:
                             source_unproven.append(f"{source}:{major_code}")
                     except Exception as exc:  # Preserve later-major evidence; never reconcile failures.
-                        source_results[source].append({"major_code": major_code, "completion_proven": False, "error_type": type(exc).__name__})
+                        source_results[source].append(
+                            {
+                                "major_code": major_code,
+                                "completion_proven": False,
+                                "error_type": type(exc).__name__,
+                            }
+                        )
                         source_failures.append(f"{source}:{major_code}")
 
             evidence["source_results"] = source_results
@@ -473,7 +549,10 @@ def refresh_ncs_api_evidence(
             linked: dict[str, Any] | None = None
             training_fully_proven = (
                 "training-courses" in selected_sources
-                and not any(item.startswith("training-courses:") for item in source_unproven + source_failures)
+                and not any(
+                    item.startswith("training-courses:")
+                    for item in source_unproven + source_failures
+                )
                 and collection_invariants_unchanged
             )
             if training_fully_proven:
@@ -483,12 +562,24 @@ def refresh_ncs_api_evidence(
                         linked = operations.build_training_links(conn, reset=False)
                     finally:
                         conn.close()
-                    evidence["training_link_build"] = {"performed": True, "reset": False, "result_keys": sorted(linked.keys())}
+                    evidence["training_link_build"] = {
+                        "performed": True,
+                        "reset": False,
+                        "result_keys": sorted(linked.keys()),
+                    }
                 except Exception as exc:
                     source_failures.append("training-links")
-                    evidence["training_link_build"] = {"performed": False, "reset": False, "error_type": type(exc).__name__}
+                    evidence["training_link_build"] = {
+                        "performed": False,
+                        "reset": False,
+                        "error_type": type(exc).__name__,
+                    }
             elif "training-courses" in selected_sources:
-                evidence["training_link_build"] = {"performed": False, "reset": False, "reason": "training_completion_not_proven"}
+                evidence["training_link_build"] = {
+                    "performed": False,
+                    "reset": False,
+                    "reason": "training_completion_not_proven",
+                }
 
             after_raw_hash = raw_ksa_sha256(working_db)
             after_trusted = trusted_review_status_counts(working_db)
@@ -496,11 +587,15 @@ def refresh_ncs_api_evidence(
                 "raw_ksa_sha256": after_raw_hash,
                 "trusted_review_status_counts": after_trusted,
             }
-            invariants_unchanged = before_raw_hash == after_raw_hash and before_trusted == after_trusted
+            invariants_unchanged = (
+                before_raw_hash == after_raw_hash and before_trusted == after_trusted
+            )
             evidence["working_copy_invariants_unchanged"] = invariants_unchanged
             if not invariants_unchanged:
                 evidence["outcome"] = "failed_no_reconcile"
-                evidence["invariant_failure"] = "raw_ksa_or_trusted_review_status_changed"
+                evidence["invariant_failure"] = (
+                    "raw_ksa_or_trusted_review_status_changed"
+                )
             elif source_failures:
                 evidence["outcome"] = "failed_no_reconcile"
             elif source_unproven:
@@ -525,10 +620,15 @@ def refresh_ncs_api_evidence(
             }
             if not source_unchanged:
                 evidence["outcome"] = "failed_no_reconcile"
-                evidence["source_integrity_failure"] = "source_db_changed_during_refresh"
+                evidence["source_integrity_failure"] = (
+                    "source_db_changed_during_refresh"
+                )
             evidence["source_writes_performed"] = False
             evidence["working_copy_writes_performed"] = True
-            if evidence["outcome"] in {"succeeded_append_only", "completed_with_warnings"}:
+            if evidence["outcome"] in {
+                "succeeded_append_only",
+                "completed_with_warnings",
+            }:
                 evidence["prepared_output"] = str(prepared_output)
             elif retain_failed_output:
                 evidence["failed_output"] = str(prepared_output)
@@ -537,9 +637,21 @@ def refresh_ncs_api_evidence(
                 working_copy_created = False
                 evidence["failed_output_deleted"] = True
     except RefreshLockError:
-        evidence.update({"outcome": "blocked_preflight", "preflight_errors": ["refresh_lock_already_exists"], "source_writes_performed": False})
+        evidence.update(
+            {
+                "outcome": "blocked_preflight",
+                "preflight_errors": ["refresh_lock_already_exists"],
+                "source_writes_performed": False,
+            }
+        )
     except (OSError, sqlite3.Error) as exc:
-        evidence.update({"outcome": "failed_no_reconcile", "failure_type": type(exc).__name__, "source_writes_performed": False})
+        evidence.update(
+            {
+                "outcome": "failed_no_reconcile",
+                "failure_type": type(exc).__name__,
+                "source_writes_performed": False,
+            }
+        )
         if working_copy_created and prepared_output.exists():
             if retain_failed_output:
                 evidence["failed_output"] = str(prepared_output)

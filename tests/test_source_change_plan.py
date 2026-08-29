@@ -6,14 +6,21 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 
-from ncs_mcp.source_change_plan import ProjectionColumn, TableSpec, build_source_change_plan
+from ncs_mcp.source_change_plan import (
+    ProjectionColumn,
+    TableSpec,
+    build_source_change_plan,
+)
 
 
 ITEM_SPEC = TableSpec(
     name="items",
     from_sql='"items" AS t',
     key_columns=(ProjectionColumn("item_code", 't."item_code"'),),
-    content_columns=(ProjectionColumn("label", 't."label"'), ProjectionColumn("level", 't."level"')),
+    content_columns=(
+        ProjectionColumn("label", 't."label"'),
+        ProjectionColumn("level", 't."level"'),
+    ),
     scope_columns=(ProjectionColumn("unit_code", 't."unit_code"'),),
 )
 
@@ -54,7 +61,9 @@ class SourceChangePlanTests(unittest.TestCase):
             connection.commit()
         return path
 
-    def _plan(self, baseline: Path, candidate: Path, **kwargs: object) -> dict[str, object]:
+    def _plan(
+        self, baseline: Path, candidate: Path, **kwargs: object
+    ) -> dict[str, object]:
         return build_source_change_plan(
             baseline,
             candidate,
@@ -97,7 +106,9 @@ class SourceChangePlanTests(unittest.TestCase):
         self.assertEqual(table["counts"]["inserted"], 1)
         self.assertEqual(table["counts"]["updated"], 1)
         self.assertEqual(table["counts"]["deleted"], 1)
-        self.assertEqual(table["affected_scopes"]["unit_code"]["values"], ["U1", "U2", "U4"])
+        self.assertEqual(
+            table["affected_scopes"]["unit_code"]["values"], ["U1", "U2", "U4"]
+        )
         self.assertEqual(plan["suggested_strategy"], "incremental_rebuild")
 
     def test_schema_mismatch_requires_full_rebuild(self) -> None:
@@ -121,7 +132,11 @@ class SourceChangePlanTests(unittest.TestCase):
         plan = self._plan(baseline, candidate)
 
         self.assertTrue(plan["full_rebuild_required"])
-        reason = next(reason for reason in plan["structural_reasons"] if reason["code"] == "duplicate_stable_key")
+        reason = next(
+            reason
+            for reason in plan["structural_reasons"]
+            if reason["code"] == "duplicate_stable_key"
+        )
         self.assertEqual(reason["candidate_duplicate"]["key"], {"item_code": "A"})
 
     def test_change_ratio_recommends_full_fallback(self) -> None:
@@ -147,7 +162,10 @@ class SourceChangePlanTests(unittest.TestCase):
         self.assertTrue(plan["full_rebuild_recommended"])
         self.assertEqual(plan["suggested_strategy"], "full_rebuild")
         self.assertTrue(
-            any(reason["code"] == "overall_change_ratio_exceeded" for reason in plan["recommendation_reasons"])
+            any(
+                reason["code"] == "overall_change_ratio_exceeded"
+                for reason in plan["recommendation_reasons"]
+            )
         )
 
     def test_missing_table_requires_full_rebuild(self) -> None:

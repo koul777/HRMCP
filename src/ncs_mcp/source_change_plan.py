@@ -46,7 +46,10 @@ DEFAULT_TABLE_SPECS: tuple[TableSpec, ...] = (
     TableSpec(
         name="classifications",
         from_sql='"classifications" AS t',
-        key_columns=tuple(_column(name) for name in ("major_code", "middle_code", "small_code", "sub_code")),
+        key_columns=tuple(
+            _column(name)
+            for name in ("major_code", "middle_code", "small_code", "sub_code")
+        ),
         content_columns=tuple(
             _column(name)
             for name in (
@@ -80,7 +83,10 @@ DEFAULT_TABLE_SPECS: tuple[TableSpec, ...] = (
             _column("api_definition"),
             _column("api_match_status"),
         ),
-        scope_columns=(_column("unit_code"), ProjectionColumn("major_code", 'c."major_code"')),
+        scope_columns=(
+            _column("unit_code"),
+            ProjectionColumn("major_code", 'c."major_code"'),
+        ),
         schema_tables=("competency_units", "classifications"),
     ),
     TableSpec(
@@ -150,7 +156,14 @@ DEFAULT_TABLE_SPECS: tuple[TableSpec, ...] = (
         name="ncs_training_courses",
         from_sql='"ncs_training_courses" AS t',
         key_columns=tuple(
-            _column(name) for name in ("ncs_cl_cd", "train_goal", "train_time", "fac_name", "meth_name")
+            _column(name)
+            for name in (
+                "ncs_cl_cd",
+                "train_goal",
+                "train_time",
+                "fac_name",
+                "meth_name",
+            )
         ),
         content_columns=tuple(
             _column(name)
@@ -167,7 +180,10 @@ DEFAULT_TABLE_SPECS: tuple[TableSpec, ...] = (
                 "ncs_subd_cdnm",
             )
         ),
-        scope_columns=(ProjectionColumn("unit_code", 't."ncs_cl_cd"'), _column("ncs_lclas_cd")),
+        scope_columns=(
+            ProjectionColumn("unit_code", 't."ncs_cl_cd"'),
+            _column("ncs_lclas_cd"),
+        ),
     ),
     TableSpec(
         name="ncs_qualification_items",
@@ -180,7 +196,13 @@ DEFAULT_TABLE_SPECS: tuple[TableSpec, ...] = (
         from_sql='"ncs_unit_qualification_links" AS t',
         key_columns=tuple(
             _column(name)
-            for name in ("unit_code", "jm_cd", "organ_std_ver_cd", "ablt_unit_typ_cd", "min_edu_trng_tm")
+            for name in (
+                "unit_code",
+                "jm_cd",
+                "organ_std_ver_cd",
+                "ablt_unit_typ_cd",
+                "min_edu_trng_tm",
+            )
         ),
         content_columns=tuple(
             _column(name)
@@ -247,7 +269,11 @@ DEFAULT_TABLE_SPECS: tuple[TableSpec, ...] = (
             )
         ),
         scope_columns=(_column("unit_code"), _column("ncs_lclas_cd")),
-        schema_tables=("ncs_unit_job_base_links", "ncs_job_base_competencies", "ncs_job_base_factors"),
+        schema_tables=(
+            "ncs_unit_job_base_links",
+            "ncs_job_base_competencies",
+            "ncs_job_base_factors",
+        ),
     ),
     TableSpec(
         name="ncs_career_paths",
@@ -344,7 +370,9 @@ def _table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
     return row is not None
 
 
-def _table_schema(connection: sqlite3.Connection, table_name: str) -> list[dict[str, Any]]:
+def _table_schema(
+    connection: sqlite3.Connection, table_name: str
+) -> list[dict[str, Any]]:
     return [
         {
             "cid": int(row[0]),
@@ -354,12 +382,16 @@ def _table_schema(connection: sqlite3.Connection, table_name: str) -> list[dict[
             "default": row[4],
             "pk": int(row[5]),
         }
-        for row in connection.execute(f"PRAGMA table_info({_quote_identifier(table_name)})")
+        for row in connection.execute(
+            f"PRAGMA table_info({_quote_identifier(table_name)})"
+        )
     ]
 
 
 def _schema_hash(schema: list[dict[str, Any]]) -> str:
-    payload = json.dumps(schema, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    payload = json.dumps(
+        schema, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -378,7 +410,9 @@ def _tagged_value(value: Any) -> Any:
 
 
 def _hash_content(names: Sequence[str], values: Sequence[Any]) -> str:
-    ordered_payload = [[name, _tagged_value(value)] for name, value in zip(names, values, strict=True)]
+    ordered_payload = [
+        [name, _tagged_value(value)] for name, value in zip(names, values, strict=True)
+    ]
     canonical = json.dumps(ordered_payload, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -403,11 +437,15 @@ def _projection_sql(spec: TableSpec, *, order: bool) -> str:
         fields.append(f'{_order_expression(column.expression)} AS "__order_{index}"')
     sql = f"SELECT {', '.join(fields)} FROM {spec.from_sql}"
     if order:
-        sql += " ORDER BY " + ", ".join(f'"__order_{index}"' for index in range(len(spec.key_columns)))
+        sql += " ORDER BY " + ", ".join(
+            f'"__order_{index}"' for index in range(len(spec.key_columns))
+        )
     return sql
 
 
-def _duplicate_key(connection: sqlite3.Connection, spec: TableSpec) -> dict[str, Any] | None:
+def _duplicate_key(
+    connection: sqlite3.Connection, spec: TableSpec
+) -> dict[str, Any] | None:
     projection = _projection_sql(spec, order=False)
     key_aliases = [f'"__key_{index}"' for index in range(len(spec.key_columns))]
     sql = (
@@ -420,14 +458,15 @@ def _duplicate_key(connection: sqlite3.Connection, spec: TableSpec) -> dict[str,
         return None
     return {
         "key": {
-            column.name: row[index]
-            for index, column in enumerate(spec.key_columns)
+            column.name: row[index] for index, column in enumerate(spec.key_columns)
         },
         "count": int(row[-1]),
     }
 
 
-def _iter_projected_rows(connection: sqlite3.Connection, spec: TableSpec) -> Iterator[_ProjectedRow]:
+def _iter_projected_rows(
+    connection: sqlite3.Connection, spec: TableSpec
+) -> Iterator[_ProjectedRow]:
     key_count = len(spec.key_columns)
     content_count = len(spec.content_columns)
     scope_count = len(spec.scope_columns)
@@ -457,10 +496,14 @@ def _next_or_none(iterator: Iterator[_ProjectedRow]) -> _ProjectedRow | None:
 
 
 def _render_key(spec: TableSpec, row: _ProjectedRow) -> dict[str, Any]:
-    return {column.name: row.key[index] for index, column in enumerate(spec.key_columns)}
+    return {
+        column.name: row.key[index] for index, column in enumerate(spec.key_columns)
+    }
 
 
-def _record_scopes(collector: _BoundedScopes, spec: TableSpec, row: _ProjectedRow) -> None:
+def _record_scopes(
+    collector: _BoundedScopes, spec: TableSpec, row: _ProjectedRow
+) -> None:
     for index, column in enumerate(spec.scope_columns):
         collector.add(column.name, row.scopes[index])
 
@@ -478,7 +521,11 @@ def _compare_table(
     old = _next_or_none(baseline_rows)
     new = _next_or_none(candidate_rows)
     counts = {"baseline": 0, "candidate": 0, "inserted": 0, "updated": 0, "deleted": 0}
-    samples: dict[str, list[dict[str, Any]]] = {"inserted": [], "updated": [], "deleted": []}
+    samples: dict[str, list[dict[str, Any]]] = {
+        "inserted": [],
+        "updated": [],
+        "deleted": [],
+    }
     scopes = _BoundedScopes(scope_limit)
 
     while old is not None or new is not None:
@@ -565,7 +612,9 @@ def build_source_change_plan(
     if minimum_table_changes_for_fallback < 1:
         raise ValueError("minimum_table_changes_for_fallback must be positive")
     if sample_limit < 0 or scope_limit < 1:
-        raise ValueError("sample_limit must be non-negative and scope_limit must be positive")
+        raise ValueError(
+            "sample_limit must be non-negative and scope_limit must be positive"
+        )
 
     baseline_path = Path(baseline_db)
     candidate_path = Path(candidate_db)
@@ -574,9 +623,10 @@ def build_source_change_plan(
     table_results: list[dict[str, Any]] = []
     checked_schema_pairs: set[tuple[str, str]] = set()
 
-    with closing(_connect_readonly(baseline_path)) as baseline, closing(
-        _connect_readonly(candidate_path)
-    ) as candidate:
+    with (
+        closing(_connect_readonly(baseline_path)) as baseline,
+        closing(_connect_readonly(candidate_path)) as candidate,
+    ):
         for spec in table_specs:
             table_structural_error = False
             schema_evidence: dict[str, Any] = {}
@@ -692,7 +742,14 @@ def build_source_change_plan(
     comparable_results = [result for result in table_results if "counts" in result]
     totals = {
         key: sum(int(result["counts"][key]) for result in comparable_results)
-        for key in ("baseline", "candidate", "inserted", "updated", "deleted", "changed")
+        for key in (
+            "baseline",
+            "candidate",
+            "inserted",
+            "updated",
+            "deleted",
+            "changed",
+        )
     }
     overall_ratio = totals["changed"] / max(totals["baseline"], totals["candidate"], 1)
     if totals["changed"] and overall_ratio > full_rebuild_change_ratio_threshold:

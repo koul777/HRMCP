@@ -65,7 +65,10 @@ class ApiRefreshBuilderTests(unittest.TestCase):
             credentials={},
         )
         self.assertEqual(prohibited["outcome"], "blocked_preflight")
-        self.assertIn("unsupported_or_prohibited_sources:qualification", prohibited["preflight_errors"])
+        self.assertIn(
+            "unsupported_or_prohibited_sources:qualification",
+            prohibited["preflight_errors"],
+        )
 
         missing = refresh_ncs_api_evidence(
             self.db_path,
@@ -78,9 +81,15 @@ class ApiRefreshBuilderTests(unittest.TestCase):
     def test_plan_only_discovers_all_majors_without_writes(self) -> None:
         before = self.db_path.read_bytes()
         callbacks = RefreshCallables(
-            collect_training=lambda *_args, **_kwargs: self.fail("plan must not collect"),
-            collect_job_base=lambda *_args, **_kwargs: self.fail("plan must not collect"),
-            build_training_links=lambda *_args, **_kwargs: self.fail("plan must not link"),
+            collect_training=lambda *_args, **_kwargs: self.fail(
+                "plan must not collect"
+            ),
+            collect_job_base=lambda *_args, **_kwargs: self.fail(
+                "plan must not collect"
+            ),
+            build_training_links=lambda *_args, **_kwargs: self.fail(
+                "plan must not link"
+            ),
         )
         report = refresh_ncs_api_evidence(
             self.db_path,
@@ -102,7 +111,10 @@ class ApiRefreshBuilderTests(unittest.TestCase):
             calls.append(("training", key, kwargs))
             conn = sqlite3.connect(db)
             conn.execute("CREATE TABLE IF NOT EXISTS refresh_marker (major_code TEXT)")
-            conn.execute("INSERT INTO refresh_marker(major_code) VALUES (?)", (kwargs["major_code"],))
+            conn.execute(
+                "INSERT INTO refresh_marker(major_code) VALUES (?)",
+                (kwargs["major_code"],),
+            )
             conn.commit()
             conn.close()
             return self._ok_training(db, key, **kwargs)
@@ -125,9 +137,15 @@ class ApiRefreshBuilderTests(unittest.TestCase):
             callables=RefreshCallables(training, job_base, links),
         )
         self.assertEqual(report["outcome"], "succeeded_append_only")
-        self.assertEqual([(name, kwargs["major_code"]) for name, _, kwargs in calls], [
-            ("training", "01"), ("training", "02"), ("job-base", "01"), ("job-base", "02"),
-        ])
+        self.assertEqual(
+            [(name, kwargs["major_code"]) for name, _, kwargs in calls],
+            [
+                ("training", "01"),
+                ("training", "02"),
+                ("job-base", "01"),
+                ("job-base", "02"),
+            ],
+        )
         for _, _, kwargs in calls:
             self.assertIsNone(kwargs["module_name"])
             self.assertEqual(kwargs["page_no"], 1)
@@ -139,18 +157,30 @@ class ApiRefreshBuilderTests(unittest.TestCase):
         self.assertTrue(prepared.is_file())
         self.assertNotEqual(prepared.read_bytes(), source_before)
         prepared_conn = sqlite3.connect(prepared)
-        self.assertEqual(prepared_conn.execute("SELECT COUNT(*) FROM refresh_marker").fetchone()[0], 2)
+        self.assertEqual(
+            prepared_conn.execute("SELECT COUNT(*) FROM refresh_marker").fetchone()[0],
+            2,
+        )
         prepared_conn.close()
 
-    def test_unprovable_training_completion_never_builds_links_or_publishes(self) -> None:
+    def test_unprovable_training_completion_never_builds_links_or_publishes(
+        self,
+    ) -> None:
         prepared = Path(self.tempdir.name) / "state" / "ncs.db"
+
         def incomplete(_db: Path, _key: str, **kwargs: object) -> dict[str, object]:
-            return {"major_code": kwargs["major_code"], "pages_processed": 0, "reported_total_page": 0}
+            return {
+                "major_code": kwargs["major_code"],
+                "pages_processed": 0,
+                "reported_total_page": 0,
+            }
 
         callbacks = RefreshCallables(
             incomplete,
             self._ok_job_base,
-            lambda *_args, **_kwargs: self.fail("links require proven training completion"),
+            lambda *_args, **_kwargs: self.fail(
+                "links require proven training completion"
+            ),
         )
         report = refresh_ncs_api_evidence(
             self.db_path,
@@ -165,7 +195,9 @@ class ApiRefreshBuilderTests(unittest.TestCase):
         self.assertFalse(report["training_link_build"]["performed"])
         self.assertFalse(prepared.exists())
 
-    def test_raw_ksa_and_trusted_review_invariants_are_verified_on_the_copy(self) -> None:
+    def test_raw_ksa_and_trusted_review_invariants_are_verified_on_the_copy(
+        self,
+    ) -> None:
         before_hash = raw_ksa_sha256(self.db_path)
         before_reviews = trusted_review_status_counts(self.db_path)
         source_before = self.db_path.read_bytes()
@@ -173,7 +205,9 @@ class ApiRefreshBuilderTests(unittest.TestCase):
 
         def corrupt_raw(db: Path, _key: str, **kwargs: object) -> dict[str, object]:
             conn = sqlite3.connect(db)
-            conn.execute("UPDATE ksa_items SET ksa_text_raw = 'changed' WHERE ksa_id = 1")
+            conn.execute(
+                "UPDATE ksa_items SET ksa_text_raw = 'changed' WHERE ksa_id = 1"
+            )
             conn.commit()
             conn.close()
             return self._ok_training(db, "unused", **kwargs)
@@ -184,12 +218,19 @@ class ApiRefreshBuilderTests(unittest.TestCase):
             apply=True,
             output_path=prepared,
             credentials=self.credentials,
-            callables=RefreshCallables(corrupt_raw, self._ok_job_base, lambda *_args, **_kwargs: {"ok": True}),
+            callables=RefreshCallables(
+                corrupt_raw, self._ok_job_base, lambda *_args, **_kwargs: {"ok": True}
+            ),
         )
         self.assertEqual(report["outcome"], "failed_no_reconcile")
         self.assertFalse(report["working_copy_invariants_unchanged"])
-        self.assertEqual(report["working_copy_invariants_before"]["raw_ksa_sha256"], before_hash)
-        self.assertEqual(report["working_copy_invariants_before"]["trusted_review_status_counts"], before_reviews)
+        self.assertEqual(
+            report["working_copy_invariants_before"]["raw_ksa_sha256"], before_hash
+        )
+        self.assertEqual(
+            report["working_copy_invariants_before"]["trusted_review_status_counts"],
+            before_reviews,
+        )
         self.assertEqual(self.db_path.read_bytes(), source_before)
         self.assertFalse(prepared.exists())
 
@@ -197,11 +238,15 @@ class ApiRefreshBuilderTests(unittest.TestCase):
         prepared = Path(self.tempdir.name) / "state" / "ncs.db"
         source_before = self.db_path.read_bytes()
 
-        def first_writes_second_fails(db: Path, _key: str, **kwargs: object) -> dict[str, object]:
+        def first_writes_second_fails(
+            db: Path, _key: str, **kwargs: object
+        ) -> dict[str, object]:
             if kwargs["major_code"] == "01":
                 conn = sqlite3.connect(db)
                 conn.execute("CREATE TABLE partial_refresh_marker (marker TEXT)")
-                conn.execute("INSERT INTO partial_refresh_marker(marker) VALUES ('first-major')")
+                conn.execute(
+                    "INSERT INTO partial_refresh_marker(marker) VALUES ('first-major')"
+                )
                 conn.commit()
                 conn.close()
                 return self._ok_training(db, "unused", **kwargs)
@@ -228,9 +273,13 @@ class ApiRefreshBuilderTests(unittest.TestCase):
         prepared = Path(self.tempdir.name) / "state" / "ncs.db"
         source_conn = sqlite3.connect(self.db_path)
         try:
-            self.assertEqual(source_conn.execute("PRAGMA journal_mode=WAL").fetchone()[0], "wal")
+            self.assertEqual(
+                source_conn.execute("PRAGMA journal_mode=WAL").fetchone()[0], "wal"
+            )
             source_conn.execute("CREATE TABLE wal_probe (value TEXT)")
-            source_conn.execute("INSERT INTO wal_probe(value) VALUES ('committed-in-wal')")
+            source_conn.execute(
+                "INSERT INTO wal_probe(value) VALUES ('committed-in-wal')"
+            )
             source_conn.commit()
             source_before = self.db_path.read_bytes()
 
@@ -243,7 +292,9 @@ class ApiRefreshBuilderTests(unittest.TestCase):
                 callables=RefreshCallables(
                     self._ok_training,
                     self._ok_job_base,
-                    lambda *_args, **_kwargs: self.fail("job-base-only refresh must not link training"),
+                    lambda *_args, **_kwargs: self.fail(
+                        "job-base-only refresh must not link training"
+                    ),
                 ),
             )
             self.assertEqual(report["outcome"], "succeeded_append_only")
@@ -288,7 +339,9 @@ class ApiRefreshBuilderTests(unittest.TestCase):
                 credentials=self.credentials,
             )
         self.assertEqual(report["outcome"], "blocked_preflight")
-        self.assertIn("read_only_environment_refuses_refresh", report["preflight_errors"])
+        self.assertIn(
+            "read_only_environment_refuses_refresh", report["preflight_errors"]
+        )
 
 
 if __name__ == "__main__":

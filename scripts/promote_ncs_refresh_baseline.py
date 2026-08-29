@@ -28,6 +28,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--refresh-report", type=Path, required=True)
     parser.add_argument("--publish-report", type=Path, required=True)
+    parser.add_argument(
+        "--staged-verification",
+        type=Path,
+        help="optional exact staged-deployment MCP verification JSON",
+    )
     parser.add_argument("--remote-verification", type=Path, required=True)
     parser.add_argument(
         "--state-dir",
@@ -40,6 +45,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     report = promote_refresh_baseline(
         refresh_report_path=args.refresh_report,
         publish_report_path=args.publish_report,
+        staged_verification_path=args.staged_verification,
         remote_verification_path=args.remote_verification,
         state_dir=args.state_dir,
     )
