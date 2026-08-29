@@ -416,6 +416,26 @@ jobs:
         shell: powershell
         run: Write-Output "No source projection change was detected; deployment and baseline promotion were skipped."
 
+      - name: Smoke current public MCP URL when deployment is skipped
+        if: steps.ontology.outputs.needs_deploy != 'true' && (inputs.deploy_target == 'production' || github.event_name == 'schedule')
+        shell: powershell
+        run: |
+          $productionMcpUrl = $env:NCS_PRODUCTION_MCP_URL
+          if ([string]::IsNullOrWhiteSpace($productionMcpUrl)) {
+            $productionMcpUrl = 'https://ncs-mcp-bridge-mini2.vercel.app/api/mcp'
+          }
+          $productionMcpUrl = $productionMcpUrl.TrimEnd('/')
+          $finalReport = Join-Path $env:BUILD_DIR 'remote_mcp_transport_verify_final.json'
+          python scripts\verify_remote_mcp_transport.py `
+            "$productionMcpUrl" `
+            --concurrency 5 `
+            --request-timeout 30 `
+            --out "$finalReport"
+          if ($LASTEXITCODE -ne 0) {
+            throw "The current public production MCP URL failed transport or public-tool smoke verification."
+          }
+          "FINAL_REMOTE_REPORT=$finalReport" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Upload release evidence
         id: upload_evidence
         if: always()

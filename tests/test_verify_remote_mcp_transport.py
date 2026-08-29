@@ -106,7 +106,7 @@ class RemoteMcpTransportVerifierTests(unittest.TestCase):
             ROOT / ".github" / "workflows" / "vercel-snapshot-release.yml"
         ).read_text(encoding="utf-8")
 
-        self.assertEqual(workflow.count("--request-timeout 30"), 2)
+        self.assertEqual(workflow.count("--request-timeout 30"), 3)
         self.assertIn(
             "The staged deployment failed transport or public-tool smoke verification.",
             workflow,
@@ -118,6 +118,14 @@ class RemoteMcpTransportVerifierTests(unittest.TestCase):
         self.assertLess(
             workflow.index("The staged deployment failed transport or public-tool smoke verification."),
             workflow.index("vercel promote"),
+        )
+        self.assertIn(
+            "The current public production MCP URL failed transport or public-tool smoke verification.",
+            workflow,
+        )
+        self.assertLess(
+            workflow.index("No source projection change was detected; deployment and baseline promotion were skipped."),
+            workflow.index("The current public production MCP URL failed transport or public-tool smoke verification."),
         )
 
     def test_all_public_tools_and_analysis_modes_are_smoked_without_body_logging(self) -> None:
