@@ -388,10 +388,20 @@ NCS API 키는 이 저장소 외부에서 발급합니다. 공공데이터포털
 
 ## 📄 코드 라이선스·데이터 출처·면책
 
-저장소가 작성한 코드와 문서는 [MIT License](LICENSE)로 제공합니다. 이 라이선스는 NCS 원천 데이터,
-가공 DB와 배포 snapshot, OCR 모델, vendor 코드, 다운로드 문서·이미지 등 제3자 자료의 권리를
-변경하거나 재허락하지 않습니다. 각 자료에는 원 출처의 이용조건과 제3자 권리가 별도로 적용되며,
-요약 경계와 필수 고지는 [NOTICE](NOTICE)에서 확인할 수 있습니다.
+저장소의 코드 라이선스와 외부 데이터 이용조건은 서로 다른 권리 경계입니다.
+
+| 대상 | 적용 라이선스·이용조건 |
+| --- | --- |
+| HRMCP가 작성한 소스 코드와 문서 | [MIT License](LICENSE). 복제·수정·배포 시 저작권 고지와 MIT 허가문을 포함해야 합니다. |
+| NCS 원천 데이터와 공공데이터 API 응답 | 저장소 MIT 적용 대상이 아닙니다. 원 제공기관의 최신 이용조건, 출처 표시, API 승인·트래픽 조건과 제3자 권리가 별도로 적용됩니다. |
+| 가공 DB, ontology index, compact SQLite와 Vercel snapshot | 원천을 가공했다는 이유로 원천의 이용조건이 사라지거나 더 넓은 재배포 권리가 생기지 않습니다. |
+| OCR 모델, vendor 코드, 다운로드 문서·이미지·영상 | 파일별 라이선스와 원 권리자의 조건이 적용됩니다. `3d-force-graph` 고지는 [`scripts/vendor/3d-force-graph-LICENSE.txt`](scripts/vendor/3d-force-graph-LICENSE.txt)에 보존합니다. |
+
+재배포하거나 서비스에 포함하기 전에는 [NOTICE](NOTICE)와
+[데이터 출처·이용조건 고지](DATA_SOURCE_NOTICE.md)를 함께 확인해야 합니다. 저장소 코드·문서를
+배포할 때는 `LICENSE`와 `NOTICE`를 포함하고, DB·snapshot·외부 자료는 해당 원천의 최신 공식 조건과
+파일별 권리를 다시 확인해야 합니다. API 레코드의 이용조건이 NCS 누리집에서 직접 받은 별도 파일이나
+문서까지 자동으로 포괄한다고 간주하지 않습니다.
 
 생성 운영 DB와 배포 snapshot ZIP은 Git 소스 파일로 추적하지 않습니다. 다만 Vercel 릴리스는 검증된
 compact SQLite snapshot을 별도 배포 산출물로 스테이징하고, 런타임에서 읽기 전용으로 materialize할 수
