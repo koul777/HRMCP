@@ -504,7 +504,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mcp", specifier = ">=1.26,<2" },
+    { name = "mcp", specifier = ">=1.26,<=1.29.1" },
     { name = "olefile", specifier = ">=0.47,<1" },
     { name = "openpyxl", specifier = ">=3.1,<4" },
     { name = "pillow", specifier = ">=10,<13" },

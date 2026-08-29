@@ -9,7 +9,7 @@ description = "NCS structured knowledge database and MCP server"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-  "mcp>=1.26,<2",
+  "mcp>=1.26,<=1.29.1",
   "requests>=2.32,<3",
   "python-dotenv>=1,<2",
 ]
