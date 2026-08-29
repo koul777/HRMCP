@@ -20,6 +20,34 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 from ncs_mcp.server import configure_transport, mcp
 
+_GET_METHOD_NOT_ALLOWED_BODY = (
+    b'{"jsonrpc":"2.0","id":"server-error","error":{"code":-32600,'
+    b'"message":"Method Not Allowed: standalone MCP GET streams are not enabled; use POST"}}'
+)
+
+
+async def _reject_standalone_get(send) -> None:
+    """End optional Streamable HTTP GET requests before the MCP SDK opens SSE."""
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 405,
+            "headers": [
+                (b"allow", b"POST"),
+                (b"cache-control", b"no-store"),
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(_GET_METHOD_NOT_ALLOWED_BODY)).encode("ascii")),
+            ],
+        }
+    )
+    await send(
+        {
+            "type": "http.response.body",
+            "body": _GET_METHOD_NOT_ALLOWED_BODY,
+            "more_body": False,
+        }
+    )
+
 
 def _parse_csv_list(value: str | None) -> list[str]:
     if not value:
@@ -160,6 +188,14 @@ def _app_with_path_prefix_fix() -> object:
 
     async def app(scope, receive, send) -> None:
         if scope.get("type") == "http":
+            # This stateless service does not emit server-initiated MCP
+            # messages. MCP Streamable HTTP therefore permits an immediate
+            # 405 for the optional standalone GET stream. Rejecting it before
+            # lifespan startup prevents the SDK's unbounded SSE receive loop
+            # from occupying a Vercel function until maxDuration.
+            if str(scope.get("method", "")).upper() == "GET":
+                await _reject_standalone_get(send)
+                return
             await _ensure_lifespan_ready()
             path = scope.get("path", "/") or "/"
             if path == "/" or path == "":
