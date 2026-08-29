@@ -4,6 +4,7 @@ import asyncio
 from contextlib import contextmanager
 from itertools import product
 import json
+import re
 import sqlite3
 import sys
 import tempfile
@@ -730,6 +731,20 @@ class PublicMcpPayloadContractTests(unittest.TestCase):
             if isinstance(item, dict)
         )
         self.assertLessEqual(len(content_text), 2_000, len(content_text))
+        self.assertIn(SOURCE_FOOTER, content_text)
+
+    def test_ncs_search_markdown_stays_under_budget_and_preserves_ids(self) -> None:
+        search_wire, search_text = self._call_tool_wire(
+            "ncs_search",
+            {"query": RANK_QUERY, "scope": "unit", "limit": 5},
+        )
+        self.assertNotIn("structuredContent", search_wire)
+        self.assertLessEqual(len(search_text), MAX_MARKDOWN_TEXT_CHARS["ncs_search"])
+        self.assertIn("| 능력단위명 | 수준 | 분류경로 | 능력단위코드 |", search_text)
+        self.assertIn("audit.generated_at:", search_text)
+        self.assertTrue(search_text.endswith(SOURCE_FOOTER), search_text)
+        self.assertRegex(search_text, re.escape(EXACT_UNIT))
+
 
     def test_qualification_without_collection_status_remains_usable(self) -> None:
         conn = connect(self.db_path)

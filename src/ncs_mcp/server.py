@@ -673,6 +673,101 @@ _PUBLIC_MARKDOWN_RENDERERS: dict[
 ] = {}
 
 
+def _classification_path_text(path: dict[str, Any] | None) -> str:
+    if not isinstance(path, dict):
+        return "-"
+    values = [
+        path.get("major"),
+        path.get("middle"),
+        path.get("small"),
+        path.get("sub"),
+    ]
+    parts = [
+        _clean_markdown_text(value)
+        for value in values
+        if _clean_markdown_text(value)
+    ]
+    return " > ".join(parts) or "-"
+
+
+def _render_ncs_search_markdown(result: dict[str, Any]) -> str | None:
+    rows = result.get("results")
+    query = _clean_markdown_text(result.get("query")) or "(분류 목록)"
+    classifications = result.get("classifications")
+    if isinstance(classifications, list) and classifications:
+        visible = classifications[:5]
+        lines = [
+            "## NCS 분류 목록",
+            _returned_total_line(len(classifications), len(visible)) or "",
+            "",
+        ]
+        lines.append(
+            _markdown_table(
+                ["분류ID", "분류경로", "능력단위 수"],
+                [
+                    [
+                        row.get("classification_id"),
+                        _classification_path_text(row),
+                        row.get("unit_count"),
+                    ]
+                    for row in visible
+                ],
+            )
+        )
+        return _append_markdown_footer(lines, result.get("audit"))
+    if not isinstance(rows, list) or not rows:
+        return None
+    visible = rows[:5]
+    table_rows: list[list[Any]] = []
+    other_rows: list[list[Any]] = []
+    for row in visible:
+        if row.get("type") != "unit":
+            path = row.get("path") if isinstance(row.get("path"), dict) else {}
+            other_rows.append(
+                [
+                    row.get("type"),
+                    _short_markdown_text(row.get("text"), max_chars=42),
+                    path.get("unit_code"),
+                    path.get("element_id"),
+                    row.get("id"),
+                ]
+            )
+        else:
+            table_rows.append(
+                [
+                    row.get("text"),
+                    row.get("unit_level"),
+                    _classification_path_text(row.get("path")),
+                    row.get("id"),
+                ]
+            )
+    lines = [f"## NCS 검색 결과: {query}"]
+    count_line = _returned_total_line(len(rows), len(visible))
+    if count_line:
+        lines.append(count_line)
+    lines.append("")
+    if table_rows:
+        lines.append(
+            _markdown_table(
+                ["능력단위명", "수준", "분류경로", "능력단위코드"],
+                table_rows,
+            )
+        )
+    if other_rows:
+        if table_rows:
+            lines.extend(["", "### 기타 근거", ""])
+        lines.append(
+            _markdown_table(
+                ["유형", "내용", "능력단위코드", "요소ID", "식별자"],
+                other_rows,
+            )
+        )
+    return _append_markdown_footer(lines, result.get("audit"))
+
+
+_PUBLIC_MARKDOWN_RENDERERS["ncs_search"] = _render_ncs_search_markdown
+
+
 def _render_tool_response_markdown(
     result: dict[str, Any],
     *,
@@ -1938,6 +2033,7 @@ def search_ncs(query: str, scope: str = "all", limit: int = 50) -> dict[str, Any
             rows = conn.execute(
                 """
                 SELECT cu.unit_code, cu.unit_name_raw, cu.api_definition,
+                       cu.unit_level_raw,
                        c.major_code, c.major_name,
                        c.middle_code, c.middle_name,
                        c.small_code, c.small_name,
@@ -1988,6 +2084,7 @@ def search_ncs(query: str, scope: str = "all", limit: int = 50) -> dict[str, Any
                         "type": "unit",
                         "id": row["unit_code"],
                         "text": row["unit_name_raw"],
+                        "unit_level": row["unit_level_raw"],
                         "path": unit_path(row),
                         "api_definition": row["api_definition"],
                     }
