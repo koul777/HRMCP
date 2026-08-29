@@ -15,10 +15,10 @@
     "NCS_MCP_READINESS_MIN_ROWS": "{\"ksa_items\":574279,\"ksa_atomic_items\":644384,\"ontology_concepts\":533909,\"ksa_concept_links\":574279,\"ksa_atomic_concept_links\":644384,\"ncs_qualification_items\":1,\"ncs_unit_qualification_links\":1,\"training_transition_gold_scenarios\":100,\"training_transition_scenario_reviews\":11,\"ontology_concept_label_candidates\":755}"
   },
   "functions": {
-    "api/index.py": {
+    "api/**/*.py": {
       "maxDuration": 30,
       "includeFiles": "{api/**/*.py,api/ncs_ontology_compact.zip,api/ncs_ontology_compact.manifest.json,src/**/*.py,requirements.txt,pyproject.toml}",
-      "excludeFiles": "{api/*.db,tests/**,docs/**,reports/**,data/**,tmp/**,deploy/**,scripts/**,build/**,.vercel/**,**/__pycache__/**}"
+      "excludeFiles": "{api/**/*.db,api/**/*.db-*,api/**/*.sqlite,api/**/*.sqlite-*,api/**/*.sqlite3,api/**/*.sqlite3-*,tests/**,docs/**,reports/**,data/**,tmp/**,deploy/**,scripts/**,build/**,.vercel/**,**/__pycache__/**}"
     }
   },
   "routes": [

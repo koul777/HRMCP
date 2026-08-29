@@ -4,8 +4,14 @@
 !requirements.txt
 !pyproject.toml
 !api
-api/*.db
 !api/ncs_ontology_compact.zip
 !api/ncs_ontology_compact.manifest.json
 !src
 !src/**/*.py
+api/*.db
+api/**/*.db
+api/**/*.db-*
+api/**/*.sqlite
+api/**/*.sqlite-*
+api/**/*.sqlite3
+api/**/*.sqlite3-*

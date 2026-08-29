@@ -8,7 +8,7 @@ import unittest
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from ncs_mcp.vercel_snapshot import (
     COMPACT_ARCHIVE_NAME,
@@ -39,6 +39,38 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 class VercelSnapshotTests(unittest.TestCase):
+    def _write_function_file_map(
+        self,
+        deployment_root: Path,
+        bundle: Path,
+        *,
+        archive_bytes: bytes = b"compact-archive",
+        manifest_bytes: bytes = b"{}",
+        extra_mappings: dict[str, tuple[str, bytes]] | None = None,
+    ) -> dict[str, str]:
+        bundle.mkdir(parents=True, exist_ok=True)
+        api_root = deployment_root / "api"
+        api_root.mkdir(parents=True, exist_ok=True)
+        (api_root / COMPACT_ARCHIVE_NAME).write_bytes(archive_bytes)
+        (api_root / COMPACT_MANIFEST_NAME).write_bytes(manifest_bytes)
+        mappings = {
+            f"api/{COMPACT_ARCHIVE_NAME}": f"api/{COMPACT_ARCHIVE_NAME}",
+            f"api/{COMPACT_MANIFEST_NAME}": f"api/{COMPACT_MANIFEST_NAME}",
+        }
+        for logical_path, (target_path, contents) in (extra_mappings or {}).items():
+            target = deployment_root / Path(*PurePosixPath(target_path).parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(contents)
+            mappings[logical_path] = target_path
+        (bundle / ".vc-config.json").write_text(
+            json.dumps({"filePathMap": mappings}, sort_keys=True),
+            encoding="utf-8",
+        )
+        (bundle / "vc__handler__python.py").write_text(
+            "handler = object()\n", encoding="utf-8"
+        )
+        return mappings
+
     def _create_database(self, path: Path) -> dict[str, dict[str, int]]:
         physical_counts = {
             "competency_units": 1,
@@ -191,6 +223,14 @@ class VercelSnapshotTests(unittest.TestCase):
         expected_root = REPOSITORY_ROOT / "deploy" / "vercel_mcp_app"
         self.assertEqual(PACKAGE_DEPLOY_ROOT, expected_root)
         self.assertEqual(VERIFY_DEPLOY_ROOT, expected_root)
+        self.assertEqual(
+            (REPOSITORY_ROOT / ".vercelignore").read_text(encoding="utf-8"),
+            (expected_root / ".vercelignore").read_text(encoding="utf-8"),
+        )
+        self.assertEqual(
+            json.loads((REPOSITORY_ROOT / "vercel.json").read_text("utf-8")),
+            json.loads((expected_root / "vercel.json").read_text("utf-8")),
+        )
 
         for deployment_root in (REPOSITORY_ROOT, expected_root):
             rules = (deployment_root / ".vercelignore").read_text(
@@ -200,6 +240,8 @@ class VercelSnapshotTests(unittest.TestCase):
             self.assertIn("!api/ncs_ontology_compact.zip", rules)
             self.assertIn("!api/ncs_ontology_compact.manifest.json", rules)
             self.assertIn("api/*.db", rules)
+            self.assertIn("api/**/*.db", rules)
+            self.assertIn("api/**/*.db-*", rules)
             self.assertIn("!src/**/*.py", rules)
             self.assertNotIn("!deploy/", rules)
             self.assertNotIn("!data/", rules)
@@ -221,22 +263,32 @@ class VercelSnapshotTests(unittest.TestCase):
             minimum_rows = json.loads(config["env"]["NCS_MCP_READINESS_MIN_ROWS"])
             self.assertEqual(minimum_rows["ncs_qualification_items"], 1)
             self.assertEqual(minimum_rows["ncs_unit_qualification_links"], 1)
-            function = config["functions"]["api/index.py"]
+            self.assertNotIn("builds", config)
+            function = config["functions"]["api/**/*.py"]
             self.assertIn("api/ncs_ontology_compact.zip", function["includeFiles"])
             self.assertIn(
                 "api/ncs_ontology_compact.manifest.json", function["includeFiles"]
             )
             self.assertIn("data/**", function["excludeFiles"])
             self.assertIn("tests/**", function["excludeFiles"])
-            self.assertIn("api/*.db", function["excludeFiles"])
+            self.assertIn("api/**/*.db", function["excludeFiles"])
+            if deployment_root == expected_root:
+                self.assertLess(
+                    rules.index("!api/ncs_ontology_compact.manifest.json"),
+                    rules.index("api/**/*.db"),
+                )
 
     def test_verifier_requires_an_under_limit_assembled_function_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             _, archive, manifest, _ = self._create_package(root)
-            bundle = root / "index.func"
-            bundle.mkdir()
-            (bundle / "handler.py").write_text("app = object()\n", encoding="utf-8")
+            bundle = root / ".vercel" / "output" / "functions" / "python.func"
+            self._write_function_file_map(
+                root,
+                bundle,
+                archive_bytes=archive.read_bytes(),
+                manifest_bytes=manifest.read_bytes(),
+            )
 
             result = verify_package(
                 archive,
@@ -248,7 +300,99 @@ class VercelSnapshotTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertTrue(result["function_bundle"]["checked"])
             self.assertTrue(result["function_bundle"]["required"])
-            self.assertEqual(result["function_bundle"]["file_count"], 1)
+            self.assertTrue(result["function_bundle"]["file_path_map_checked"])
+            self.assertEqual(result["function_bundle"]["mapped_file_count"], 2)
+            self.assertGreater(result["function_bundle"]["mapped_bytes"], 0)
+
+    def test_function_bundle_gate_rejects_database_file_path_map(self) -> None:
+        for database_name in (
+            "unexpected.db",
+            "unexpected.db-backup",
+            "unexpected.sqlite",
+            "unexpected.sqlite-wal",
+            "unexpected.sqlite3-copy",
+        ):
+            with self.subTest(database_name=database_name):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    bundle = (
+                        root / ".vercel" / "output" / "functions" / "python.func"
+                    )
+                    logical_path = f"api/{database_name}"
+                    self._write_function_file_map(
+                        root,
+                        bundle,
+                        extra_mappings={
+                            logical_path: (logical_path, b"sqlite payload")
+                        },
+                    )
+
+                    with self.assertRaisesRegex(ValueError, "forbidden database"):
+                        measure_function_bundle(bundle)
+
+    def test_function_bundle_gate_rejects_forbidden_source_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            bundle = root / ".vercel" / "output" / "functions" / "python.func"
+            self._write_function_file_map(
+                root,
+                bundle,
+                extra_mappings={
+                    "data/processed/leak.txt": (
+                        "data/processed/leak.txt",
+                        b"leak = True\n",
+                    )
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "forbidden source path"):
+                measure_function_bundle(bundle)
+
+    def test_function_bundle_gate_rejects_database_target_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            bundle = root / ".vercel" / "output" / "functions" / "python.func"
+            self._write_function_file_map(
+                root,
+                bundle,
+                extra_mappings={
+                    "api/apparently-safe.bin": (
+                        "api/hidden.db-backup",
+                        b"sqlite payload",
+                    )
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "forbidden database"):
+                measure_function_bundle(bundle)
+
+    def test_function_bundle_gate_counts_resolved_file_path_map_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            bundle = root / ".vercel" / "output" / "functions" / "python.func"
+            self._write_function_file_map(
+                root,
+                bundle,
+                archive_bytes=b"z" * 101,
+                manifest_bytes=b"m" * 17,
+                extra_mappings={
+                    "api/duplicate-archive.zip": (
+                        f"api/{COMPACT_ARCHIVE_NAME}",
+                        b"z" * 101,
+                    )
+                },
+            )
+
+            result = measure_function_bundle(bundle)
+
+            self.assertEqual(result["mapped_file_count"], 3)
+            self.assertEqual(result["unique_mapped_file_count"], 2)
+            self.assertEqual(result["mapped_bytes"], 118)
+            self.assertEqual(
+                result["bytes"], result["physical_bytes"] + result["mapped_bytes"]
+            )
+            with self.assertRaisesRegex(ValueError, "filePathMap resolution"):
+                measure_function_bundle(bundle, max_bytes=result["bytes"])
 
     def test_package_verifier_rejects_missing_required_qualification_data(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
