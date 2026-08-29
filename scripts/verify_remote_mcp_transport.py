@@ -60,7 +60,14 @@ def _request(
     return result
 
 
-def _tool_call(url: str, request_id: int, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+def _tool_call(
+    url: str,
+    request_id: int,
+    name: str,
+    arguments: dict[str, Any],
+    *,
+    protocol_version: str,
+) -> dict[str, Any]:
     return _request(
         url,
         method="POST",
@@ -69,16 +76,21 @@ def _tool_call(url: str, request_id: int, name: str, arguments: dict[str, Any]) 
             request_id=request_id,
             params={"name": name, "arguments": arguments},
         ),
-        protocol_version=PROTOCOL_VERSION,
+        protocol_version=protocol_version,
     )
 
 
-def verify(url: str, *, concurrency: int) -> dict[str, Any]:
+def verify(
+    url: str,
+    *,
+    concurrency: int,
+    protocol_version: str = PROTOCOL_VERSION,
+) -> dict[str, Any]:
     url = url.rstrip("/")
     report: dict[str, Any] = {
         "schema": "ncs_remote_mcp_transport_verification_v1",
         "url": url,
-        "protocol_version": PROTOCOL_VERSION,
+        "protocol_version": protocol_version,
         "checks": {},
     }
     checks = report["checks"]
@@ -95,7 +107,7 @@ def verify(url: str, *, concurrency: int) -> dict[str, Any]:
             "initialize",
             request_id=1,
             params={
-                "protocolVersion": PROTOCOL_VERSION,
+                "protocolVersion": protocol_version,
                 "capabilities": {},
                 "clientInfo": {"name": "ncs-vercel-verifier", "version": "1.0"},
             },
@@ -105,31 +117,34 @@ def verify(url: str, *, concurrency: int) -> dict[str, Any]:
         url,
         method="POST",
         body=_rpc("notifications/initialized"),
-        protocol_version=PROTOCOL_VERSION,
+        protocol_version=protocol_version,
     )
     checks["tools_list"] = _request(
         url,
         method="POST",
         body=_rpc("tools/list", request_id=2),
-        protocol_version=PROTOCOL_VERSION,
+        protocol_version=protocol_version,
     )
     checks["tools_call_discover"] = _tool_call(
         url,
         3,
         "ncs_discover_tools",
         {"intent": "인사기획 직무기술서 작성"},
+        protocol_version=protocol_version,
     )
     checks["tools_call_search"] = _tool_call(
         url,
         4,
         "ncs_search",
         {"query": "인사기획", "scope": "all", "limit": 3},
+        protocol_version=protocol_version,
     )
     checks["tools_call_ontology"] = _tool_call(
         url,
         5,
         "ncs_analysis",
         {"mode": "ontology", "query": "인사기획", "limit": 3},
+        protocol_version=protocol_version,
     )
     checks["unsupported_protocol"] = _request(
         url,
@@ -165,7 +180,7 @@ def verify(url: str, *, concurrency: int) -> dict[str, Any]:
     initialize = checks["initialize"]
     if initialize["status"] != 200:
         failures.append("initialize")
-    elif initialize.get("payload", {}).get("result", {}).get("protocolVersion") != PROTOCOL_VERSION:
+    elif initialize.get("payload", {}).get("result", {}).get("protocolVersion") != protocol_version:
         failures.append("initialize_protocol")
     if checks["initialized_notification"]["status"] != 202:
         failures.append("initialized_notification")
@@ -202,9 +217,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Verify a deployed stateless Streamable HTTP MCP endpoint.")
     parser.add_argument("url", help="Full MCP URL, for example https://example.vercel.app/api/mcp")
     parser.add_argument("--concurrency", type=int, default=10)
+    parser.add_argument("--protocol-version", default=PROTOCOL_VERSION)
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
-    report = verify(args.url, concurrency=max(1, min(50, args.concurrency)))
+    report = verify(
+        args.url,
+        concurrency=max(1, min(50, args.concurrency)),
+        protocol_version=args.protocol_version,
+    )
     rendered = json.dumps(report, ensure_ascii=False, indent=2)
     print(rendered)
     if args.out:

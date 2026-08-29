@@ -33,14 +33,15 @@ ci-smoke*/
 
 .vercel
 
-# Vercel serving DB is published as a GitHub Release asset, not committed.
-# See docs/README_VERCEL_HTTPS.md and docs/INTERVIEW_SERVING_DB.md.
+# Generated serving databases and deployment archives are local release
+# artifacts. They are validated and uploaded with the Vercel CLI, never
+# committed as ordinary Git blobs.
 api/ncs_interview_serving_release.db
 api/*.db
+api/*.zip
 api/ncs_interview_db.zip
 
-# Deploy staging artifacts (not used by the Vercel function; excluded via
-# .vercelignore) must not be committed — they exceed GitHub's file size limit.
+# The dedicated Vercel staging directory follows the same rule.
 deploy/vercel_mcp_app/api/ncs_interview_db.zip
 deploy/**/*.zip
 deploy/**/*.db

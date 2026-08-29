@@ -1,4 +1,11 @@
-# keep all files
-api/*.zip
-!api/ncs_interview_serving_release.zip
+/*
+!.vercelignore
+!vercel.json
+!requirements.txt
+!pyproject.toml
+!api
 api/*.db
+!api/ncs_ontology_compact.zip
+!api/ncs_ontology_compact.manifest.json
+!src
+!src/**/*.py

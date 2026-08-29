@@ -6,6 +6,14 @@ from pathlib import Path
 import sqlite3
 from typing import Any, Iterable
 
+from ncs_mcp.compact_postings import (
+    CRITERIA_CONCEPT_FORWARD_TABLE,
+    ONTOLOGY_RELATION_INCOMING_TABLE,
+    ONTOLOGY_RELATION_OUTGOING_TABLE,
+    criteria_concept_ids,
+    ontology_relation_rows,
+)
+
 
 KNOWLEDGE_GRAPH_SCHEMA = "ncs_knowledge_graph_v1"
 DEFAULT_NODE_LIMIT = 72
@@ -17,7 +25,6 @@ CORE_TABLES = (
     "competency_elements",
     "performance_criteria",
     "ontology_concepts",
-    "criteria_concept_links",
 )
 
 
@@ -409,25 +416,62 @@ def _fetch_concepts_for_tasks(
     task_ids: list[int],
     *,
     limit: int,
-) -> tuple[list[sqlite3.Row], int]:
+) -> tuple[list[sqlite3.Row | dict[str, Any]], int]:
     if not task_ids:
         return [], 0
-    placeholders = ",".join("?" for _ in task_ids)
-    rows = conn.execute(
-        f"""
-        SELECT
-            oc.concept_id, oc.concept_name, oc.concept_type,
-            oc.definition, oc.definition_status, oc.review_status,
-            COUNT(DISTINCT ccl.criteria_id) AS task_count
-        FROM criteria_concept_links ccl
-        JOIN ontology_concepts oc ON oc.concept_id = ccl.concept_id
-        WHERE ccl.criteria_id IN ({placeholders})
-          AND LOWER(COALESCE(ccl.link_status, '')) <> 'rejected'
-        GROUP BY oc.concept_id
-        ORDER BY task_count DESC, oc.concept_type, oc.concept_id
-        """,
-        task_ids,
-    ).fetchall()
+    tables = _table_names(conn)
+    if (
+        "criteria_concept_links" not in tables
+        and CRITERIA_CONCEPT_FORWARD_TABLE in tables
+    ):
+        concepts_by_task = criteria_concept_ids(conn, task_ids)
+        task_count_by_concept: Counter[int] = Counter()
+        for concept_ids_for_task in concepts_by_task.values():
+            task_count_by_concept.update(set(concept_ids_for_task))
+        concept_ids = sorted(task_count_by_concept)
+        if not concept_ids:
+            return [], 0
+        placeholders = ",".join("?" for _ in concept_ids)
+        source_rows = conn.execute(
+            f"""
+            SELECT concept_id, concept_name, concept_type,
+                   definition, definition_status, review_status
+            FROM ontology_concepts
+            WHERE concept_id IN ({placeholders})
+            """,
+            concept_ids,
+        ).fetchall()
+        rows: list[dict[str, Any]] = []
+        for source_row in source_rows:
+            row = dict(source_row)
+            row["task_count"] = task_count_by_concept[int(row["concept_id"])]
+            rows.append(row)
+        rows.sort(
+            key=lambda row: (
+                -int(row["task_count"]),
+                str(row.get("concept_type") or ""),
+                int(row["concept_id"]),
+            )
+        )
+    else:
+        placeholders = ",".join("?" for _ in task_ids)
+        rows = list(
+            conn.execute(
+                f"""
+                SELECT
+                    oc.concept_id, oc.concept_name, oc.concept_type,
+                    oc.definition, oc.definition_status, oc.review_status,
+                    COUNT(DISTINCT ccl.criteria_id) AS task_count
+                FROM criteria_concept_links ccl
+                JOIN ontology_concepts oc ON oc.concept_id = ccl.concept_id
+                WHERE ccl.criteria_id IN ({placeholders})
+                  AND LOWER(COALESCE(ccl.link_status, '')) <> 'rejected'
+                GROUP BY oc.concept_id
+                ORDER BY task_count DESC, oc.concept_type, oc.concept_id
+                """,
+                task_ids,
+            ).fetchall()
+        )
     per_type_limit = max(4, min(10, limit))
     type_counts: Counter[str] = Counter()
     selected: list[sqlite3.Row] = []
@@ -460,19 +504,32 @@ def _add_concept_relations(
     if len(concept_ids) < 2:
         return
     concept_placeholders = ",".join("?" for _ in concept_ids)
+    rows: list[sqlite3.Row | dict[str, Any]] = []
     if "ontology_concept_relations" in tables:
-        rows = conn.execute(
-            f"""
-            SELECT relation_id, source_concept_id, target_concept_id,
-                   relation_type, relation_label, review_status
-            FROM ontology_concept_relations
-            WHERE source_concept_id IN ({concept_placeholders})
-              AND target_concept_id IN ({concept_placeholders})
-              AND LOWER(COALESCE(review_status, '')) <> 'rejected'
-            ORDER BY relation_id
-            """,
-            [*concept_ids, *concept_ids],
-        ).fetchall()
+        rows = list(
+            conn.execute(
+                f"""
+                SELECT relation_id, source_concept_id, target_concept_id,
+                       relation_type, relation_label, review_status
+                FROM ontology_concept_relations
+                WHERE source_concept_id IN ({concept_placeholders})
+                  AND target_concept_id IN ({concept_placeholders})
+                  AND LOWER(COALESCE(review_status, '')) <> 'rejected'
+                ORDER BY relation_id
+                """,
+                [*concept_ids, *concept_ids],
+            ).fetchall()
+        )
+    elif {
+        ONTOLOGY_RELATION_OUTGOING_TABLE,
+        ONTOLOGY_RELATION_INCOMING_TABLE,
+    }.issubset(tables):
+        rows = ontology_relation_rows(
+            conn,
+            source_ids=concept_ids,
+            target_ids=concept_ids,
+        )
+    if rows:
         graph.note_omitted("edge:concept_relation", max(len(rows) - 36, 0))
         for row in rows[:36]:
             graph.add_edge(
@@ -487,29 +544,65 @@ def _add_concept_relations(
                     review_state=row["review_status"],
                 )
             )
-    if "task_ksa_concept_relations" not in tables or not task_ids:
+    if not task_ids:
         return
-    task_placeholders = ",".join("?" for _ in task_ids)
-    rows = conn.execute(
-        f"""
-        SELECT
-            MIN(relation_id) AS relation_id,
-            source_concept_id, target_concept_id, relation_type,
-            AVG(confidence_score) AS confidence_score,
-            MIN(review_status) AS review_status,
-            COUNT(*) AS evidence_count
-        FROM task_ksa_concept_relations
-        WHERE criteria_id IN ({task_placeholders})
-          AND source_concept_id IN ({concept_placeholders})
-          AND target_concept_id IN ({concept_placeholders})
-          AND LOWER(COALESCE(review_status, '')) <> 'rejected'
-        GROUP BY source_concept_id, target_concept_id, relation_type
-        ORDER BY evidence_count DESC, confidence_score DESC
-        """,
-        [*task_ids, *concept_ids, *concept_ids],
-    ).fetchall()
-    graph.note_omitted("edge:task_evidence", max(len(rows) - 36, 0))
-    for row in rows[:36]:
+    task_rows: list[sqlite3.Row | dict[str, Any]]
+    if "task_ksa_concept_relations" in tables:
+        task_placeholders = ",".join("?" for _ in task_ids)
+        task_rows = list(
+            conn.execute(
+                f"""
+                SELECT
+                    MIN(relation_id) AS relation_id,
+                    source_concept_id, target_concept_id, relation_type,
+                    AVG(confidence_score) AS confidence_score,
+                    MIN(review_status) AS review_status,
+                    COUNT(*) AS evidence_count
+                FROM task_ksa_concept_relations
+                WHERE criteria_id IN ({task_placeholders})
+                  AND source_concept_id IN ({concept_placeholders})
+                  AND target_concept_id IN ({concept_placeholders})
+                  AND LOWER(COALESCE(review_status, '')) <> 'rejected'
+                GROUP BY source_concept_id, target_concept_id, relation_type
+                ORDER BY evidence_count DESC, confidence_score DESC
+                """,
+                [*task_ids, *concept_ids, *concept_ids],
+            ).fetchall()
+        )
+    elif CRITERIA_CONCEPT_FORWARD_TABLE in tables and rows:
+        concepts_by_task = {
+            task_id: set(ids)
+            for task_id, ids in criteria_concept_ids(conn, task_ids).items()
+        }
+        task_rows = []
+        for relation in rows:
+            source_id = int(relation["source_concept_id"])
+            target_id = int(relation["target_concept_id"])
+            evidence_count = sum(
+                1
+                for task_concepts in concepts_by_task.values()
+                if source_id in task_concepts and target_id in task_concepts
+            )
+            if not evidence_count:
+                continue
+            task_rows.append(
+                {
+                    **dict(relation),
+                    "confidence_score": 0.6,
+                    "evidence_count": evidence_count,
+                }
+            )
+        task_rows.sort(
+            key=lambda row: (
+                -int(row["evidence_count"]),
+                -float(row["confidence_score"]),
+                int(row["relation_id"]),
+            )
+        )
+    else:
+        return
+    graph.note_omitted("edge:task_evidence", max(len(task_rows) - 36, 0))
+    for row in task_rows[:36]:
         graph.add_edge(
             _edge(
                 f"concept:{row['source_concept_id']}",
@@ -1141,6 +1234,13 @@ def build_ncs_knowledge_graph(
     try:
         tables = _table_names(conn)
         missing = [table for table in CORE_TABLES if table not in tables]
+        if (
+            "criteria_concept_links" not in tables
+            and CRITERIA_CONCEPT_FORWARD_TABLE not in tables
+        ):
+            missing.append(
+                f"criteria_concept_links|{CRITERIA_CONCEPT_FORWARD_TABLE}"
+            )
         if missing:
             raise KnowledgeGraphDataError(
                 "schema_incomplete",
@@ -1389,19 +1489,42 @@ def build_ncs_knowledge_graph(
             )
 
         if task_ids and concept_ids:
-            task_placeholders = ",".join("?" for _ in task_ids)
-            concept_placeholders = ",".join("?" for _ in concept_ids)
-            link_rows = conn.execute(
-                f"""
-                SELECT link_id, criteria_id, concept_id, relation_type, link_status
-                FROM criteria_concept_links
-                WHERE criteria_id IN ({task_placeholders})
-                  AND concept_id IN ({concept_placeholders})
-                  AND LOWER(COALESCE(link_status, '')) <> 'rejected'
-                ORDER BY criteria_id, concept_id
-                """,
-                [*task_ids, *concept_ids],
-            ).fetchall()
+            if "criteria_concept_links" in tables:
+                task_placeholders = ",".join("?" for _ in task_ids)
+                concept_placeholders = ",".join("?" for _ in concept_ids)
+                link_rows: list[sqlite3.Row | dict[str, Any]] = list(
+                    conn.execute(
+                        f"""
+                        SELECT link_id, criteria_id, concept_id,
+                               relation_type, link_status
+                        FROM criteria_concept_links
+                        WHERE criteria_id IN ({task_placeholders})
+                          AND concept_id IN ({concept_placeholders})
+                          AND LOWER(COALESCE(link_status, '')) <> 'rejected'
+                        ORDER BY criteria_id, concept_id
+                        """,
+                        [*task_ids, *concept_ids],
+                    ).fetchall()
+                )
+            else:
+                selected_concepts = set(concept_ids)
+                link_rows = []
+                for task_id, linked_concepts in criteria_concept_ids(
+                    conn,
+                    task_ids,
+                ).items():
+                    for concept_id in linked_concepts:
+                        if concept_id not in selected_concepts:
+                            continue
+                        link_rows.append(
+                            {
+                                "link_id": task_id * 1_000_000 + concept_id,
+                                "criteria_id": task_id,
+                                "concept_id": concept_id,
+                                "relation_type": "related",
+                                "link_status": "raw",
+                            }
+                        )
             graph.note_omitted(
                 "edge:task_requires_concept",
                 max(len(link_rows) - 96, 0),

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import os
 import asyncio
+import logging
+import os
 import shutil
 import sys
 import urllib.request
-import zipfile
 from pathlib import Path
 
 # Ensure local source package import works in Vercel function runtime.
@@ -19,11 +19,67 @@ if str(_SRC) not in sys.path:
 from mcp.server.transport_security import TransportSecuritySettings
 
 from ncs_mcp.server import configure_transport, mcp
+from ncs_mcp.vercel_snapshot import (
+    COMPACT_ARCHIVE_NAME,
+    COMPACT_MANIFEST_NAME,
+    COMPACT_SNAPSHOT_NAME,
+    external_db_override_allowed,
+    materialize_compact_snapshot,
+    readiness_required_min_rows,
+    readiness_required_tables,
+    sqlite_snapshot_is_usable,
+)
+
+
+LOGGER = logging.getLogger(__name__)
 
 _GET_METHOD_NOT_ALLOWED_BODY = (
     b'{"jsonrpc":"2.0","id":"server-error","error":{"code":-32600,'
     b'"message":"Method Not Allowed: standalone MCP GET streams are not enabled; use POST"}}'
 )
+
+_MCP_DATABASE_UNAVAILABLE_BODY = (
+    b'{"jsonrpc":"2.0","id":"server-error","error":{"code":-32603,'
+    b'"message":"Service Unavailable: no verified NCS database snapshot is available"}}'
+)
+
+_MCP_BOOTSTRAP_READY = True
+
+
+def _is_vercel_read_only_configuration() -> bool:
+    """Return whether the deployed, read-only Vercel contract is active."""
+
+    truthy = {"1", "true", "on", "yes", "y"}
+    return (
+        os.getenv("VERCEL", "").strip().lower() in truthy
+        and os.getenv("NCS_MCP_READ_ONLY", "").strip().lower() in truthy
+    )
+
+
+async def _reject_unavailable_mcp(send) -> None:
+    """Fail closed before MCP lifespan startup when Vercel has no DB."""
+
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 503,
+            "headers": [
+                (b"cache-control", b"no-store"),
+                (b"content-type", b"application/json"),
+                (
+                    b"content-length",
+                    str(len(_MCP_DATABASE_UNAVAILABLE_BODY)).encode("ascii"),
+                ),
+            ],
+        }
+    )
+    await send(
+        {
+            "type": "http.response.body",
+            "body": _MCP_DATABASE_UNAVAILABLE_BODY,
+            "more_body": False,
+        }
+    )
 
 
 async def _reject_standalone_get(send) -> None:
@@ -75,98 +131,97 @@ def _prepare_transport_security() -> None:
         )
 
 
-def _bootstrap_db_from_url() -> None:
-    # If deployment wants a prebuilt serving DB directly in Vercel, set
-    # NCS_DB_URL and (optionally) NCS_DB_PATH.
+def _bootstrap_db_from_url(
+    *,
+    required_tables: tuple[str, ...],
+    minimum_rows: dict[str, int],
+) -> bool:
+    # A remote database can replace the bundled release only when the operator
+    # explicitly enables that behavior.  The default deployment never performs
+    # a DB download and therefore has no network/bootstrap dependency.
+    if not external_db_override_allowed():
+        return False
     download_url = os.getenv("NCS_DB_URL")
     if not download_url:
-        return
+        return False
 
     db_path = Path(os.getenv("NCS_DB_PATH", "/tmp/ncs_interview_serving.db"))
-    if not os.getenv("NCS_DB_PATH"):
-        os.environ["NCS_DB_PATH"] = str(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    if db_path.exists() and db_path.stat().st_size > 0:
-        return
+    if sqlite_snapshot_is_usable(
+        db_path,
+        required_tables=required_tables,
+        minimum_rows=minimum_rows,
+    ):
+        os.environ["NCS_DB_PATH"] = str(db_path)
+        return True
 
     tmp_path = db_path.with_suffix(db_path.suffix + ".download")
-    with urllib.request.urlopen(download_url, timeout=120) as response:
-        with tmp_path.open("wb") as output:
-            shutil.copyfileobj(response, output)
-    tmp_path.replace(db_path)
-
-
-def _bootstrap_db_from_local_snapshot() -> None:
-    # Optional local fallback if a prebuilt file is shipped in repo (eg.
-    # tmp/ncs_interview_serving_release.db) but not yet copied to NCS_DB_PATH.
-    env_path = os.getenv("NCS_DB_PATH")
-    if env_path:
-        db_path = Path(env_path)
-    else:
-        packaged_candidates = [
-            _ROOT / "api" / "ncs_interview_serving_release.zip",
-            _ROOT / "api" / "ncs_interview_db.zip",
-            _ROOT / "api" / "ncs_interview_serving_release.db",
-            _ROOT / "tmp" / "ncs_interview_serving_release.db",
-            _ROOT / "tmp" / "ncs_interview_serving_test.db",
-            _ROOT / "data" / "processed" / "ncs.db",
-            _ROOT / "data" / "processed" / "ci-smoke" / "ncs.db",
-        ]
-        for candidate in packaged_candidates:
-            if candidate.exists() and candidate.stat().st_size > 0:
-                if candidate.suffix == ".zip":
-                    extract_to = Path("/tmp")
-                    preferred_path = extract_to / "ncs_interview_serving_release.db"
-                    if preferred_path.exists() and preferred_path.stat().st_size > 0:
-                        os.environ["NCS_DB_PATH"] = str(preferred_path)
-                        return
-                    with zipfile.ZipFile(candidate, "r") as zf:
-                        try:
-                            target_name = next(
-                                (
-                                    name
-                                    for name in zf.namelist()
-                                    if name.lower().endswith(".db")
-                                ),
-                                None,
-                            )
-                            if target_name is None:
-                                target_name = zf.namelist()[0]
-                            zf.extract(target_name, extract_to)
-                            extracted_path = extract_to / target_name
-                            if extracted_path.suffix.lower() != ".db":
-                                extracted_path = extracted_path.with_suffix(".db")
-                            # move/rename nested path to a stable location
-                            if extracted_path != preferred_path:
-                                try:
-                                    preferred_path.parent.mkdir(parents=True, exist_ok=True)
-                                    if preferred_path.exists():
-                                        preferred_path.unlink()
-                                    extracted_path.rename(preferred_path)
-                                except Exception:
-                                    preferred_path = extracted_path
-                        except Exception:
-                            continue
-                    if preferred_path.exists() and preferred_path.stat().st_size > 0:
-                        os.environ["NCS_DB_PATH"] = str(preferred_path)
-                        return
-                    continue
-                db_path = candidate
-                os.environ["NCS_DB_PATH"] = str(db_path)
-                return
-
-        db_path = Path("/tmp/ncs_interview_serving.db")
+    try:
+        with urllib.request.urlopen(download_url, timeout=120) as response:
+            with tmp_path.open("wb") as output:
+                shutil.copyfileobj(response, output)
+        if not sqlite_snapshot_is_usable(
+            tmp_path,
+            required_tables=required_tables,
+            minimum_rows=minimum_rows,
+        ):
+            LOGGER.error("Explicit remote Vercel DB override failed validation")
+            return False
+        tmp_path.replace(db_path)
         os.environ["NCS_DB_PATH"] = str(db_path)
+        return True
+    except OSError:
+        LOGGER.exception("Unable to download the explicitly enabled remote Vercel DB")
+        return False
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
-    if db_path.exists() and db_path.stat().st_size > 0:
-        return
 
-    snapshot = _ROOT / "tmp" / "ncs_interview_serving_release.db"
-    if snapshot.exists() and snapshot.stat().st_size > 0:
-        try:
-            shutil.copy2(snapshot, db_path)
-        except Exception:
-            pass
+def _bootstrap_db_from_explicit_path(
+    *,
+    required_tables: tuple[str, ...],
+    minimum_rows: dict[str, int],
+) -> bool:
+    if not external_db_override_allowed():
+        return False
+    raw_path = os.getenv("NCS_DB_PATH", "").strip()
+    if not raw_path:
+        return False
+    db_path = Path(raw_path)
+    return sqlite_snapshot_is_usable(
+        db_path,
+        required_tables=required_tables,
+        minimum_rows=minimum_rows,
+    )
+
+
+def _bootstrap_db_from_local_snapshot(
+    *,
+    required_tables: tuple[str, ...],
+    minimum_rows: dict[str, int],
+) -> bool:
+    # The standard function bundles only a compressed snapshot and its signed-
+    # by-content sidecar.  Materialize once per warm instance into /tmp; never
+    # place the raw database in the function package.
+    archive_path = _ROOT / "api" / COMPACT_ARCHIVE_NAME
+    manifest_path = _ROOT / "api" / COMPACT_MANIFEST_NAME
+    runtime_db = Path("/tmp") / COMPACT_SNAPSHOT_NAME
+    if materialize_compact_snapshot(
+        archive_path,
+        manifest_path,
+        runtime_db,
+        required_tables=required_tables,
+        minimum_rows=minimum_rows,
+    ):
+        os.environ["NCS_DB_PATH"] = str(runtime_db)
+        return True
+
+    LOGGER.error(
+        "Bundled compact ontology snapshot is missing or failed validation: %s",
+        archive_path,
+    )
+    os.environ["NCS_DB_PATH"] = str(runtime_db)
+    return False
 
 
 def _app_with_path_prefix_fix() -> object:
@@ -189,12 +244,15 @@ def _app_with_path_prefix_fix() -> object:
     async def app(scope, receive, send) -> None:
         if scope.get("type") == "http":
             # This stateless service does not emit server-initiated MCP
-            # messages. MCP Streamable HTTP therefore permits an immediate
-            # 405 for the optional standalone GET stream. Rejecting it before
-            # lifespan startup prevents the SDK's unbounded SSE receive loop
-            # from occupying a Vercel function until maxDuration.
+            # messages.  MCP Streamable HTTP therefore permits an immediate
+            # 405 for the optional standalone GET stream.  Rejecting it before
+            # lifespan startup also prevents the SDK's unbounded SSE receive
+            # loop from occupying a Vercel function until maxDuration.
             if str(scope.get("method", "")).upper() == "GET":
                 await _reject_standalone_get(send)
+                return
+            if _is_vercel_read_only_configuration() and not _MCP_BOOTSTRAP_READY:
+                await _reject_unavailable_mcp(send)
                 return
             await _ensure_lifespan_ready()
             path = scope.get("path", "/") or "/"
@@ -212,6 +270,7 @@ def _app_with_path_prefix_fix() -> object:
 
     return app
 
+
 def _configure_for_vercel() -> None:
     host = os.getenv("NCS_MCP_HOST", "127.0.0.1")
     configure_transport(
@@ -225,10 +284,23 @@ def _configure_for_vercel() -> None:
     mcp.settings.streamable_http_path = streamable_http_path
 
     _prepare_transport_security()
-    # Order: first local fallback (for repository-packaged serving DB), then
-    # optional remote override.
-    _bootstrap_db_from_local_snapshot()
-    _bootstrap_db_from_url()
+    required_tables = readiness_required_tables()
+    minimum_rows = readiness_required_min_rows()
+    if _bootstrap_db_from_url(
+        required_tables=required_tables,
+        minimum_rows=minimum_rows,
+    ):
+        return
+    if _bootstrap_db_from_explicit_path(
+        required_tables=required_tables,
+        minimum_rows=minimum_rows,
+    ):
+        return
+    global _MCP_BOOTSTRAP_READY
+    _MCP_BOOTSTRAP_READY = _bootstrap_db_from_local_snapshot(
+        required_tables=required_tables,
+        minimum_rows=minimum_rows,
+    )
 
 
 _configure_for_vercel()

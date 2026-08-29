@@ -1,10 +1,7 @@
 {
   "version": 2,
-  "functions": {
-    "api/index.py": {
-      "maxDuration": 30,
-      "includeFiles": "{api/**/*.py,api/ncs_interview_serving_release.db,src/**/*.py,requirements.txt,pyproject.toml}"
-    }
+  "git": {
+    "deploymentEnabled": false
   },
   "env": {
     "NCS_MCP_READ_ONLY": "1",
@@ -13,8 +10,16 @@
     "NCS_MCP_DISABLE_DNS_REBINDING_PROTECTION": "1",
     "NCS_MCP_STREAMABLE_HTTP_PATH": "/mcp",
     "NCS_MCP_MAX_CONCURRENT_RECOMMENDATIONS": "2",
-    "NCS_DB_PATH": "/tmp/ncs_interview_serving.db",
-    "NCS_DB_URL": "https://github.com/koul777/HRMCP/releases/download/ncs-serving-2026-02/ncs_interview_serving_release.db"
+    "NCS_MCP_ALLOW_EXTERNAL_DB_OVERRIDE": "0",
+    "NCS_MCP_READINESS_EXTRA_TABLES": "ontology_concepts,ontology_concept_aliases,ontology_concept_label_candidates,ksa_concept_links,ksa_atomic_items,ksa_atomic_concept_links,ontology_relation_outgoing,ontology_relation_incoming,criteria_concept_forward,criteria_concept_inverse,ncs_training_course_unit_links,ncs_training_course_concept_links,ncs_training_course_element_links,training_goal_concept_links,training_delivery_relations,ncs_unit_standard_training,ncs_unit_job_base_links,training_transition_gold_scenarios,training_transition_scenario_reviews",
+    "NCS_MCP_READINESS_MIN_ROWS": "{\"ksa_items\":574279,\"ksa_atomic_items\":644384,\"ontology_concepts\":533909,\"ksa_concept_links\":574279,\"ksa_atomic_concept_links\":644384,\"training_transition_gold_scenarios\":100,\"training_transition_scenario_reviews\":11,\"ontology_concept_label_candidates\":755}"
+  },
+  "functions": {
+    "api/index.py": {
+      "maxDuration": 30,
+      "includeFiles": "{api/**/*.py,api/ncs_ontology_compact.zip,api/ncs_ontology_compact.manifest.json,src/**/*.py,requirements.txt,pyproject.toml}",
+      "excludeFiles": "{api/*.db,tests/**,docs/**,reports/**,data/**,tmp/**,deploy/**,scripts/**,build/**,.vercel/**,**/__pycache__/**}"
+    }
   },
   "routes": [
     {

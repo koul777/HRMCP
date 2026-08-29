@@ -8,6 +8,13 @@ from collections import Counter
 from typing import Any
 
 from ncs_mcp.career_path import career_paths_for_units
+from ncs_mcp.compact_postings import (
+    criteria_concept_ids,
+    has_compact_criteria_postings,
+    has_compact_ontology_postings,
+    ontology_relation_rows,
+    sqlite_object_exists,
+)
 from ncs_mcp.contracts import (
     AIHR_TRAINING_SYSTEM_GUIDE_TRACE_SCHEMA,
     AIHR_TRAINING_SYSTEM_GUIDE_TRACE_REQUIRED_CHECKS,
@@ -364,18 +371,28 @@ def _concept_quality_issue_penalty_map(
     duplicate_noncanonical_ids: set[int] = set()
     sorted_concept_ids = sorted(concept_ids)
     for batch in chunks(sorted_concept_ids):
-        placeholders = ",".join("?" for _ in batch)
-        rows = conn.execute(
-            f"""
-            SELECT DISTINCT source_concept_id AS concept_id
-            FROM ontology_concept_relations
-            WHERE source_concept_id IN ({placeholders})
-              AND relation_type = 'same_as'
-              AND review_status != 'rejected'
-            """,
-            batch,
-        ).fetchall()
-        duplicate_noncanonical_ids.update(int(row["concept_id"]) for row in rows)
+        if has_compact_ontology_postings(conn):
+            rows = ontology_relation_rows(conn, source_ids=batch)
+            duplicate_noncanonical_ids.update(
+                int(row["source_concept_id"])
+                for row in rows
+                if row["relation_type"] == "same_as"
+            )
+        elif sqlite_object_exists(conn, "ontology_concept_relations"):
+            placeholders = ",".join("?" for _ in batch)
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT source_concept_id AS concept_id
+                FROM ontology_concept_relations
+                WHERE source_concept_id IN ({placeholders})
+                  AND relation_type = 'same_as'
+                  AND review_status != 'rejected'
+                """,
+                batch,
+            ).fetchall()
+            duplicate_noncanonical_ids.update(
+                int(row["concept_id"]) for row in rows
+            )
     for concept_id in duplicate_noncanonical_ids:
         add_penalty(concept_id, "duplicate_text", DUPLICATE_KSA_PENALTY)
 
@@ -404,29 +421,39 @@ def _concept_quality_issue_penalty_map(
 
     duplicate_issue_ksa_to_concept_ids: dict[int, set[int]] = {}
     sorted_ksa_ids = sorted(ksa_to_concept_ids)
-    for batch in chunks([str(ksa_id) for ksa_id in sorted_ksa_ids]):
-        placeholders = ",".join("?" for _ in batch)
-        rows = conn.execute(
-            f"""
-            SELECT target_id, issue_type
-            FROM quality_issues
-            WHERE target_type = 'ksa'
-              AND target_id IN ({placeholders})
-              AND issue_type IN ('short_ksa', 'duplicate_text')
-              AND resolved_at IS NULL
-            """,
-            batch,
-        ).fetchall()
-        for row in rows:
-            issue_type = row["issue_type"]
-            concept_ids_for_ksa = ksa_to_concept_ids.get(int(row["target_id"]), set())
-            for concept_id in concept_ids_for_ksa:
-                if issue_type == "short_ksa":
-                    add_penalty(concept_id, issue_type, SHORT_KSA_PENALTY)
-                elif issue_type == "duplicate_text":
-                    duplicate_issue_ksa_to_concept_ids.setdefault(int(row["target_id"]), set()).add(concept_id)
-                    if concept_id in duplicate_noncanonical_ids:
-                        add_penalty(concept_id, issue_type, DUPLICATE_KSA_PENALTY)
+    has_quality_issues = sqlite_object_exists(conn, "quality_issues")
+    if has_quality_issues:
+        for batch in chunks([str(ksa_id) for ksa_id in sorted_ksa_ids]):
+            placeholders = ",".join("?" for _ in batch)
+            rows = conn.execute(
+                f"""
+                SELECT target_id, issue_type
+                FROM quality_issues
+                WHERE target_type = 'ksa'
+                  AND target_id IN ({placeholders})
+                  AND issue_type IN ('short_ksa', 'duplicate_text')
+                  AND resolved_at IS NULL
+                """,
+                batch,
+            ).fetchall()
+            for row in rows:
+                issue_type = row["issue_type"]
+                concept_ids_for_ksa = ksa_to_concept_ids.get(
+                    int(row["target_id"]), set()
+                )
+                for concept_id in concept_ids_for_ksa:
+                    if issue_type == "short_ksa":
+                        add_penalty(concept_id, issue_type, SHORT_KSA_PENALTY)
+                    elif issue_type == "duplicate_text":
+                        duplicate_issue_ksa_to_concept_ids.setdefault(
+                            int(row["target_id"]), set()
+                        ).add(concept_id)
+                        if concept_id in duplicate_noncanonical_ids:
+                            add_penalty(
+                                concept_id,
+                                issue_type,
+                                DUPLICATE_KSA_PENALTY,
+                            )
 
     if duplicate_issue_ksa_to_concept_ids:
         concept_scope: dict[int, dict[str, set[str]]] = {}
@@ -466,26 +493,27 @@ def _concept_quality_issue_penalty_map(
             ):
                 add_penalty(concept_id, "broad_generic_ksa", BROAD_GENERIC_KSA_PENALTY)
 
-    for batch in chunks([str(concept_id) for concept_id in sorted_concept_ids]):
-        placeholders = ",".join("?" for _ in batch)
-        rows = conn.execute(
-            f"""
-            SELECT target_id, issue_type
-            FROM quality_issues
-            WHERE target_type IN ('concept', 'ontology_concept')
-              AND target_id IN ({placeholders})
-              AND issue_type IN ('short_ksa', 'duplicate_text')
-              AND resolved_at IS NULL
-            """,
-            batch,
-        ).fetchall()
-        for row in rows:
-            concept_id = int(row["target_id"])
-            issue_type = row["issue_type"]
-            if issue_type == "short_ksa":
-                add_penalty(concept_id, issue_type, SHORT_KSA_PENALTY)
-            elif concept_id in duplicate_noncanonical_ids:
-                add_penalty(concept_id, issue_type, DUPLICATE_KSA_PENALTY)
+    if has_quality_issues:
+        for batch in chunks([str(concept_id) for concept_id in sorted_concept_ids]):
+            placeholders = ",".join("?" for _ in batch)
+            rows = conn.execute(
+                f"""
+                SELECT target_id, issue_type
+                FROM quality_issues
+                WHERE target_type IN ('concept', 'ontology_concept')
+                  AND target_id IN ({placeholders})
+                  AND issue_type IN ('short_ksa', 'duplicate_text')
+                  AND resolved_at IS NULL
+                """,
+                batch,
+            ).fetchall()
+            for row in rows:
+                concept_id = int(row["target_id"])
+                issue_type = row["issue_type"]
+                if issue_type == "short_ksa":
+                    add_penalty(concept_id, issue_type, SHORT_KSA_PENALTY)
+                elif concept_id in duplicate_noncanonical_ids:
+                    add_penalty(concept_id, issue_type, DUPLICATE_KSA_PENALTY)
     return penalty_by_concept
 
 
@@ -625,6 +653,28 @@ def _concepts_for_units(
 
 
 def _concepts_for_criteria(conn: sqlite3.Connection, criteria_id: int, *, limit: int = 200) -> list[dict[str, Any]]:
+    if has_compact_criteria_postings(conn):
+        linked_ids = criteria_concept_ids(conn, [criteria_id]).get(criteria_id, [])
+        if not linked_ids:
+            return []
+        placeholders = ",".join("?" for _ in linked_ids)
+        rows = conn.execute(
+            f"""
+            SELECT
+                oc.concept_id, oc.concept_name, oc.concept_type,
+                oc.definition, oc.definition_source, oc.definition_status,
+                oc.review_status,
+                1 AS scope_unit_count,
+                1 AS scope_element_count,
+                1 AS scope_criteria_count
+            FROM ontology_concepts AS oc
+            WHERE oc.concept_id IN ({placeholders})
+            ORDER BY oc.concept_type, oc.concept_name, oc.concept_id
+            LIMIT ?
+            """,
+            (*linked_ids, limit),
+        ).fetchall()
+        return rows_to_dicts(rows)
     rows = conn.execute(
         """
         SELECT DISTINCT
@@ -940,42 +990,82 @@ def _ontology_related_transition_profile(
 ) -> dict[str, Any]:
     if not current_ids or not target_ids:
         return {"related_target_ids": [], "related_target_count": 0, "evidence": []}
-    current_placeholders = ",".join("?" for _ in current_ids)
-    target_placeholders = ",".join("?" for _ in target_ids)
-    rows = rows_to_dicts(
-        conn.execute(
-            f"""
-            SELECT DISTINCT
-                rel.relation_id, rel.source_concept_id, rel.target_concept_id,
-                rel.relation_type, rel.relation_label, rel.review_status,
-                source.concept_name AS source_concept_name,
-                target.concept_name AS target_concept_name
-            FROM ontology_concept_relations rel
-            JOIN ontology_concepts source ON source.concept_id = rel.source_concept_id
-            JOIN ontology_concepts target ON target.concept_id = rel.target_concept_id
-            WHERE rel.review_status != 'rejected'
-              AND (
-                    (
-                        rel.source_concept_id IN ({current_placeholders})
-                        AND rel.target_concept_id IN ({target_placeholders})
-                    )
-                    OR (
-                        rel.source_concept_id IN ({target_placeholders})
-                        AND rel.target_concept_id IN ({current_placeholders})
-                    )
-              )
-            ORDER BY rel.relation_id
-            LIMIT ?
-            """,
-            (
-                *sorted(current_ids),
-                *sorted(target_ids),
-                *sorted(target_ids),
-                *sorted(current_ids),
-                limit,
-            ),
-        ).fetchall()
-    )
+    if has_compact_ontology_postings(conn):
+        candidate_ids = current_ids | target_ids
+        compact_rows = ontology_relation_rows(
+            conn,
+            source_ids=candidate_ids,
+            target_ids=candidate_ids,
+        )
+        compact_rows = [
+            row
+            for row in compact_rows
+            if (
+                row["source_concept_id"] in current_ids
+                and row["target_concept_id"] in target_ids
+            )
+            or (
+                row["source_concept_id"] in target_ids
+                and row["target_concept_id"] in current_ids
+            )
+        ][:limit]
+        placeholders = ",".join("?" for _ in candidate_ids)
+        names = {
+            int(row["concept_id"]): row["concept_name"]
+            for row in conn.execute(
+                f"""
+                SELECT concept_id, concept_name
+                FROM ontology_concepts
+                WHERE concept_id IN ({placeholders})
+                """,
+                sorted(candidate_ids),
+            ).fetchall()
+        }
+        rows = [
+            {
+                **row,
+                "source_concept_name": names.get(int(row["source_concept_id"])),
+                "target_concept_name": names.get(int(row["target_concept_id"])),
+            }
+            for row in compact_rows
+        ]
+    else:
+        current_placeholders = ",".join("?" for _ in current_ids)
+        target_placeholders = ",".join("?" for _ in target_ids)
+        rows = rows_to_dicts(
+            conn.execute(
+                f"""
+                SELECT DISTINCT
+                    rel.relation_id, rel.source_concept_id, rel.target_concept_id,
+                    rel.relation_type, rel.relation_label, rel.review_status,
+                    source.concept_name AS source_concept_name,
+                    target.concept_name AS target_concept_name
+                FROM ontology_concept_relations rel
+                JOIN ontology_concepts source ON source.concept_id = rel.source_concept_id
+                JOIN ontology_concepts target ON target.concept_id = rel.target_concept_id
+                WHERE rel.review_status != 'rejected'
+                  AND (
+                        (
+                            rel.source_concept_id IN ({current_placeholders})
+                            AND rel.target_concept_id IN ({target_placeholders})
+                        )
+                        OR (
+                            rel.source_concept_id IN ({target_placeholders})
+                            AND rel.target_concept_id IN ({current_placeholders})
+                        )
+                  )
+                ORDER BY rel.relation_id
+                LIMIT ?
+                """,
+                (
+                    *sorted(current_ids),
+                    *sorted(target_ids),
+                    *sorted(target_ids),
+                    *sorted(current_ids),
+                    limit,
+                ),
+            ).fetchall()
+        )
     related_target_ids: set[int] = set()
     evidence: list[dict[str, Any]] = []
     for row in rows:
@@ -1021,6 +1111,88 @@ def _task_similarity_transition_profile(
     target_codes = sorted(code for code in target_unit_codes if code)
     if not current_codes or not target_codes:
         return {"max_score": 0.0, "link_count": 0, "evidence": []}
+    if (
+        not sqlite_object_exists(conn, "task_similarity_links")
+        and has_compact_criteria_postings(conn)
+    ):
+        all_codes = sorted(set(current_codes) | set(target_codes))
+        placeholders = ",".join("?" for _ in all_codes)
+        criteria_rows = conn.execute(
+            f"""
+            SELECT pc.criteria_id, ce.unit_code
+            FROM performance_criteria AS pc
+            JOIN competency_elements AS ce ON ce.element_id = pc.element_id
+            WHERE ce.unit_code IN ({placeholders})
+            ORDER BY ce.unit_code, pc.criteria_id
+            """,
+            all_codes,
+        ).fetchall()
+        criteria_to_unit = {
+            int(row["criteria_id"]): str(row["unit_code"])
+            for row in criteria_rows
+        }
+        concepts_by_criteria = {
+            criteria_id: set(concept_ids_for_task)
+            for criteria_id, concept_ids_for_task in criteria_concept_ids(
+                conn,
+                criteria_to_unit,
+            ).items()
+        }
+        current_criteria = [
+            criteria_id
+            for criteria_id, code in criteria_to_unit.items()
+            if code in current_unit_codes
+        ]
+        target_criteria = [
+            criteria_id
+            for criteria_id, code in criteria_to_unit.items()
+            if code in target_unit_codes
+        ]
+        derived_rows: list[dict[str, Any]] = []
+        for source_criteria_id in current_criteria:
+            source_concepts = concepts_by_criteria.get(source_criteria_id, set())
+            if not source_concepts:
+                continue
+            for target_criteria_id in target_criteria:
+                target_concepts = concepts_by_criteria.get(
+                    target_criteria_id,
+                    set(),
+                )
+                if not target_concepts:
+                    continue
+                shared = source_concepts & target_concepts
+                if not shared:
+                    continue
+                union = source_concepts | target_concepts
+                derived_rows.append(
+                    {
+                        "source_unit_code": criteria_to_unit[source_criteria_id],
+                        "target_unit_code": criteria_to_unit[target_criteria_id],
+                        "relation_type": "derived_criteria_concept_overlap",
+                        "similarity_score": round(len(shared) / len(union), 6),
+                        "shared_concept_count": len(shared),
+                        "source_concept_count": len(source_concepts),
+                        "target_concept_count": len(target_concepts),
+                    }
+                )
+        derived_rows.sort(
+            key=lambda row: (
+                -float(row["similarity_score"]),
+                -int(row["shared_concept_count"]),
+                str(row["source_unit_code"]),
+                str(row["target_unit_code"]),
+            )
+        )
+        rows = derived_rows[:limit]
+        max_score = max(
+            (float(row.get("similarity_score") or 0.0) for row in rows),
+            default=0.0,
+        )
+        return {
+            "max_score": round(max_score, 4),
+            "link_count": len(rows),
+            "evidence": rows[:5],
+        }
     current_placeholders = ",".join("?" for _ in current_codes)
     target_placeholders = ",".join("?" for _ in target_codes)
     rows = rows_to_dicts(
@@ -1141,6 +1313,39 @@ def _transition_semantic_fit(
 def _relation_rows(conn: sqlite3.Connection, concept_ids: set[int], *, limit: int = 50) -> list[dict[str, Any]]:
     if not concept_ids:
         return []
+    if has_compact_ontology_postings(conn):
+        rows = ontology_relation_rows(
+            conn,
+            incident_ids=concept_ids,
+            limit=limit,
+        )
+        endpoint_ids = {
+            int(row[key])
+            for row in rows
+            for key in ("source_concept_id", "target_concept_id")
+        }
+        if not endpoint_ids:
+            return []
+        placeholders = ",".join("?" for _ in endpoint_ids)
+        names = {
+            int(row["concept_id"]): row["concept_name"]
+            for row in conn.execute(
+                f"""
+                SELECT concept_id, concept_name
+                FROM ontology_concepts
+                WHERE concept_id IN ({placeholders})
+                """,
+                sorted(endpoint_ids),
+            ).fetchall()
+        }
+        return [
+            {
+                **row,
+                "source_concept_name": names.get(int(row["source_concept_id"])),
+                "target_concept_name": names.get(int(row["target_concept_id"])),
+            }
+            for row in rows
+        ]
     placeholders = ",".join("?" for _ in concept_ids)
     rows = conn.execute(
         f"""
@@ -3528,6 +3733,17 @@ def _scoped_supplemental_rows(
     select_columns: str,
     limit: int,
 ) -> tuple[list[dict[str, Any]], int, str | None]:
+    # External catalogs and occupation mappings are optional support tables in
+    # compact serving databases.  Check presence explicitly so an omitted
+    # table means "no supplemental evidence" while SQL errors for an existing
+    # table continue to propagate for diagnosis.
+    table_row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?",
+        (table,),
+    ).fetchone()
+    if table_row is None:
+        return [], 0, None
+
     ordered_scopes = [
         (level, scope_codes.get(level))
         for level in ("sub", "small", "middle", "major")

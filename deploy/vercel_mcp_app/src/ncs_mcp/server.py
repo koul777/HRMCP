@@ -4,6 +4,7 @@ import argparse
 import ipaddress
 import inspect
 import json
+import os
 import re
 import sqlite3
 import threading
@@ -23,6 +24,13 @@ from mcp.server.fastmcp import FastMCP
 from starlette.responses import JSONResponse
 
 from ncs_mcp.config import load_settings
+from ncs_mcp.compact_postings import (
+    concept_criteria_ids,
+    has_compact_criteria_postings,
+    has_compact_ontology_postings,
+    ontology_relation_rows,
+    sqlite_object_exists,
+)
 from ncs_mcp.career_path import (
     career_path_summary as ncs_career_path_summary,
     import_career_paths_csv as ncs_import_career_paths_csv,
@@ -90,6 +98,8 @@ READINESS_CORE_TABLES = (
     "ksa_items",
     "ncs_training_courses",
 )
+READINESS_EXTRA_TABLES_ENV = "NCS_MCP_READINESS_EXTRA_TABLES"
+_SQLITE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 _RECOMMENDATION_LIMITER_LOCK = threading.Lock()
 _RECOMMENDATION_LIMITERS: dict[int, threading.BoundedSemaphore] = {}
@@ -270,7 +280,32 @@ def current_transport_metadata() -> dict[str, str | None]:
     return {"transport": CURRENT_TRANSPORT, "endpoint": endpoint}
 
 
+def _readiness_required_tables() -> tuple[tuple[str, ...], list[str]]:
+    required_tables = list(READINESS_CORE_TABLES)
+    seen = {table_name.casefold() for table_name in required_tables}
+    invalid_extra_tables: list[str] = []
+    invalid_seen: set[str] = set()
+
+    for raw_table_name in os.environ.get(READINESS_EXTRA_TABLES_ENV, "").split(","):
+        table_name = raw_table_name.strip()
+        if not table_name:
+            continue
+        if _SQLITE_IDENTIFIER_RE.fullmatch(table_name) is None:
+            if table_name not in invalid_seen:
+                invalid_extra_tables.append(table_name)
+                invalid_seen.add(table_name)
+            continue
+        normalized_name = table_name.casefold()
+        if normalized_name in seen:
+            continue
+        required_tables.append(table_name)
+        seen.add(normalized_name)
+
+    return tuple(required_tables), invalid_extra_tables
+
+
 def database_readiness_metadata(db_path) -> dict[str, Any]:
+    required_tables, invalid_extra_tables = _readiness_required_tables()
     configured = bool(db_path)
     exists = bool(configured and db_path.exists())
     result: dict[str, Any] = {
@@ -278,8 +313,11 @@ def database_readiness_metadata(db_path) -> dict[str, Any]:
         "exists": exists,
         "openable": False,
         "ready": False,
+        "required_tables": list(required_tables),
         "core_tables": {},
     }
+    if invalid_extra_tables:
+        result["invalid_extra_tables"] = invalid_extra_tables
     if not configured:
         result["error"] = {"code": "database_not_configured"}
         return result
@@ -291,20 +329,22 @@ def database_readiness_metadata(db_path) -> dict[str, Any]:
         conn = sqlite3.connect(db_uri, uri=True)
         try:
             result["openable"] = True
-            for table_name in READINESS_CORE_TABLES:
+            for table_name in required_tables:
                 exists_row = conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                    "SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?",
                     (table_name,),
                 ).fetchone()
                 if exists_row is None:
                     result["core_tables"][table_name] = {"exists": False, "row_count": None}
                     continue
-                row_count = int(conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0])
+                row_count = int(
+                    conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
+                )
                 result["core_tables"][table_name] = {"exists": True, "row_count": row_count}
             result["ready"] = all(
                 item.get("exists") and int(item.get("row_count") or 0) > 0
                 for item in result["core_tables"].values()
-            ) and len(result["core_tables"]) == len(READINESS_CORE_TABLES)
+            ) and len(result["core_tables"]) == len(required_tables)
             if not result["ready"]:
                 result["error"] = {"code": "database_not_ready"}
         finally:
@@ -2302,25 +2342,75 @@ def search_ontology_concepts(
         params.extend([like, like, like])
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     with open_db() as conn:
+        # Hosted ontology snapshots replace the large relation/link tables with
+        # postings.  Keep the public row shape identical while using posting
+        # metadata for counts; counts must not require decoding every edge.
+        compact_ontology = has_compact_ontology_postings(conn)
+        compact_criteria = has_compact_criteria_postings(conn)
+        if compact_ontology:
+            relation_count_sql = """
+                COALESCE((
+                    SELECT SUM(post.target_count)
+                    FROM ontology_relation_outgoing AS post
+                    WHERE post.source_concept_id = oc.concept_id
+                ), 0)
+            """
+        elif sqlite_object_exists(conn, "ontology_concept_relations"):
+            relation_count_sql = """
+                (SELECT COUNT(DISTINCT rel.relation_id)
+                 FROM ontology_concept_relations AS rel
+                 WHERE rel.source_concept_id = oc.concept_id)
+            """
+        else:
+            relation_count_sql = "0"
+        if compact_criteria:
+            criteria_count_sql = """
+                COALESCE((
+                    SELECT post.criteria_count
+                    FROM criteria_concept_inverse AS post
+                    WHERE post.concept_id = oc.concept_id
+                ), 0)
+            """
+        elif sqlite_object_exists(conn, "criteria_concept_links"):
+            criteria_count_sql = """
+                (SELECT COUNT(DISTINCT ccl.criteria_id)
+                 FROM criteria_concept_links AS ccl
+                 WHERE ccl.concept_id = oc.concept_id)
+            """
+        else:
+            criteria_count_sql = "0"
+        alias_count_sql = (
+            "(SELECT COUNT(DISTINCT alias.alias_id) FROM "
+            "ontology_concept_aliases AS alias WHERE alias.concept_id = oc.concept_id)"
+            if sqlite_object_exists(conn, "ontology_concept_aliases")
+            else "0"
+        )
+        ksa_count_sql = (
+            "(SELECT COUNT(DISTINCT kcl.ksa_id) FROM ksa_concept_links AS kcl "
+            "WHERE kcl.concept_id = oc.concept_id)"
+            if sqlite_object_exists(conn, "ksa_concept_links")
+            else "0"
+        )
+        learning_module_count_sql = (
+            "(SELECT COUNT(DISTINCT lmcl.learn_module_seq) "
+            "FROM learning_module_concept_links AS lmcl "
+            "WHERE lmcl.concept_id = oc.concept_id)"
+            if sqlite_object_exists(conn, "learning_module_concept_links")
+            else "0"
+        )
         rows = conn.execute(
             f"""
             SELECT
                 oc.concept_id, oc.concept_name, oc.normalized_key,
                 oc.concept_type, oc.definition, oc.definition_status,
                 oc.relation_status, oc.review_status,
-                COUNT(DISTINCT alias.alias_id) AS alias_count,
-                COUNT(DISTINCT rel.relation_id) AS relation_count,
-                COUNT(DISTINCT kcl.ksa_id) AS ksa_link_count,
-                COUNT(DISTINCT ccl.criteria_id) AS criteria_link_count,
-                COUNT(DISTINCT lmcl.learn_module_seq) AS learning_module_count
+                {alias_count_sql} AS alias_count,
+                {relation_count_sql} AS relation_count,
+                {ksa_count_sql} AS ksa_link_count,
+                {criteria_count_sql} AS criteria_link_count,
+                {learning_module_count_sql} AS learning_module_count
             FROM ontology_concepts oc
-            LEFT JOIN ontology_concept_aliases alias ON alias.concept_id = oc.concept_id
-            LEFT JOIN ontology_concept_relations rel ON rel.source_concept_id = oc.concept_id
-            LEFT JOIN ksa_concept_links kcl ON kcl.concept_id = oc.concept_id
-            LEFT JOIN criteria_concept_links ccl ON ccl.concept_id = oc.concept_id
-            LEFT JOIN learning_module_concept_links lmcl ON lmcl.concept_id = oc.concept_id
             {where}
-            GROUP BY oc.concept_id
             ORDER BY oc.review_status, oc.concept_type, oc.concept_name
             LIMIT ?
             """,
@@ -2353,36 +2443,103 @@ def get_concept_evidence(concept_id: int, limit: int = 20) -> dict[str, Any]:
         concept = concept_with_aliases(conn, concept_id)
         if concept is None:
             return error_response("concept_not_found", concept_id=concept_id)
-        outgoing = conn.execute(
-            """
-            SELECT
-                rel.relation_id, rel.relation_type, rel.relation_label,
-                rel.review_status, target.concept_id AS target_concept_id,
-                target.concept_name AS target_concept_name,
-                target.concept_type AS target_concept_type
-            FROM ontology_concept_relations rel
-            JOIN ontology_concepts target ON target.concept_id = rel.target_concept_id
-            WHERE rel.source_concept_id = ?
-            ORDER BY rel.relation_type, target.concept_name
-            LIMIT ?
-            """,
-            (concept_id, max_rows),
-        ).fetchall()
-        incoming = conn.execute(
-            """
-            SELECT
-                rel.relation_id, rel.relation_type, rel.relation_label,
-                rel.review_status, source.concept_id AS source_concept_id,
-                source.concept_name AS source_concept_name,
-                source.concept_type AS source_concept_type
-            FROM ontology_concept_relations rel
-            JOIN ontology_concepts source ON source.concept_id = rel.source_concept_id
-            WHERE rel.target_concept_id = ?
-            ORDER BY rel.relation_type, source.concept_name
-            LIMIT ?
-            """,
-            (concept_id, max_rows),
-        ).fetchall()
+        compact_ontology = has_compact_ontology_postings(conn)
+        if compact_ontology:
+            relation_rows = ontology_relation_rows
+            outgoing_rows = relation_rows(conn, source_ids=[concept_id])
+            incoming_rows = relation_rows(conn, target_ids=[concept_id])
+            endpoint_ids = {
+                int(row["target_concept_id"])
+                for row in outgoing_rows
+            } | {
+                int(row["source_concept_id"])
+                for row in incoming_rows
+            }
+            names: dict[int, dict[str, Any]] = {}
+            if endpoint_ids:
+                placeholders = ",".join("?" for _ in endpoint_ids)
+                endpoint_rows = conn.execute(
+                    f"""
+                    SELECT concept_id, concept_name, concept_type
+                    FROM ontology_concepts
+                    WHERE concept_id IN ({placeholders})
+                    """,
+                    sorted(endpoint_ids),
+                ).fetchall()
+                names = {
+                    int(row[0]): {
+                        "concept_name": row[1],
+                        "concept_type": row[2],
+                    }
+                    for row in endpoint_rows
+                }
+            outgoing = [
+                {
+                    "relation_id": row["relation_id"],
+                    "relation_type": row["relation_type"],
+                    "relation_label": row["relation_label"],
+                    "review_status": row["review_status"],
+                    "target_concept_id": row["target_concept_id"],
+                    "target_concept_name": names.get(
+                        int(row["target_concept_id"]), {}
+                    ).get("concept_name"),
+                    "target_concept_type": names.get(
+                        int(row["target_concept_id"]), {}
+                    ).get("concept_type"),
+                }
+                for row in outgoing_rows
+            ]
+            incoming = [
+                {
+                    "relation_id": row["relation_id"],
+                    "relation_type": row["relation_type"],
+                    "relation_label": row["relation_label"],
+                    "review_status": row["review_status"],
+                    "source_concept_id": row["source_concept_id"],
+                    "source_concept_name": names.get(
+                        int(row["source_concept_id"]), {}
+                    ).get("concept_name"),
+                    "source_concept_type": names.get(
+                        int(row["source_concept_id"]), {}
+                    ).get("concept_type"),
+                }
+                for row in incoming_rows
+            ]
+            outgoing.sort(key=lambda row: (row["relation_type"], row["target_concept_name"] or ""))
+            incoming.sort(key=lambda row: (row["relation_type"], row["source_concept_name"] or ""))
+            outgoing = outgoing[:max_rows]
+            incoming = incoming[:max_rows]
+        else:
+            outgoing = conn.execute(
+                """
+                SELECT
+                    rel.relation_id, rel.relation_type, rel.relation_label,
+                    rel.review_status, target.concept_id AS target_concept_id,
+                    target.concept_name AS target_concept_name,
+                    target.concept_type AS target_concept_type
+                FROM ontology_concept_relations rel
+                JOIN ontology_concepts target ON target.concept_id = rel.target_concept_id
+                WHERE rel.source_concept_id = ?
+                ORDER BY rel.relation_type, target.concept_name
+                LIMIT ?
+                """,
+                (concept_id, max_rows),
+            ).fetchall()
+            incoming = conn.execute(
+                """
+                SELECT
+                    rel.relation_id, rel.relation_type, rel.relation_label,
+                    rel.review_status, source.concept_id AS source_concept_id,
+                    source.concept_name AS source_concept_name,
+                    source.concept_type AS source_concept_type
+                FROM ontology_concept_relations rel
+                JOIN ontology_concepts source ON source.concept_id = rel.source_concept_id
+                WHERE rel.target_concept_id = ?
+                ORDER BY rel.relation_type, source.concept_name
+                LIMIT ?
+                """,
+                (concept_id, max_rows),
+            ).fetchall()
         ksa_rows = conn.execute(
             """
             SELECT
@@ -2403,56 +2560,97 @@ def get_concept_evidence(concept_id: int, limit: int = 20) -> dict[str, Any]:
             """,
             (concept_id, max_rows),
         ).fetchall()
-        criteria_rows = conn.execute(
-            """
-            SELECT
-                ccl.link_id, ccl.relation_type, ccl.link_status,
-                pc.criteria_id, pc.criteria_no, pc.criteria_text_raw,
-                pc.criteria_text_refined, ce.element_id, ce.element_name_raw,
-                ce.unit_code, cu.unit_name_raw
-            FROM criteria_concept_links ccl
-            JOIN performance_criteria pc ON pc.criteria_id = ccl.criteria_id
-            JOIN competency_elements ce ON ce.element_id = pc.element_id
-            JOIN competency_units cu ON cu.unit_code = ce.unit_code
-            WHERE ccl.concept_id = ?
-            ORDER BY ce.unit_code, ce.element_id, pc.criteria_id
-            LIMIT ?
-            """,
-            (concept_id, max_rows),
-        ).fetchall()
-        module_rows = conn.execute(
-            """
-            SELECT
-                lmcl.link_id, lmcl.link_method, lmcl.confidence_score,
-                lm.learn_module_seq, lm.learn_module_name,
-                lm.ncs_lclas_cd, lm.ncs_lclas_name,
-                lm.ncs_mclas_cd, lm.ncs_mclas_name,
-                lm.ncs_sclas_cd, lm.ncs_sclas_name,
-                lm.ncs_subd_cd, lm.ncs_subd_name
-            FROM learning_module_concept_links lmcl
-            JOIN ncs_learning_modules lm ON lm.learn_module_seq = lmcl.learn_module_seq
-            WHERE lmcl.concept_id = ?
-            ORDER BY lmcl.confidence_score DESC, lm.learn_module_seq
-            LIMIT ?
-            """,
-            (concept_id, max_rows),
-        ).fetchall()
-        recommendation_rows = conn.execute(
-            """
-            SELECT
-                e.evidence_id, e.run_id, e.item_id, e.evidence_type,
-                e.source_table, e.source_id, e.evidence_summary,
-                e.confidence_score, i.rank, i.learn_module_seq,
-                i.learn_module_name, r.query, r.created_at AS run_created_at
-            FROM education_recommendation_evidence e
-            JOIN education_recommendation_items i ON i.item_id = e.item_id
-            JOIN education_recommendation_runs r ON r.run_id = e.run_id
-            WHERE e.concept_id = ?
-            ORDER BY e.run_id DESC, i.rank, e.evidence_id
-            LIMIT ?
-            """,
-            (concept_id, max_rows),
-        ).fetchall()
+        if has_compact_criteria_postings(conn):
+            criteria_ids = concept_criteria_ids(conn, [concept_id]).get(concept_id, [])
+            if criteria_ids:
+                placeholders = ",".join("?" for _ in criteria_ids)
+                criteria_rows = conn.execute(
+                    f"""
+                    SELECT
+                        NULL AS link_id, 'criteria_concept_posting' AS relation_type,
+                        'raw' AS link_status,
+                        pc.criteria_id, pc.criteria_no, pc.criteria_text_raw,
+                        pc.criteria_text_refined, ce.element_id, ce.element_name_raw,
+                        ce.unit_code, cu.unit_name_raw
+                    FROM performance_criteria pc
+                    JOIN competency_elements ce ON ce.element_id = pc.element_id
+                    JOIN competency_units cu ON cu.unit_code = ce.unit_code
+                    WHERE pc.criteria_id IN ({placeholders})
+                    ORDER BY ce.unit_code, ce.element_id, pc.criteria_id
+                    LIMIT ?
+                    """,
+                    [*criteria_ids, max_rows],
+                ).fetchall()
+            else:
+                criteria_rows = []
+        elif sqlite_object_exists(conn, "criteria_concept_links"):
+            criteria_rows = conn.execute(
+                """
+                SELECT
+                    ccl.link_id, ccl.relation_type, ccl.link_status,
+                    pc.criteria_id, pc.criteria_no, pc.criteria_text_raw,
+                    pc.criteria_text_refined, ce.element_id, ce.element_name_raw,
+                    ce.unit_code, cu.unit_name_raw
+                FROM criteria_concept_links ccl
+                JOIN performance_criteria pc ON pc.criteria_id = ccl.criteria_id
+                JOIN competency_elements ce ON ce.element_id = pc.element_id
+                JOIN competency_units cu ON cu.unit_code = ce.unit_code
+                WHERE ccl.concept_id = ?
+                ORDER BY ce.unit_code, ce.element_id, pc.criteria_id
+                LIMIT ?
+                """,
+                (concept_id, max_rows),
+            ).fetchall()
+        else:
+            criteria_rows = []
+        if sqlite_object_exists(conn, "learning_module_concept_links") and sqlite_object_exists(
+            conn, "ncs_learning_modules"
+        ):
+            module_rows = conn.execute(
+                """
+                SELECT
+                    lmcl.link_id, lmcl.link_method, lmcl.confidence_score,
+                    lm.learn_module_seq, lm.learn_module_name,
+                    lm.ncs_lclas_cd, lm.ncs_lclas_name,
+                    lm.ncs_mclas_cd, lm.ncs_mclas_name,
+                    lm.ncs_sclas_cd, lm.ncs_sclas_name,
+                    lm.ncs_subd_cd, lm.ncs_subd_name
+                FROM learning_module_concept_links lmcl
+                JOIN ncs_learning_modules lm ON lm.learn_module_seq = lmcl.learn_module_seq
+                WHERE lmcl.concept_id = ?
+                ORDER BY lmcl.confidence_score DESC, lm.learn_module_seq
+                LIMIT ?
+                """,
+                (concept_id, max_rows),
+            ).fetchall()
+        else:
+            module_rows = []
+        if all(
+            sqlite_object_exists(conn, table)
+            for table in (
+                "education_recommendation_evidence",
+                "education_recommendation_items",
+                "education_recommendation_runs",
+            )
+        ):
+            recommendation_rows = conn.execute(
+                """
+                SELECT
+                    e.evidence_id, e.run_id, e.item_id, e.evidence_type,
+                    e.source_table, e.source_id, e.evidence_summary,
+                    e.confidence_score, i.rank, i.learn_module_seq,
+                    i.learn_module_name, r.query, r.created_at AS run_created_at
+                FROM education_recommendation_evidence e
+                JOIN education_recommendation_items i ON i.item_id = e.item_id
+                JOIN education_recommendation_runs r ON r.run_id = e.run_id
+                WHERE e.concept_id = ?
+                ORDER BY e.run_id DESC, i.rank, e.evidence_id
+                LIMIT ?
+                """,
+                (concept_id, max_rows),
+            ).fetchall()
+        else:
+            recommendation_rows = []
     return tool_response(
         {
             "concept": concept,
