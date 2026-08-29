@@ -208,10 +208,17 @@ Claude에서 **설정 → 사용자 지정 → 커넥터**로 이동해 `HRMCP` 
 
 ![Claude에서 HRMCP 커넥터의 연결 상태를 확인하는 화면](docs/images/setup/claude_hrmcp_use_01_connected.png)
 
-연결 상태를 확인한 뒤 채용공고와 직무기술서를 첨부하고 다음과 같이 요청합니다. Claude에서는
+연결 상태를 확인한 뒤 새 대화에서 원하는 작업과 HRMCP 활용을 함께 요청합니다. Claude에서는
 `@HRMCP`를 붙일 필요가 없습니다. 요청문에 `HRMCP의 NCS 데이터를 활용해`라고 명시하면
 Claude가 연결된 HRMCP 도구를 사용해 답변을 작성합니다. 도구 사용 권한 확인 창이 표시되면
 내용을 확인한 뒤 허용합니다.
+
+아래 화면은 Claude가 HRMCP에서 인사기획 능력단위와 NCS 근거를 조회한 뒤 직무기술서를
+DOCX 문서로 생성하고, 결과를 미리 보거나 다운로드하는 활용 예시입니다.
+
+![Claude에서 HRMCP를 활용해 NCS 직무기술서를 생성하고 다운로드하는 화면](docs/images/setup/claude_hrmcp_use_02_job_description.png)
+
+채용공고와 직무기술서를 바탕으로 구조화된 행동면접 질문을 만들 때는 다음과 같이 요청합니다.
 
 ```text
 첨부한 채용공고와 직무기술서를 참고하고 HRMCP의 NCS 데이터를 활용해 구조화된 행동면접 질문 10개를 작성해줘.
