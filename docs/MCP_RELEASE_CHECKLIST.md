@@ -165,6 +165,17 @@ Default endpoints:
 - health: `http://127.0.0.1:8766/health`
 - readiness: `http://127.0.0.1:8766/ready`
 
+Public Vercel endpoints:
+
+- Canonical MCP: `https://ncs-mcp-bridge-mini2.vercel.app/api/mcp`
+- Legacy compatibility MCP: `https://ncs-mcp-bridge.vercel.app/api/mcp`
+
+The GitHub repository homepage must point to the canonical `mini2` deployment.
+Before release, run the remote MCP verifier against both URLs. Both endpoints
+must expose the same seven public tools and pass every tool smoke, including all
+four `ncs_analysis` modes, or the legacy endpoint must return 404. A live legacy
+endpoint backed by a stale snapshot is a release blocker.
+
 `/health` and `/ready` may expose only:
 
 - MCP tool count.
