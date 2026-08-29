@@ -740,6 +740,7 @@ def _project_public_unit_detail(
         projected_elements.append(element)
 
     projected = {**result, "elements": projected_elements}
+    projected["detail_meta"] = {"projection": "compact", "truncated": False}
     if len(json.dumps(projected, ensure_ascii=True)) <= max_chars:
         return projected
 
@@ -787,6 +788,7 @@ def _project_public_unit_detail(
             "truncated": bool(rows),
         }
     compact["detail_meta"] = {
+        "projection": "compact",
         "max_serialized_chars": max_chars,
         "counts": counts,
         "truncated": True,
