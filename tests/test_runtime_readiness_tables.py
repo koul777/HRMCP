@@ -57,6 +57,27 @@ class RuntimeReadinessTablesTests(unittest.TestCase):
             )
         )
         self.assertNotIn("invalid_extra_tables", metadata)
+        self.assertTrue(metadata["core_ready"])
+        self.assertFalse(metadata["public_tools_ready"])
+        self.assertIn("career_path", metadata["degraded_capabilities"])
+
+    def test_public_capability_status_is_separate_from_core_readiness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "public-ready.db"
+            self._create_database(
+                db_path,
+                extra_tables=server.READINESS_PUBLIC_TOOL_TABLES,
+            )
+
+            metadata = self._metadata(db_path, None)
+
+        self.assertTrue(metadata["ready"])
+        self.assertTrue(metadata["core_ready"])
+        self.assertTrue(metadata["public_tools_ready"])
+        self.assertEqual([], metadata["degraded_capabilities"])
+        self.assertTrue(
+            all(item["available"] for item in metadata["capabilities"].values())
+        )
 
     def test_populated_extra_tables_are_required_once_and_keep_order(self) -> None:
         extra_tables = ("ontology_concepts", "task_ksa_concept_relations")

@@ -9,6 +9,7 @@ import re
 import sqlite3
 import threading
 import time
+from functools import wraps
 
 if __package__ in {None, ""}:  # pragma: no cover - direct script support
     import sys
@@ -74,6 +75,7 @@ from ncs_mcp.server_legacy_wrappers import (
     build_read_only_legacy_handlers,
 )
 from ncs_mcp.training_recommendation import (
+    DEFAULT_COURSE_LINK_LIMIT,
     build_training_course_ontology_links as training_build_course_links,
     compact_ncs_education_plan_response as training_compact_education_plan_response,
     compact_training_task_response as training_compact_task_response,
@@ -87,7 +89,19 @@ from ncs_mcp.training_recommendation import (
 from ncs_mcp import tool_registry
 
 
-mcp = FastMCP("ncs-mcp")
+MCP_INSTRUCTIONS = """
+HRMCP는 국가직무능력표준(NCS)의 분류, 능력단위, 능력단위요소, 수행준거,
+지식·기술·태도(KSA), 훈련과정과 온톨로지 근거를 조회하는 읽기 중심 서버입니다.
+도구 선택이 불확실하면 ncs_discover_tools를 먼저 호출하세요.
+ncs_search로 NCS 구조를 찾고 ncs_unit_detail로 수행준거와 KSA 근거를 확인합니다.
+ncs_training은 훈련과정을 검색하거나 과정 ID로 제한된 상세 링크를 반환합니다.
+ncs_analysis는 career_path, qualification, job_base, ontology 근거를 조회합니다.
+recommend_training_for_task는 NCS 과업과 KSA를 바탕으로 교육 후보를 제안합니다.
+결과는 HR 담당자가 검토할 초안과 근거이며 공식 NCS 정의, 자격 인정 또는 채용 판정이 아닙니다.
+""".strip()
+
+
+mcp = FastMCP("ncs-mcp", instructions=MCP_INSTRUCTIONS)
 
 CURRENT_TRANSPORT = "stdio"
 
@@ -98,8 +112,54 @@ READINESS_CORE_TABLES = (
     "ksa_items",
     "ncs_training_courses",
 )
+READINESS_PUBLIC_TOOL_TABLES = (
+    "classifications",
+    "competency_elements",
+    "ncs_training_course_unit_links",
+    "ncs_training_course_concept_links",
+    "ncs_training_course_element_links",
+    "training_goal_concept_links",
+    "training_delivery_relations",
+    "ncs_career_paths",
+    "ncs_qualification_items",
+    "ncs_unit_qualification_links",
+    "ncs_job_base_competencies",
+    "ncs_job_base_factors",
+    "ncs_unit_job_base_links",
+    "ontology_concepts",
+    "ontology_concept_aliases",
+)
+READINESS_CAPABILITY_TABLES = {
+    "structure_search": ("classifications", "competency_elements"),
+    "training": (
+        "ncs_training_courses",
+        "ncs_training_course_unit_links",
+        "ncs_training_course_concept_links",
+        "ncs_training_course_element_links",
+        "training_goal_concept_links",
+        "training_delivery_relations",
+    ),
+    "career_path": ("ncs_career_paths",),
+    "qualification": ("ncs_qualification_items", "ncs_unit_qualification_links"),
+    "job_base": (
+        "ncs_job_base_competencies",
+        "ncs_job_base_factors",
+        "ncs_unit_job_base_links",
+    ),
+    "ontology": ("ontology_concepts",),
+}
 READINESS_EXTRA_TABLES_ENV = "NCS_MCP_READINESS_EXTRA_TABLES"
 _SQLITE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+PUBLIC_UNIT_DETAIL_MAX_CHARS = 7_600
+PUBLIC_UNIT_ELEMENT_FIELDS = (
+    "element_id",
+    "element_no",
+    "element_code",
+    "element_name",
+    "element_level",
+)
+PUBLIC_CRITERIA_FIELDS = ("criteria_id", "criteria_no", "text")
+PUBLIC_KSA_FIELDS = ("ksa_id", "ksa_type", "ksa_no", "text")
 
 _RECOMMENDATION_LIMITER_LOCK = threading.Lock()
 _RECOMMENDATION_LIMITERS: dict[int, threading.BoundedSemaphore] = {}
@@ -200,7 +260,12 @@ async def health_check(_request: Any) -> JSONResponse:
     transport = current_transport_metadata()
     return JSONResponse(
         {
-            "status": "ok" if runtime["database"]["ready"] else "degraded",
+            "status": (
+                "ok"
+                if runtime["database"]["ready"]
+                and runtime["database"].get("public_tools_ready", False)
+                else "degraded"
+            ),
             "name": "ncs-mcp",
             "transport": transport["transport"],
             "endpoint": transport["endpoint"],
@@ -315,6 +380,7 @@ def database_readiness_metadata(db_path) -> dict[str, Any]:
         "ready": False,
         "required_tables": list(required_tables),
         "core_tables": {},
+        "public_tool_tables": {},
     }
     if invalid_extra_tables:
         result["invalid_extra_tables"] = invalid_extra_tables
@@ -341,10 +407,71 @@ def database_readiness_metadata(db_path) -> dict[str, Any]:
                     conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
                 )
                 result["core_tables"][table_name] = {"exists": True, "row_count": row_count}
-            result["ready"] = all(
+            for table_name in READINESS_PUBLIC_TOOL_TABLES:
+                exists_row = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?",
+                    (table_name,),
+                ).fetchone()
+                if exists_row is None:
+                    result["public_tool_tables"][table_name] = {
+                        "exists": False,
+                        "has_rows": False,
+                    }
+                    continue
+                has_rows = conn.execute(
+                    f'SELECT 1 FROM "{table_name}" LIMIT 1'
+                ).fetchone() is not None
+                result["public_tool_tables"][table_name] = {
+                    "exists": True,
+                    "has_rows": has_rows,
+                }
+            core_ready = all(
                 item.get("exists") and int(item.get("row_count") or 0) > 0
                 for item in result["core_tables"].values()
             ) and len(result["core_tables"]) == len(required_tables)
+            capabilities: dict[str, dict[str, Any]] = {}
+            degraded_capabilities: list[str] = []
+            for capability, table_names in READINESS_CAPABILITY_TABLES.items():
+                missing_tables = [
+                    table_name
+                    for table_name in table_names
+                    if not (
+                        result["core_tables"].get(table_name)
+                        or result["public_tool_tables"].get(table_name)
+                        or {}
+                    ).get("exists")
+                ]
+                empty_tables = [
+                    table_name
+                    for table_name in table_names
+                    if not missing_tables
+                    and not (
+                        result["core_tables"].get(table_name)
+                        or result["public_tool_tables"].get(table_name)
+                        or {}
+                    ).get("has_rows", bool(
+                        (
+                            result["core_tables"].get(table_name)
+                            or {}
+                        ).get("row_count")
+                    ))
+                ]
+                available = not missing_tables and not empty_tables
+                capabilities[capability] = {
+                    "available": available,
+                    "missing_tables": missing_tables,
+                    "empty_tables": empty_tables,
+                }
+                if not available:
+                    degraded_capabilities.append(capability)
+            public_tools_ready = not degraded_capabilities
+            # Core readiness controls /ready. Optional public capabilities are
+            # surfaced separately and enforced by the post-deploy tools/call gate.
+            result["ready"] = core_ready
+            result["core_ready"] = core_ready
+            result["public_tools_ready"] = public_tools_ready
+            result["capabilities"] = capabilities
+            result["degraded_capabilities"] = degraded_capabilities
             if not result["ready"]:
                 result["error"] = {"code": "database_not_ready"}
         finally:
@@ -389,6 +516,7 @@ def tool_response(
     data: Any | None = None,
     audit: dict[str, Any] | None = None,
     ok: bool | None = None,
+    include_data_alias: bool = True,
 ) -> dict[str, Any]:
     """Add the v1 MCP ok/data/error/audit envelope without removing legacy keys."""
     result = dict(payload)
@@ -402,16 +530,19 @@ def tool_response(
     result["ok"] = bool(ok)
     if not result["ok"] and result["error"] is None:
         result["error"] = {"code": "TOOL_ERROR"}
-    if data is None:
-        data = result.get(
-            "data",
-            {
-                key: value
-                for key, value in result.items()
-                if key not in {"ok", "data", "error", "audit"}
-            },
-        )
-    result["data"] = data
+    if include_data_alias:
+        if data is None:
+            data = result.get(
+                "data",
+                {
+                    key: value
+                    for key, value in result.items()
+                    if key not in {"ok", "data", "error", "audit"}
+                },
+            )
+        result["data"] = data
+    else:
+        result.pop("data", None)
     result["audit"] = audit or result.get(
         "audit",
         {
@@ -495,6 +626,23 @@ def error_response(code: str, **fields: Any) -> dict[str, Any]:
     )
 
 
+def guard_public_tool(func):
+    """Convert unexpected public-tool failures into sanitized MCP errors."""
+
+    @wraps(func)
+    def guarded(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception:
+            return error_response(
+                "tool_execution_failed",
+                tool_name=func.__name__,
+                message="The tool failed while reading its configured NCS data.",
+            )
+
+    return guarded
+
+
 def quality_for(conn, target_type: str, target_id: str | int) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
@@ -545,8 +693,8 @@ _legacy_recommend_education_by_concepts = LEGACY_OPERATION_HANDLERS.recommend_ed
 _legacy_review_sqf_ncs_match = LEGACY_OPERATION_HANDLERS.review_sqf_ncs_match
 
 
-def unit_path(row) -> dict[str, Any]:
-    return {
+def unit_path(row, *, include_duty_definition: bool = False) -> dict[str, Any]:
+    path = {
         "major_code": row["major_code"],
         "major": row["major_name"],
         "middle_code": row["middle_code"],
@@ -555,9 +703,166 @@ def unit_path(row) -> dict[str, Any]:
         "small": row["small_name"],
         "sub_code": row["sub_code"],
         "sub": row["sub_name"],
-        "duty_definition": row["duty_def_api"],
         "duty_order": row["duty_order"],
     }
+    if include_duty_definition:
+        path["duty_definition"] = row["duty_def_api"]
+    return path
+
+
+def _project_public_unit_detail(
+    result: dict[str, Any],
+    *,
+    max_chars: int = PUBLIC_UNIT_DETAIL_MAX_CHARS,
+) -> dict[str, Any]:
+    """Keep public unit detail useful while enforcing a bounded JSON response."""
+
+    source_elements = result.get("elements")
+    if not isinstance(source_elements, list):
+        return result
+
+    projected_elements: list[dict[str, Any]] = []
+    for source_element in source_elements:
+        element = {
+            field: source_element.get(field)
+            for field in PUBLIC_UNIT_ELEMENT_FIELDS
+        }
+        if "performance_criteria" in source_element:
+            element["performance_criteria"] = [
+                {field: row.get(field) for field in PUBLIC_CRITERIA_FIELDS}
+                for row in source_element.get("performance_criteria", [])
+            ]
+        if "ksa" in source_element:
+            element["ksa"] = [
+                {field: row.get(field) for field in PUBLIC_KSA_FIELDS}
+                for row in source_element.get("ksa", [])
+            ]
+        projected_elements.append(element)
+
+    projected = {**result, "elements": projected_elements}
+    if len(json.dumps(projected, ensure_ascii=True)) <= max_chars:
+        return projected
+
+    list_keys = ("training_courses", "qualification_links")
+    source_lists = {
+        key: list(projected.get(key, []))
+        for key in list_keys
+        if isinstance(projected.get(key), list)
+    }
+    compact = {
+        key: value
+        for key, value in projected.items()
+        if key != "elements" and key not in source_lists
+    }
+    compact["elements"] = []
+    for key in source_lists:
+        compact[key] = []
+
+    total_criteria = sum(
+        len(element.get("performance_criteria", []))
+        for element in projected_elements
+    )
+    total_ksa = sum(len(element.get("ksa", [])) for element in projected_elements)
+    counts: dict[str, dict[str, Any]] = {
+        "elements": {
+            "total_count": len(projected_elements),
+            "returned_count": 0,
+            "truncated": bool(projected_elements),
+        },
+        "performance_criteria": {
+            "total_count": total_criteria,
+            "returned_count": 0,
+            "truncated": bool(total_criteria),
+        },
+        "ksa": {
+            "total_count": total_ksa,
+            "returned_count": 0,
+            "truncated": bool(total_ksa),
+        },
+    }
+    for key, rows in source_lists.items():
+        counts[key] = {
+            "total_count": len(rows),
+            "returned_count": 0,
+            "truncated": bool(rows),
+        }
+    compact["detail_meta"] = {
+        "max_serialized_chars": max_chars,
+        "counts": counts,
+        "truncated": True,
+    }
+
+    included_sources: list[dict[str, Any]] = []
+    for source_element in projected_elements:
+        header = {
+            key: value
+            for key, value in source_element.items()
+            if key not in {"performance_criteria", "ksa"}
+        }
+        if "performance_criteria" in source_element:
+            header["performance_criteria"] = []
+        if "ksa" in source_element:
+            header["ksa"] = []
+        compact["elements"].append(header)
+        counts["elements"]["returned_count"] += 1
+        counts["elements"]["truncated"] = (
+            counts["elements"]["returned_count"] < counts["elements"]["total_count"]
+        )
+        if len(json.dumps(compact, ensure_ascii=True)) > max_chars:
+            compact["elements"].pop()
+            counts["elements"]["returned_count"] -= 1
+            counts["elements"]["truncated"] = True
+            break
+        included_sources.append(source_element)
+
+    streams: list[tuple[list[dict[str, Any]], list[dict[str, Any]], str]] = []
+    for key, rows in source_lists.items():
+        streams.append((compact[key], rows, key))
+    for target_element, source_element in zip(compact["elements"], included_sources):
+        for source_key, count_key in (
+            ("performance_criteria", "performance_criteria"),
+            ("ksa", "ksa"),
+        ):
+            if source_key in target_element:
+                streams.append(
+                    (
+                        target_element[source_key],
+                        source_element.get(source_key, []),
+                        count_key,
+                    )
+                )
+
+    positions = [0] * len(streams)
+    active = [True] * len(streams)
+    while any(active):
+        progressed = False
+        for stream_index, (target, source, count_key) in enumerate(streams):
+            if not active[stream_index]:
+                continue
+            position = positions[stream_index]
+            if position >= len(source):
+                active[stream_index] = False
+                continue
+            target.append(source[position])
+            counts[count_key]["returned_count"] += 1
+            counts[count_key]["truncated"] = (
+                counts[count_key]["returned_count"] < counts[count_key]["total_count"]
+            )
+            if len(json.dumps(compact, ensure_ascii=True)) > max_chars:
+                target.pop()
+                counts[count_key]["returned_count"] -= 1
+                counts[count_key]["truncated"] = True
+                active[stream_index] = False
+                continue
+            positions[stream_index] += 1
+            progressed = True
+        if not progressed:
+            break
+
+    compact["detail_meta"]["truncated"] = any(
+        item["truncated"] for item in counts.values()
+    )
+    return compact
 
 
 def has_not_found_error(result: dict[str, Any]) -> bool:
@@ -621,9 +926,10 @@ def sqf_gap_report_prompt(
 """.strip()
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
+@guard_public_tool
 def ncs_search(query: str = "", scope: str = "all", limit: int = 20) -> dict[str, Any]:
-    """Search NCS classification/unit/element/criteria/KSA records through one tool."""
+    """NCS 분류·능력단위·요소·수행준거·KSA를 검색합니다. Search NCS structure and evidence."""
     normalized_scope = scope if scope in {"unit", "element", "criteria", "all"} else "all"
     if not query:
         result = list_classifications(limit=limit)
@@ -637,6 +943,7 @@ def ncs_search(query: str = "", scope: str = "all", limit: int = 20) -> dict[str
                 "returned": len(rows),
                 "generated_at": now_utc(),
             },
+            include_data_alias=False,
         )
     result = search_ncs(query=query, scope=normalized_scope, limit=limit)
     rows = result.get("results", [])
@@ -655,16 +962,18 @@ def ncs_search(query: str = "", scope: str = "all", limit: int = 20) -> dict[str
             "returned": len(rows),
             "generated_at": now_utc(),
         },
+        include_data_alias=False,
     )
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
+@guard_public_tool
 def ncs_unit_detail(
     unit_code: str,
     include: list[str] | None = None,
     text_version: str = "raw",
 ) -> dict[str, Any]:
-    """Return one NCS unit with selected elements, criteria, KSA, training, and qualification evidence."""
+    """능력단위의 수행준거·KSA·훈련·자격 근거를 조회합니다. Return one NCS unit in detail."""
     include_set = set(include or ["elements", "criteria", "ksa"])
     result = get_unit_structure(unit_code, text_version=text_version)
     if has_not_found_error(result):
@@ -679,9 +988,31 @@ def ncs_unit_detail(
                 element.pop("ksa", None)
     with open_db() as conn:
         if "training" in include_set:
-            result["training_courses"] = training_search_courses(conn, unit_code=unit_code, limit=20)
+            result["training_courses"] = training_search_courses(
+                conn,
+                unit_code=unit_code,
+                limit=3,
+                compact=True,
+            )
         if "qualification" in include_set:
-            result["qualification_links"] = qualification_search_links(conn, unit_code=unit_code, limit=20)
+            qualification_links = qualification_search_links(conn, unit_code=unit_code, limit=5)
+            qualification_fields = (
+                "unit_code",
+                "jm_cd",
+                "jm_nm",
+                "exam_insti_nm",
+                "compe_unit_name",
+                "ablt_unit_typ_cd",
+                "ablt_unit_typ_nm",
+                "min_edu_trng_tm",
+                "confidence_score",
+                "review_status",
+            )
+            result["qualification_links"] = [
+                {field: row.get(field) for field in qualification_fields}
+                for row in qualification_links
+            ]
+    result = _project_public_unit_detail(result)
     return tool_response(
         result,
         audit={
@@ -695,29 +1026,33 @@ def ncs_unit_detail(
             ],
             "generated_at": now_utc(),
         },
+        include_data_alias=False,
     )
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
+@guard_public_tool
 def ncs_training(
     query: str | None = None,
     training_course_id: int | None = None,
     limit: int = 20,
+    link_limit: int = DEFAULT_COURSE_LINK_LIMIT,
 ) -> dict[str, Any]:
-    """Search NCS training courses or return one course by id."""
+    """NCS 훈련과정을 검색하거나 과정 ID로 상세 근거를 조회합니다. Search NCS training courses."""
     if training_course_id is not None:
-        result = get_training_course(training_course_id)
+        result = get_training_course(training_course_id, link_limit=link_limit)
         if has_not_found_error(result):
             return not_found_response(f"훈련과정을 찾을 수 없습니다: {training_course_id}")
         return result
-    result = search_training_courses(query=query, limit=limit)
+    result = search_training_courses(query=query, limit=limit, link_limit=link_limit)
     rows = result.get("training_courses") or result.get("data", {}).get("training_courses", [])
     if not rows:
         return not_found_response(f"훈련과정 검색 결과가 없습니다: {query or ''}".strip())
     return result
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
+@guard_public_tool
 def ncs_analysis(
     mode: str,
     query: str | None = None,
@@ -725,9 +1060,9 @@ def ncs_analysis(
     concept_type: str | None = None,
     limit: int = 20,
 ) -> dict[str, Any]:
-    """Search career path, qualification, job-base, or ontology evidence through one analysis tool."""
+    """경력개발·자격·직업기초능력·온톨로지 근거를 조회합니다. Analyze supporting NCS evidence."""
     if mode == "career_path":
-        result = get_career_path_summary(limit=limit)
+        result = search_career_paths(query=query, unit_code=unit_code, limit=limit)
         items = result.get("career_paths") or result.get("data", {}).get("career_paths", [])
     elif mode == "qualification":
         result = search_qualification_items(
@@ -743,6 +1078,30 @@ def ncs_analysis(
             limit=limit,
         )
         items = result.get("job_base_links") or result.get("data", {}).get("job_base_links", [])
+        if not items and query and not unit_code:
+            unit_matches = search_ncs(query=query, scope="unit", limit=1).get("results", [])
+            resolved_unit_code = next(
+                (
+                    str(row.get("id"))
+                    for row in unit_matches
+                    if row.get("type") == "unit" and row.get("id")
+                ),
+                None,
+            )
+            if resolved_unit_code:
+                result = search_job_base_competencies(
+                    unit_code=resolved_unit_code,
+                    limit=limit,
+                )
+                items = result.get("job_base_links") or result.get("data", {}).get(
+                    "job_base_links", []
+                )
+                if items:
+                    result["query_resolution"] = {
+                        "input_query": query,
+                        "resolved_unit_code": resolved_unit_code,
+                        "method": "ncs_unit_name_fallback",
+                    }
     elif mode == "ontology":
         result = search_ontology_concepts(
             query=query,
@@ -758,12 +1117,13 @@ def ncs_analysis(
         )
     if not items:
         return not_found_response(f"{mode} 분석 결과가 없습니다.")
-    return result
+    return {key: value for key, value in result.items() if key != "data"}
 
 
 @mcp.tool()
+@guard_public_tool
 def ncs_discover_tools(intent: str = "") -> dict[str, Any]:
-    """Discover the compact NCS MCP tool surface by user intent or category."""
+    """한국어 사용자 의도에 맞는 HRMCP 도구와 호출 순서를 안내합니다. Discover the right tool."""
     surface = current_mcp_tool_surface()
     query_route = route_ncs_query(intent, available_tool_names=set(surface["all_tools"]))
     matches = tool_registry.discover_tools_for_intent(
@@ -863,8 +1223,9 @@ def _route_execution_metadata(
 
 
 @mcp.tool()
+@guard_public_tool
 def ncs_execute_tool(tool_name: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Execute a read-only user NCS MCP tool discovered by ncs_discover_tools."""
+    """발견된 읽기 전용 HRMCP 도구를 실행합니다. Execute a discovered read-only tool."""
     if tool_name in {"ncs_discover_tools", "ncs_execute_tool"}:
         return error_response("meta_tool_recursion_blocked", tool_name=tool_name)
     advanced_enabled = bool(getattr(load_settings(), "advanced_tools_enabled", False))
@@ -1204,7 +1565,7 @@ def get_unit_structure(
                 "unit_code": unit["unit_code"],
                 "unit_name": unit["unit_name_raw"],
                 "unit_level": unit["unit_level_raw"],
-                "classification": unit_path(unit),
+                "classification": unit_path(unit, include_duty_definition=True),
                 "api_definition": unit["api_definition"],
                 "api_match_status": unit["api_match_status"],
             },
@@ -1347,6 +1708,18 @@ def get_ksa(
     }
 
 
+def _ncs_search_markdown(query: str, results: list[dict[str, Any]]) -> str:
+    lines = [f"## NCS 검색 결과: {query}"]
+    for index, item in enumerate(results[:5], start=1):
+        item_type = str(item.get("type") or "result")
+        item_id = str(item.get("id") or "")
+        text = str(item.get("text") or "").strip()
+        lines.append(f"{index}. **{text}** (`{item_type}` · `{item_id}`)")
+    if len(results) > 5:
+        lines.append(f"- 그 밖의 결과 {len(results) - 5}건은 `results`에서 확인할 수 있습니다.")
+    return "\n".join(lines)
+
+
 def search_ncs(query: str, scope: str = "all", limit: int = 50) -> dict[str, Any]:
     """Search NCS units, elements, criteria, and KSA text."""
     max_rows = clamp_limit(limit)
@@ -1361,36 +1734,45 @@ def search_ncs(query: str, scope: str = "all", limit: int = 50) -> dict[str, Any
                        c.middle_code, c.middle_name,
                        c.small_code, c.small_name,
                        c.sub_code, c.sub_name,
-                       c.duty_def_api, c.duty_order
+                       c.duty_order
                 FROM competency_units cu
                 JOIN classifications c ON c.classification_id = cu.classification_id
-                WHERE cu.unit_code LIKE ?
-                   OR cu.unit_name_raw LIKE ?
-                   OR cu.api_definition LIKE ?
-                   OR c.major_name LIKE ?
-                   OR c.middle_name LIKE ?
-                   OR c.small_name LIKE ?
-                   OR c.sub_name LIKE ?
+                WHERE cu.unit_code LIKE :pattern
+                   OR cu.unit_name_raw LIKE :pattern
+                   OR cu.api_definition LIKE :pattern
+                   OR c.major_name LIKE :pattern
+                   OR c.middle_name LIKE :pattern
+                   OR c.small_name LIKE :pattern
+                   OR c.sub_name LIKE :pattern
                    OR cu.unit_code IN (
                        SELECT DISTINCT alias.unit_code
                        FROM ncs_query_aliases alias
                        WHERE alias.unit_code IS NOT NULL
-                         AND (alias.alias_text LIKE ? OR alias.normalized_query LIKE ?)
+                         AND (alias.alias_text LIKE :pattern OR alias.normalized_query LIKE :pattern)
                    )
-                LIMIT ?
+                ORDER BY
+                    CASE
+                        WHEN cu.unit_code = :exact THEN 0
+                        WHEN TRIM(cu.unit_name_raw) = TRIM(:exact) COLLATE NOCASE THEN 0
+                        WHEN cu.unit_name_raw LIKE :prefix THEN 1
+                        WHEN cu.unit_name_raw LIKE :pattern THEN 2
+                        WHEN c.major_name LIKE :pattern
+                          OR c.middle_name LIKE :pattern
+                          OR c.small_name LIKE :pattern
+                          OR c.sub_name LIKE :pattern THEN 3
+                        WHEN cu.api_definition LIKE :pattern THEN 4
+                        ELSE 5
+                    END,
+                    LENGTH(cu.unit_name_raw),
+                    cu.unit_code
+                LIMIT :row_limit
                 """,
-                (
-                    pattern,
-                    pattern,
-                    pattern,
-                    pattern,
-                    pattern,
-                    pattern,
-                    pattern,
-                    pattern,
-                    pattern,
-                    max_rows - len(results),
-                ),
+                {
+                    "pattern": pattern,
+                    "exact": query,
+                    "prefix": f"{query}%",
+                    "row_limit": max_rows - len(results),
+                },
             ).fetchall()
             for row in rows:
                 results.append(
@@ -1477,7 +1859,12 @@ def search_ncs(query: str, scope: str = "all", limit: int = 50) -> dict[str, Any
                         },
                     }
                 )
-    return {"query": query, "scope": scope, "results": results}
+    return {
+        "query": query,
+        "scope": scope,
+        "markdown_summary": _ncs_search_markdown(query, results),
+        "results": results,
+    }
 
 
 @mcp.tool()
@@ -1589,6 +1976,8 @@ def search_training_courses(
     unit_code: str | None = None,
     concept_query: str | None = None,
     limit: int = 20,
+    link_limit: int = DEFAULT_COURSE_LINK_LIMIT,
+    compact: bool = True,
 ) -> dict[str, Any]:
     """Search cached NCS training courses collected from openapi18."""
     with open_db() as conn:
@@ -1599,6 +1988,8 @@ def search_training_courses(
             unit_code=unit_code,
             concept_query=concept_query,
             limit=limit,
+            link_limit=link_limit,
+            compact=compact,
         )
     return tool_response(
         {
@@ -1610,27 +2001,35 @@ def search_training_courses(
             "training_courses": courses,
         },
         audit={
-            "data_sources": [
-                "ncs_training_courses",
-                "ncs_training_course_unit_links",
-                "ncs_training_course_concept_links",
-                "ncs_training_course_element_links",
-                "training_goal_concept_links",
-                "training_delivery_relations",
-            ],
+            "data_sources": (
+                ["ncs_training_courses", "NCS training link tables"]
+                if compact
+                else [
+                    "ncs_training_courses",
+                    "ncs_training_course_unit_links",
+                    "ncs_training_course_concept_links",
+                    "ncs_training_course_element_links",
+                    "training_goal_concept_links",
+                    "training_delivery_relations",
+                ]
+            ),
             "returned": len(courses),
             "generated_at": now_utc(),
             "sqf_used": False,
             "learning_modules_used": False,
         },
+        include_data_alias=False,
     )
 
 
-def get_training_course(training_course_id: int) -> dict[str, Any]:
+def get_training_course(
+    training_course_id: int,
+    link_limit: int = DEFAULT_COURSE_LINK_LIMIT,
+) -> dict[str, Any]:
     """Return one cached NCS training course with NCS unit and KSA concept links."""
     with open_db() as conn:
-        result = training_get_course(conn, training_course_id)
-    return tool_response(result)
+        result = training_get_course(conn, training_course_id, link_limit=link_limit)
+    return tool_response(result, include_data_alias=False)
 
 
 def build_training_course_ontology_links(
@@ -1678,6 +2077,62 @@ def import_career_paths(
             "data_sources": ["NCS career development path CSV", "ncs_career_paths"],
             "generated_at": now_utc(),
         },
+    )
+
+
+def search_career_paths(
+    query: str | None = None,
+    unit_code: str | None = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Search career-development rows instead of returning an unrelated global summary."""
+    clauses: list[str] = []
+    params: list[Any] = []
+    if query:
+        clauses.append(
+            "(job_name LIKE ? OR competency_name LIKE ? OR position_name LIKE ?)"
+        )
+        pattern = f"%{query}%"
+        params.extend([pattern, pattern, pattern])
+    if unit_code:
+        clauses.append("matched_unit_code = ?")
+        params.append(unit_code)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    with open_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT career_path_id, job_code_raw, job_name,
+                   competency_code_raw, competency_level_raw, competency_name,
+                   position_level_raw, position_name,
+                   major_code, middle_code, small_code, sub_code,
+                   matched_unit_code, confidence_score, review_status
+            FROM ncs_career_paths
+            {where}
+            ORDER BY
+                CASE WHEN ? IS NOT NULL AND job_name = ? THEN 0
+                     WHEN ? IS NOT NULL AND competency_name = ? THEN 1
+                     WHEN ? IS NOT NULL AND job_name LIKE ? THEN 2
+                     WHEN ? IS NOT NULL AND competency_name LIKE ? THEN 3
+                     ELSE 4 END,
+                job_name, competency_name, career_path_id
+            LIMIT ?
+            """,
+            (
+                *params,
+                query,
+                query,
+                query,
+                query,
+                query,
+                f"{query}%" if query else None,
+                query,
+                f"{query}%" if query else None,
+                clamp_limit(limit, default=20, maximum=100),
+            ),
+        ).fetchall()
+    return tool_response(
+        {"query": query, "unit_code": unit_code, "career_paths": rows_to_dicts(rows)},
+        audit={"data_sources": ["ncs_career_paths"], "generated_at": now_utc()},
     )
 
 
@@ -1786,7 +2241,7 @@ def search_qualification_items(
 ) -> dict[str, Any]:
     """Search cached qualification items linked to NCS competency units."""
     with open_db() as conn:
-        links = qualification_search_links(
+        raw_links = qualification_search_links(
             conn,
             unit_code=unit_code,
             qualification_name=qualification_name,
@@ -1794,7 +2249,40 @@ def search_qualification_items(
             unit_type=unit_type,
             limit=limit,
         )
-        summary = qualification_cached_summary(conn, limit=10)
+        qualification_fields = (
+            "unit_code",
+            "jm_cd",
+            "jm_nm",
+            "exam_insti_nm",
+            "compe_unit_name",
+            "ablt_unit_typ_cd",
+            "ablt_unit_typ_nm",
+            "min_edu_trng_tm",
+            "unit_name",
+            "major_code",
+            "major_name",
+            "confidence_score",
+            "review_status",
+        )
+        links = [
+            {field: row.get(field) for field in qualification_fields}
+            for row in raw_links
+        ]
+        if sqlite_object_exists(conn, "ncs_qualification_collection_status"):
+            summary = qualification_cached_summary(conn, limit=10)
+            summary["collection_status_available"] = True
+        else:
+            summary = {
+                "ok": True,
+                "qualification_item_count": int(
+                    conn.execute("SELECT COUNT(*) FROM ncs_qualification_items").fetchone()[0]
+                ),
+                "unit_qualification_link_count": int(
+                    conn.execute("SELECT COUNT(*) FROM ncs_unit_qualification_links").fetchone()[0]
+                ),
+                "collection_status_available": False,
+                "missing_optional_tables": ["ncs_qualification_collection_status"],
+            }
     return tool_response(
         {
             "qualification_links": links,
@@ -1844,7 +2332,7 @@ def search_job_base_competencies(
 ) -> dict[str, Any]:
     """Search cached NCS job base competencies linked to NCS competency units."""
     with open_db() as conn:
-        links = job_base_search_links(
+        raw_links = job_base_search_links(
             conn,
             unit_code=unit_code,
             competency_name=competency_name,
@@ -1852,6 +2340,23 @@ def search_job_base_competencies(
             major_code=major_code,
             limit=limit,
         )
+        job_base_fields = (
+            "unit_code",
+            "job_base_competency_id",
+            "job_base_factor_id",
+            "competency_name",
+            "factor_name",
+            "unit_name",
+            "major_code",
+            "major_name",
+            "link_method",
+            "confidence_score",
+            "review_status",
+        )
+        links = [
+            {field: row.get(field) for field in job_base_fields}
+            for row in raw_links
+        ]
         summary = job_base_cached_summary(conn, limit=10)
     return tool_response(
         {
@@ -1869,7 +2374,8 @@ def search_job_base_competencies(
     )
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
+@guard_public_tool
 def recommend_training_for_task(
     criteria_id: int | None = None,
     unit_code: str | None = None,
@@ -1886,7 +2392,7 @@ def recommend_training_for_task(
     save: bool = True,
     compact: bool = False,
 ) -> dict[str, Any]:
-    """Recommend NCS training courses from a task's KSA ontology and task transitions."""
+    """과업의 수행준거와 KSA 근거로 훈련과정을 추천합니다. Recommend training from task evidence."""
     result, capacity, failure = execute_capacity_bound_recommendation(
         "recommend_training_for_task",
         lambda conn: training_recommend_for_task(
@@ -1925,6 +2431,7 @@ def recommend_training_for_task(
 
 
 @mcp.tool()
+@guard_public_tool
 def recommend_training_transition(
     current_query: str,
     target_query: str,
@@ -1989,6 +2496,7 @@ def recommend_training_transition(
 
 
 @mcp.tool()
+@guard_public_tool
 def plan_ncs_education_path(
     current_query: str,
     target_query: str,
@@ -2125,6 +2633,7 @@ def search_ncs_reference_chunks(
 
 
 @mcp.tool()
+@guard_public_tool
 def recommend_task_transitions(
     criteria_id: int | None = None,
     query: str | None = None,
@@ -2341,6 +2850,46 @@ def search_ontology_concepts(
         )
         params.extend([like, like, like])
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    if query:
+        ordering = """
+            CASE
+                WHEN TRIM(oc.concept_name) = TRIM(?) COLLATE NOCASE THEN 0
+                WHEN oc.concept_name LIKE ? THEN 1
+                WHEN oc.concept_name LIKE ? THEN 2
+                WHEN EXISTS (
+                    SELECT 1 FROM ontology_concept_aliases alias
+                    WHERE alias.concept_id = oc.concept_id
+                      AND TRIM(alias.alias_text) = TRIM(?) COLLATE NOCASE
+                ) THEN 3
+                WHEN EXISTS (
+                    SELECT 1 FROM ontology_concept_aliases alias
+                    WHERE alias.concept_id = oc.concept_id
+                      AND alias.alias_text LIKE ?
+                ) THEN 4
+                WHEN oc.definition LIKE ? THEN 5
+                ELSE 6
+            END,
+            CASE oc.review_status
+                WHEN 'human_reviewed' THEN 0
+                WHEN 'reviewed' THEN 1
+                WHEN 'accepted' THEN 1
+                ELSE 2
+            END,
+            oc.concept_type,
+            LENGTH(oc.concept_name),
+            oc.concept_name
+        """
+        ordering_params: list[Any] = [
+            query,
+            f"{query}%",
+            like,
+            query,
+            f"{query}%",
+            like,
+        ]
+    else:
+        ordering = "oc.review_status, oc.concept_type, oc.concept_name"
+        ordering_params = []
     with open_db() as conn:
         # Hosted ontology snapshots replace the large relation/link tables with
         # postings.  Keep the public row shape identical while using posting
@@ -2411,10 +2960,10 @@ def search_ontology_concepts(
                 {learning_module_count_sql} AS learning_module_count
             FROM ontology_concepts oc
             {where}
-            ORDER BY oc.review_status, oc.concept_type, oc.concept_name
+            ORDER BY {ordering}
             LIMIT ?
             """,
-            params + [clamp_limit(limit, default=20, maximum=100)],
+            params + ordering_params + [clamp_limit(limit, default=20, maximum=100)],
         ).fetchall()
     return tool_response(
         {
@@ -2436,6 +2985,7 @@ def search_ontology_concepts(
 
 
 @mcp.tool()
+@guard_public_tool
 def get_concept_evidence(concept_id: int, limit: int = 20) -> dict[str, Any]:
     """Return source KSA, criteria, learning-module, relation, and recommendation evidence for a concept."""
     max_rows = clamp_limit(limit, default=20, maximum=100)

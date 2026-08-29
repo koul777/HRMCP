@@ -21,7 +21,12 @@ async def app(scope, receive, send) -> None:
     runtime = runtime_health_metadata()
     response = JSONResponse(
         {
-            "status": "ok" if runtime["database"]["ready"] else "degraded",
+            "status": (
+                "ok"
+                if runtime["database"]["ready"]
+                and runtime["database"].get("public_tools_ready", False)
+                else "degraded"
+            ),
             "name": "ncs-mcp",
             "transport": "streamable-http",
             "endpoint": "/mcp",

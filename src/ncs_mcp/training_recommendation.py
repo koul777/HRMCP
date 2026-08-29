@@ -52,6 +52,34 @@ from ncs_mcp.review_safety import REVIEW_PACKET_EXTENSIONS, is_portable_reports_
 TRUSTED_TRANSITION_REVIEW_STATUSES = ("human_reviewed", "reviewed", "accepted")
 TRUSTED_CAREER_PATH_REVIEW_STATUSES = set(TRUSTED_TRANSITION_REVIEW_STATUSES)
 REVIEW_AUDIT_PACKET_EXTENSIONS = REVIEW_PACKET_EXTENSIONS
+DEFAULT_COURSE_LINK_LIMIT = 10
+MAX_COURSE_LINK_LIMIT = 100
+PUBLIC_TRAINING_COURSE_FIELDS = (
+    "training_course_id",
+    "ncs_cl_cd",
+    "compe_unit_name",
+    "compe_unit_level",
+    "ncs_lclas_cd",
+    "ncs_lclas_cdnm",
+    "ncs_mclas_cd",
+    "ncs_mclas_cdnm",
+    "ncs_sclas_cd",
+    "ncs_sclas_cdnm",
+    "ncs_subd_cd",
+    "ncs_subd_cdnm",
+    "train_goal",
+    "train_time",
+    "fac_name",
+    "meth_name",
+)
+SUMMARY_TRAINING_COURSE_FIELDS = (
+    "training_course_id",
+    "ncs_cl_cd",
+    "compe_unit_name",
+    "compe_unit_level",
+    "train_goal",
+    "train_time",
+)
 DEFINITION_TRUST_WEIGHT = {
     "human_reviewed": 1.0,
     "auto_promoted": 0.85,
@@ -2114,58 +2142,148 @@ def _resolve_query_scope_units(
     }
 
 
-def _course_payload(conn: sqlite3.Connection, course: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+def _project_fields(row: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
+    return {field: row.get(field) for field in fields}
+
+
+def _bounded_link_rows(
+    conn: sqlite3.Connection,
+    sql: str,
+    params: tuple[Any, ...],
+    *,
+    limit: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    rows = rows_to_dicts(conn.execute(sql, (*params, limit)).fetchall())
+    total_count = int(rows[0].pop("_total_count")) if rows else 0
+    for row in rows[1:]:
+        row.pop("_total_count", None)
+    returned_count = len(rows)
+    return rows, {
+        "total_count": total_count,
+        "returned_count": returned_count,
+        "truncated": total_count > returned_count,
+    }
+
+
+def _course_payload(
+    conn: sqlite3.Connection,
+    course: sqlite3.Row | dict[str, Any],
+    *,
+    link_limit: int = DEFAULT_COURSE_LINK_LIMIT,
+) -> dict[str, Any]:
     row = _row_dict(course)
-    cid = row["training_course_id"]
-    unit_links = rows_to_dicts(
-        conn.execute(
-            "SELECT * FROM ncs_training_course_unit_links WHERE training_course_id = ? ORDER BY link_id",
-            (cid,),
-        ).fetchall()
+    cid = int(row["training_course_id"])
+    max_links = clamp_limit(
+        link_limit,
+        default=DEFAULT_COURSE_LINK_LIMIT,
+        maximum=MAX_COURSE_LINK_LIMIT,
     )
-    concept_links = rows_to_dicts(
-        conn.execute(
-            "SELECT * FROM ncs_training_course_concept_links WHERE training_course_id = ? ORDER BY link_id",
-            (cid,),
-        ).fetchall()
+    unit_links, unit_meta = _bounded_link_rows(
+        conn,
+        """
+        SELECT unit_code, link_method, confidence_score, review_status,
+               COUNT(*) OVER () AS _total_count
+        FROM ncs_training_course_unit_links
+        WHERE training_course_id = ?
+        ORDER BY link_id
+        LIMIT ?
+        """,
+        (cid,),
+        limit=max_links,
     )
-    element_links = rows_to_dicts(
-        conn.execute(
-            """
-            SELECT l.*, ce.element_name_raw
-            FROM ncs_training_course_element_links l
-            JOIN competency_elements ce ON ce.element_id = l.element_id
-            WHERE l.training_course_id = ?
-            ORDER BY l.link_id
-            """,
-            (cid,),
-        ).fetchall()
+    concept_links, concept_meta = _bounded_link_rows(
+        conn,
+        """
+        SELECT l.unit_code, l.concept_id, oc.concept_name, oc.concept_type,
+               l.link_method, l.confidence_score, l.review_status,
+               COUNT(*) OVER () AS _total_count
+        FROM ncs_training_course_concept_links l
+        JOIN ontology_concepts oc ON oc.concept_id = l.concept_id
+        WHERE l.training_course_id = ?
+        ORDER BY l.link_id
+        LIMIT ?
+        """,
+        (cid,),
+        limit=max_links,
     )
-    goal_links = rows_to_dicts(
-        conn.execute(
-            """
-            SELECT l.*, oc.concept_name, oc.concept_type
-            FROM training_goal_concept_links l
-            JOIN ontology_concepts oc ON oc.concept_id = l.concept_id
-            WHERE l.training_course_id = ?
-            ORDER BY l.link_id
-            """,
-            (cid,),
-        ).fetchall()
+    element_links, element_meta = _bounded_link_rows(
+        conn,
+        """
+        SELECT l.unit_code, l.element_id, ce.element_name_raw AS element_name,
+               l.link_method, l.confidence_score, l.review_status,
+               COUNT(*) OVER () AS _total_count
+        FROM ncs_training_course_element_links l
+        JOIN competency_elements ce ON ce.element_id = l.element_id
+        WHERE l.training_course_id = ?
+        ORDER BY l.link_id
+        LIMIT ?
+        """,
+        (cid,),
+        limit=max_links,
     )
-    delivery = rows_to_dicts(
-        conn.execute(
-            "SELECT * FROM training_delivery_relations WHERE training_course_id = ? ORDER BY relation_id",
-            (cid,),
-        ).fetchall()
+    goal_links, goal_meta = _bounded_link_rows(
+        conn,
+        """
+        SELECT l.unit_code, l.element_id, l.concept_id,
+               oc.concept_name, oc.concept_type,
+               l.link_method, l.confidence_score, l.review_status,
+               COUNT(*) OVER () AS _total_count
+        FROM training_goal_concept_links l
+        JOIN ontology_concepts oc ON oc.concept_id = l.concept_id
+        WHERE l.training_course_id = ?
+        ORDER BY l.link_id
+        LIMIT ?
+        """,
+        (cid,),
+        limit=max_links,
+    )
+    delivery, delivery_meta = _bounded_link_rows(
+        conn,
+        """
+        SELECT relation_type, relation_value, normalized_value, numeric_value,
+               confidence_score, review_status,
+               COUNT(*) OVER () AS _total_count
+        FROM training_delivery_relations
+        WHERE training_course_id = ?
+        ORDER BY relation_id
+        LIMIT ?
+        """,
+        (cid,),
+        limit=max_links,
     )
     return {
-        "training_course": row,
+        "training_course": _project_fields(row, PUBLIC_TRAINING_COURSE_FIELDS),
         "unit_links": unit_links,
         "concept_links": concept_links,
         "element_links": element_links,
         "goal_concept_links": goal_links,
         "delivery_relations": delivery,
+        "link_meta": {
+            "unit_links": unit_meta,
+            "concept_links": concept_meta,
+            "element_links": element_meta,
+            "goal_concept_links": goal_meta,
+            "delivery_relations": delivery_meta,
+        },
+    }
+
+
+def _course_summary_payload(course: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    row = _row_dict(course)
+    summary = _project_fields(row, SUMMARY_TRAINING_COURSE_FIELDS)
+    goal = _clean(summary.get("train_goal"))
+    if len(goal) > 100:
+        goal = f"{goal[:97]}..."
+    summary["train_goal"] = goal or None
+    return {
+        "training_course": summary,
+        "link_counts": {
+            "unit_links": int(row.get("unit_link_count") or 0),
+            "concept_links": int(row.get("concept_link_count") or 0),
+            "element_links": int(row.get("element_link_count") or 0),
+            "goal_concept_links": int(row.get("goal_link_count") or 0),
+            "delivery_relations": int(row.get("delivery_relation_count") or 0),
+        },
     }
 
 
@@ -2387,14 +2505,20 @@ def _profiles_for_unit_codes(
     return rows
 
 
-def get_training_course(conn: sqlite3.Connection, training_course_id: int) -> dict[str, Any]:
+def get_training_course(
+    conn: sqlite3.Connection,
+    training_course_id: int,
+    *,
+    link_limit: int = DEFAULT_COURSE_LINK_LIMIT,
+) -> dict[str, Any]:
+    course_columns = ", ".join(PUBLIC_TRAINING_COURSE_FIELDS)
     row = conn.execute(
-        "SELECT * FROM ncs_training_courses WHERE training_course_id = ?",
+        f"SELECT {course_columns} FROM ncs_training_courses WHERE training_course_id = ?",
         (training_course_id,),
     ).fetchone()
     if not row:
         return not_found_response(f"훈련과정을 찾을 수 없습니다: {training_course_id}")
-    return {"ok": True, **_course_payload(conn, row)}
+    return {"ok": True, **_course_payload(conn, row, link_limit=link_limit)}
 
 
 def build_training_course_ontology_links(
@@ -2562,6 +2686,8 @@ def search_training_courses(
     unit_code: str | None = None,
     concept_query: str | None = None,
     limit: int = 20,
+    link_limit: int = DEFAULT_COURSE_LINK_LIMIT,
+    compact: bool = False,
 ) -> list[dict[str, Any]]:
     max_rows = clamp_limit(limit, default=20, maximum=100)
     clauses: list[str] = []
@@ -2590,9 +2716,34 @@ def search_training_courses(
         )
         params.append(f"%{concept_query}%")
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    if compact:
+        course_columns = ", ".join(f"tc.{field}" for field in SUMMARY_TRAINING_COURSE_FIELDS)
+        rows = conn.execute(
+            f"""
+            SELECT {course_columns},
+                   (SELECT COUNT(*) FROM ncs_training_course_unit_links l
+                    WHERE l.training_course_id = tc.training_course_id) AS unit_link_count,
+                   (SELECT COUNT(*) FROM ncs_training_course_concept_links l
+                    WHERE l.training_course_id = tc.training_course_id) AS concept_link_count,
+                   (SELECT COUNT(*) FROM ncs_training_course_element_links l
+                    WHERE l.training_course_id = tc.training_course_id) AS element_link_count,
+                   (SELECT COUNT(*) FROM training_goal_concept_links l
+                    WHERE l.training_course_id = tc.training_course_id) AS goal_link_count,
+                   (SELECT COUNT(*) FROM training_delivery_relations l
+                    WHERE l.training_course_id = tc.training_course_id) AS delivery_relation_count
+            FROM ncs_training_courses tc
+            {where}
+            ORDER BY tc.training_course_id
+            LIMIT ?
+            """,
+            (*params, max_rows),
+        ).fetchall()
+        return [_course_summary_payload(row) for row in rows]
+
+    course_columns = ", ".join(f"tc.{field}" for field in PUBLIC_TRAINING_COURSE_FIELDS)
     rows = conn.execute(
         f"""
-        SELECT tc.*
+        SELECT {course_columns}
         FROM ncs_training_courses tc
         {where}
         ORDER BY tc.training_course_id
@@ -2600,7 +2751,7 @@ def search_training_courses(
         """,
         (*params, max_rows),
     ).fetchall()
-    return [_course_payload(conn, row) for row in rows]
+    return [_course_payload(conn, row, link_limit=link_limit) for row in rows]
 
 
 def _qualification_key(item: dict[str, Any]) -> str:

@@ -358,10 +358,14 @@ jobs:
           python scripts\verify_remote_mcp_transport.py `
             "$env:STAGED_DEPLOY_URL/api/mcp" `
             --concurrency 5 `
+            --request-timeout 30 `
             --out "$exactReport"
+          if ($LASTEXITCODE -ne 0) {
+            throw "The staged deployment failed transport or public-tool smoke verification."
+          }
           "STAGED_REMOTE_REPORT=$exactReport" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Promote staged production deployment and verify public URL
+      - name: Promote staged production deployment and smoke the public MCP URL
         if: steps.ontology.outputs.needs_deploy == 'true' && (inputs.deploy_target == 'production' || github.event_name == 'schedule')
         shell: powershell
         run: |
@@ -381,7 +385,11 @@ jobs:
           python scripts\verify_remote_mcp_transport.py `
             "$productionMcpUrl" `
             --concurrency 5 `
+            --request-timeout 30 `
             --out "$finalReport"
+          if ($LASTEXITCODE -ne 0) {
+            throw "The public production MCP URL failed transport or public-tool smoke verification."
+          }
           "FINAL_REMOTE_REPORT=$finalReport" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Promote verified canonical baseline state
