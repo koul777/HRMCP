@@ -792,6 +792,44 @@ class PublicMcpPayloadContractTests(unittest.TestCase):
         for identifier in (course_id, unit_code, element_id, concept_id):
             self.assertRegex(detail_text, rf"\b{re.escape(str(identifier))}\b")
 
+    def test_ncs_analysis_markdown_stays_under_budget_and_preserves_ids(self) -> None:
+        cases = (
+            (
+                {"mode": "career_path", "query": "인사기획", "limit": 5},
+                "## 경력개발경로 분석",
+                EXACT_UNIT,
+            ),
+            (
+                {"mode": "qualification", "unit_code": EXACT_UNIT, "limit": 5},
+                "## 자격 연계 분석",
+                EXACT_UNIT,
+            ),
+            (
+                {"mode": "job_base", "unit_code": EXACT_UNIT, "limit": 5},
+                "## 직업기초능력 분석",
+                EXACT_UNIT,
+            ),
+            (
+                {"mode": "ontology", "query": ONTOLOGY_QUERY, "limit": 5},
+                "## 온톨로지 분석",
+                str(self.seed["exact_concept_id"]),
+            ),
+        )
+        for arguments, heading, identifier in cases:
+            with self.subTest(mode=arguments["mode"]):
+                analysis_wire, analysis_text = self._call_tool_wire(
+                    "ncs_analysis",
+                    arguments,
+                )
+                self.assertNotIn("structuredContent", analysis_wire)
+                self.assertLessEqual(
+                    len(analysis_text),
+                    MAX_MARKDOWN_TEXT_CHARS["ncs_analysis"],
+                )
+                self.assertIn(heading, analysis_text)
+                self.assertRegex(analysis_text, r"\d+건 중 \d+건 표시")
+                self.assertRegex(analysis_text, rf"\b{re.escape(str(identifier))}\b")
+                self.assertTrue(analysis_text.endswith(SOURCE_FOOTER), analysis_text)
 
     def test_qualification_without_collection_status_remains_usable(self) -> None:
         conn = connect(self.db_path)

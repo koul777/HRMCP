@@ -1001,6 +1001,121 @@ def _render_ncs_training_markdown(result: dict[str, Any]) -> str | None:
 _PUBLIC_MARKDOWN_RENDERERS["ncs_training"] = _render_ncs_training_markdown
 
 
+def _render_ncs_analysis_markdown(result: dict[str, Any]) -> str | None:
+    if isinstance(result.get("career_paths"), list):
+        rows = result["career_paths"]
+        lines = ["## 경력개발경로 분석"]
+        count_line = _returned_total_line(len(rows), min(len(rows), 5))
+        if count_line:
+            lines.append(count_line)
+        lines.extend(
+            [
+                "",
+                _markdown_table(
+                    ["경로ID", "직무명", "능력명", "직위", "능력단위코드"],
+                    [
+                        [
+                            row.get("career_path_id"),
+                            _short_markdown_text(row.get("job_name"), max_chars=28),
+                            _short_markdown_text(row.get("competency_name"), max_chars=30),
+                            _short_markdown_text(row.get("position_name"), max_chars=24),
+                            row.get("matched_unit_code"),
+                        ]
+                        for row in rows[:5]
+                    ],
+                ),
+            ]
+        )
+        return _append_markdown_footer(lines, result.get("audit"))
+    if isinstance(result.get("qualification_links"), list):
+        rows = result["qualification_links"]
+        lines = ["## 자격 연계 분석"]
+        count_line = _returned_total_line(len(rows), min(len(rows), 5))
+        if count_line:
+            lines.append(count_line)
+        lines.extend(
+            [
+                "",
+                _markdown_table(
+                    ["자격코드", "자격명", "능력단위코드", "최소시간"],
+                    [
+                        [
+                            row.get("jm_cd"),
+                            _short_markdown_text(row.get("jm_nm"), max_chars=32),
+                            row.get("unit_code"),
+                            row.get("min_edu_trng_tm"),
+                        ]
+                        for row in rows[:5]
+                    ],
+                ),
+            ]
+        )
+        return _append_markdown_footer(lines, result.get("audit"))
+    if isinstance(result.get("job_base_links"), list):
+        rows = result["job_base_links"]
+        summary = result.get("summary")
+        lines = ["## 직업기초능력 분석"]
+        if isinstance(summary, dict):
+            count_line = _returned_total_line(summary.get("total_count"), summary.get("returned_count"))
+            if count_line:
+                lines.append(count_line)
+        lines.extend(
+            [
+                "",
+                _markdown_table(
+                    ["능력단위코드", "직업기초능력", "하위요소", "신뢰도"],
+                    [
+                        [
+                            row.get("unit_code"),
+                            _short_markdown_text(row.get("competency_name"), max_chars=30),
+                            _short_markdown_text(row.get("factor_name"), max_chars=30),
+                            row.get("confidence_score"),
+                        ]
+                        for row in rows[:3]
+                    ],
+                ),
+            ]
+        )
+        query_resolution = result.get("query_resolution")
+        if isinstance(query_resolution, dict):
+            lines.extend(
+                [
+                    "",
+                    f"질의 보정: `{query_resolution.get('input_query')}` -> `{query_resolution.get('resolved_unit_code')}`",
+                ]
+            )
+        return _append_markdown_footer(lines, result.get("audit"))
+    if isinstance(result.get("concepts"), list):
+        rows = result["concepts"]
+        lines = ["## 온톨로지 분석"]
+        count_line = _returned_total_line(len(rows), min(len(rows), 5))
+        if count_line:
+            lines.append(count_line)
+        lines.extend(
+            [
+                "",
+                _markdown_table(
+                    ["개념ID", "개념명", "유형", "관계 수", "수행준거 링크 수"],
+                    [
+                        [
+                            row.get("concept_id"),
+                            _short_markdown_text(row.get("concept_name"), max_chars=36),
+                            row.get("concept_type"),
+                            row.get("relation_count"),
+                            row.get("criteria_link_count"),
+                        ]
+                        for row in rows[:5]
+                    ],
+                ),
+            ]
+        )
+        return _append_markdown_footer(lines, result.get("audit"))
+    return None
+
+
+_PUBLIC_MARKDOWN_RENDERERS["ncs_analysis"] = _render_ncs_analysis_markdown
+
+
 def _render_tool_response_markdown(
     result: dict[str, Any],
     *,
