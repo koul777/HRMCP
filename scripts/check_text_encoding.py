@@ -8,7 +8,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 TEXT_EXPECTATIONS = {
-    "README.md": ["NCS MCP", "education/training", "NCS-centered"],
+    "README.md": [
+        "NCS 기반 HR 실무용 MCP",
+        "교육훈련 계획 수립",
+        "NCS 중심",
+    ],
     "docs/NCS_MCP_USER_GUIDE_KO.md": ["NCS 훈련 추천 MCP 사용자 가이드", "경력개발", "직무 전환"],
     "docs/MCP_RELEASE_CHECKLIST.md": ["API keys", "Docker", "/ready"],
 }
