@@ -9,6 +9,7 @@ import re
 import sqlite3
 import threading
 import time
+import unicodedata
 from functools import wraps
 from importlib.metadata import PackageNotFoundError, version as package_version
 
@@ -718,6 +719,10 @@ def _render_ncs_search_markdown(result: dict[str, Any]) -> str | None:
     if not isinstance(rows, list) or not rows:
         return None
     visible = rows[:5]
+    returned = int(result.get("returned") or len(rows))
+    offset = int(result.get("offset") or 0)
+    next_offset = result.get("next_offset")
+    counts_by_type = result.get("counts_by_type")
     table_rows: list[list[Any]] = []
     other_rows: list[list[Any]] = []
     for row in visible:
@@ -742,9 +747,22 @@ def _render_ncs_search_markdown(result: dict[str, Any]) -> str | None:
                 ]
             )
     lines = [f"## NCS 검색 결과: {query}"]
-    count_line = _returned_total_line(len(rows), len(visible))
+    count_line = _returned_total_line(returned, len(visible))
     if count_line:
-        lines.append(count_line)
+        lines.append(f"{count_line} (최대 5건 미리보기)")
+    if isinstance(counts_by_type, dict):
+        type_summary = ", ".join(
+            f"{item_type} {int(count)}건"
+            for item_type, count in counts_by_type.items()
+            if int(count) > 0
+        )
+        if type_summary:
+            lines.append(f"- 유형별 반환: {type_summary}")
+    lines.append(f"- 현재 페이지: `offset={offset}`")
+    if next_offset is not None:
+        lines.append(
+            f"- 다음 페이지: 같은 질의와 범위에 `offset={int(next_offset)}`을 지정하세요."
+        )
     lines.append("")
     if table_rows:
         lines.append(
@@ -1590,9 +1608,14 @@ def sqf_gap_report_prompt(
 
 @mcp.tool(structured_output=False)
 @guard_public_tool
-def ncs_search(query: str = "", scope: str = "all", limit: int = 20) -> dict[str, Any]:
+def ncs_search(
+    query: str = "",
+    scope: str = "all",
+    limit: int = 20,
+    offset: int = 0,
+) -> dict[str, Any]:
     """NCS 분류·능력단위·요소·수행준거·KSA를 검색합니다. Search NCS structure and evidence."""
-    normalized_scope = scope if scope in {"unit", "element", "criteria", "all"} else "all"
+    normalized_scope = scope if scope in {"unit", "element", "criteria", "ksa", "all"} else "all"
     if not query:
         result = list_classifications(limit=limit)
         rows = result.get("classifications", [])
@@ -1607,7 +1630,12 @@ def ncs_search(query: str = "", scope: str = "all", limit: int = 20) -> dict[str
             },
             include_data_alias=False,
         )
-    result = search_ncs(query=query, scope=normalized_scope, limit=limit)
+    result = search_ncs(
+        query=query,
+        scope=normalized_scope,
+        limit=limit,
+        offset=offset,
+    )
     rows = result.get("results", [])
     if not rows:
         return not_found_response(f"NCS 검색 결과가 없습니다: {query}")
@@ -2373,75 +2401,282 @@ def get_ksa(
     }
 
 
-def _ncs_search_markdown(query: str, results: list[dict[str, Any]]) -> str:
+def _ncs_search_markdown(
+    query: str,
+    results: list[dict[str, Any]],
+    *,
+    counts_by_type: dict[str, int],
+    offset: int,
+    next_offset: int | None,
+) -> str:
     lines = [f"## NCS 검색 결과: {query}"]
+    lines.append(f"- 반환 {len(results)}건 중 최대 5건 미리보기")
+    type_summary = ", ".join(
+        f"{item_type} {count}건"
+        for item_type, count in counts_by_type.items()
+        if count > 0
+    )
+    if type_summary:
+        lines.append(f"- 유형별 반환: {type_summary}")
+    lines.append(f"- 현재 페이지: `offset={offset}`")
+    if next_offset is not None:
+        lines.append(
+            f"- 다음 페이지: 같은 질의와 범위에 `offset={next_offset}`을 지정하세요."
+        )
     for index, item in enumerate(results[:5], start=1):
         item_type = str(item.get("type") or "result")
         item_id = str(item.get("id") or "")
         text = str(item.get("text") or "").strip()
         lines.append(f"{index}. **{text}** (`{item_type}` · `{item_id}`)")
-    if len(results) > 5:
-        lines.append(f"- 그 밖의 결과 {len(results) - 5}건은 `results`에서 확인할 수 있습니다.")
     return "\n".join(lines)
 
 
-def search_ncs(query: str, scope: str = "all", limit: int = 50) -> dict[str, Any]:
-    """Search NCS units, elements, criteria, and KSA text."""
+_NCS_SEARCH_TYPES = ("unit", "element", "criteria", "ksa")
+_NCS_SEARCH_MATCH_MODES = {0: "phrase", 1: "token_and", 2: "token_or"}
+
+
+def _normalize_ncs_search_text(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", str(value or "")).strip()
+    if re.fullmatch(r"[A-Za-z0-9]+_[A-Za-z0-9]+", text):
+        return text
+    normalized = [
+        " " if character.isspace() or unicodedata.category(character).startswith("P") else character
+        for character in text
+    ]
+    return re.sub(r"\s+", " ", "".join(normalized)).strip()
+
+
+def _normalize_ncs_search_query(query: str) -> tuple[str, list[str], list[str]]:
+    normalized = _normalize_ncs_search_text(query)
+    query_tokens = normalized.split()[:4]
+    phrase = " ".join(query_tokens)
+    fallback_tokens = [token for token in query_tokens if len(token) > 1]
+    return phrase, query_tokens, fallback_tokens
+
+
+def _escape_ncs_search_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _ncs_search_like_any(columns: tuple[str, ...], parameter: str) -> str:
+    return "(" + " OR ".join(
+        f"COALESCE({column}, '') LIKE :{parameter} ESCAPE '\\'"
+        for column in columns
+    ) + ")"
+
+
+def _ncs_search_tier_predicates(
+    columns: tuple[str, ...],
+    phrase: str,
+    fallback_tokens: list[str],
+) -> list[tuple[int, str, dict[str, Any]]]:
+    params: dict[str, Any] = {
+        "phrase_pattern": f"%{_escape_ncs_search_like(phrase)}%",
+    }
+    phrase_clause = _ncs_search_like_any(columns, "phrase_pattern")
+    token_clauses: list[str] = []
+    for index, token in enumerate(fallback_tokens):
+        parameter = f"token_{index}"
+        params[parameter] = f"%{_escape_ncs_search_like(token)}%"
+        token_clauses.append(_ncs_search_like_any(columns, parameter))
+    if not token_clauses:
+        return [(0, phrase_clause, params)]
+    token_and = "(" + " AND ".join(token_clauses) + ")"
+    token_or = "(" + " OR ".join(token_clauses) + ")"
+    return [
+        (0, phrase_clause, dict(params)),
+        (1, token_and, dict(params)),
+        (2, token_or, dict(params)),
+    ]
+
+
+def _execute_ncs_search_tiers(
+    conn: Any,
+    sql_template: str,
+    tiers: list[tuple[int, str, dict[str, Any]]],
+    base_params: dict[str, Any],
+) -> list[Any]:
+    """Run a weaker search tier only when the stronger tier has no matches."""
+    for match_tier, where_clause, tier_params in tiers:
+        params = dict(tier_params)
+        params.update(base_params)
+        params["match_tier"] = match_tier
+        rows = conn.execute(
+            sql_template.format(where_clause=where_clause),
+            params,
+        ).fetchall()
+        if rows:
+            return rows
+    return []
+
+
+def _ncs_search_match_metadata(
+    item: dict[str, Any],
+    *,
+    query_tokens: list[str],
+    phrase: str,
+    match_mode: str,
+) -> None:
+    raw_fields = item.pop("_search_fields", {})
+    normalized_fields = {
+        field_name: _normalize_ncs_search_text(field_value).casefold()
+        for field_name, field_value in raw_fields.items()
+        if field_value is not None
+    }
+    normalized_tokens = [token.casefold() for token in query_tokens]
+    matched_tokens = [
+        token
+        for token, normalized_token in zip(query_tokens, normalized_tokens)
+        if any(normalized_token in value for value in normalized_fields.values())
+    ]
+    normalized_phrase = phrase.casefold()
+    if match_mode == "phrase":
+        match_fields = [
+            field_name
+            for field_name, value in normalized_fields.items()
+            if normalized_phrase and normalized_phrase in value
+        ]
+    else:
+        match_fields = [
+            field_name
+            for field_name, value in normalized_fields.items()
+            if any(token in value for token in normalized_tokens)
+        ]
+    item.pop("_match_tier", None)
+    item["match_mode"] = match_mode
+    item["matched_tokens"] = matched_tokens
+    item["match_fields"] = match_fields
+
+
+def _round_robin_ncs_search_results(
+    candidates_by_type: dict[str, list[dict[str, Any]]],
+    requested_types: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    index = 0
+    while True:
+        appended = False
+        for item_type in requested_types:
+            candidates = candidates_by_type.get(item_type, [])
+            if index < len(candidates):
+                merged.append(candidates[index])
+                appended = True
+        if not appended:
+            return merged
+        index += 1
+
+
+def search_ncs(
+    query: str,
+    scope: str = "all",
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Search NCS evidence with phrase, token-AND, and token-OR fallback."""
     max_rows = clamp_limit(limit)
-    pattern = f"%{query}%"
-    results: list[dict[str, Any]] = []
+    try:
+        applied_offset = min(max(int(offset), 0), 10_000)
+    except (TypeError, ValueError):
+        applied_offset = 0
+    normalized_scope = scope if scope in _NCS_SEARCH_TYPES or scope == "all" else "all"
+    requested_types = (
+        _NCS_SEARCH_TYPES if normalized_scope == "all" else (normalized_scope,)
+    )
+    phrase, query_tokens, fallback_tokens = _normalize_ncs_search_query(query)
+    empty_counts = {item_type: 0 for item_type in requested_types}
+    empty_more = {item_type: False for item_type in requested_types}
+    if not phrase:
+        return {
+            "query": query,
+            "normalized_query": phrase,
+            "query_tokens": query_tokens,
+            "scope": normalized_scope,
+            "match_mode": None,
+            "counts_by_type": empty_counts,
+            "has_more_by_type": empty_more,
+            "returned": 0,
+            "offset": applied_offset,
+            "next_offset": None,
+            "markdown_summary": _ncs_search_markdown(
+                query,
+                [],
+                counts_by_type=empty_counts,
+                offset=applied_offset,
+                next_offset=None,
+            ),
+            "results": [],
+        }
+
+    candidate_limit = applied_offset + max_rows + 1
+    raw_candidates: dict[str, list[dict[str, Any]]] = {
+        item_type: [] for item_type in requested_types
+    }
     with open_db() as conn:
-        if scope in {"all", "unit"} and len(results) < max_rows:
-            rows = conn.execute(
+        if "unit" in requested_types:
+            columns = (
+                "cu.unit_code",
+                "cu.unit_name_raw",
+                "cu.api_definition",
+                "c.major_name",
+                "c.middle_name",
+                "c.small_name",
+                "c.sub_name",
+                "aliases.alias_search_text",
+            )
+            tiers = _ncs_search_tier_predicates(
+                columns, phrase, fallback_tokens
+            )
+            rows = _execute_ncs_search_tiers(
+                conn,
                 """
+                WITH alias_search AS (
+                    SELECT unit_code,
+                           GROUP_CONCAT(
+                               COALESCE(alias_text, '') || ' ' || COALESCE(normalized_query, ''),
+                               ' '
+                           ) AS alias_search_text
+                    FROM ncs_query_aliases
+                    WHERE unit_code IS NOT NULL
+                    GROUP BY unit_code
+                )
                 SELECT cu.unit_code, cu.unit_name_raw, cu.api_definition,
                        cu.unit_level_raw,
                        c.major_code, c.major_name,
                        c.middle_code, c.middle_name,
                        c.small_code, c.small_name,
                        c.sub_code, c.sub_name,
-                       c.duty_order
+                       c.duty_order, aliases.alias_search_text,
+                       :match_tier AS match_tier
                 FROM competency_units cu
                 JOIN classifications c ON c.classification_id = cu.classification_id
-                WHERE cu.unit_code LIKE :pattern
-                   OR cu.unit_name_raw LIKE :pattern
-                   OR cu.api_definition LIKE :pattern
-                   OR c.major_name LIKE :pattern
-                   OR c.middle_name LIKE :pattern
-                   OR c.small_name LIKE :pattern
-                   OR c.sub_name LIKE :pattern
-                   OR cu.unit_code IN (
-                       SELECT DISTINCT alias.unit_code
-                       FROM ncs_query_aliases alias
-                       WHERE alias.unit_code IS NOT NULL
-                         AND (alias.alias_text LIKE :pattern OR alias.normalized_query LIKE :pattern)
-                   )
-                ORDER BY
+                LEFT JOIN alias_search aliases ON aliases.unit_code = cu.unit_code
+                WHERE {where_clause}
+                ORDER BY match_tier,
                     CASE
                         WHEN cu.unit_code = :exact THEN 0
                         WHEN TRIM(cu.unit_name_raw) = TRIM(:exact) COLLATE NOCASE THEN 0
-                        WHEN cu.unit_name_raw LIKE :prefix THEN 1
-                        WHEN cu.unit_name_raw LIKE :pattern THEN 2
-                        WHEN c.major_name LIKE :pattern
-                          OR c.middle_name LIKE :pattern
-                          OR c.small_name LIKE :pattern
-                          OR c.sub_name LIKE :pattern THEN 3
-                        WHEN cu.api_definition LIKE :pattern THEN 4
+                        WHEN cu.unit_name_raw LIKE :prefix_pattern ESCAPE '\\' THEN 1
+                        WHEN cu.unit_name_raw LIKE :phrase_pattern ESCAPE '\\' THEN 2
+                        WHEN c.major_name LIKE :phrase_pattern ESCAPE '\\'
+                          OR c.middle_name LIKE :phrase_pattern ESCAPE '\\'
+                          OR c.small_name LIKE :phrase_pattern ESCAPE '\\'
+                          OR c.sub_name LIKE :phrase_pattern ESCAPE '\\' THEN 3
+                        WHEN cu.api_definition LIKE :phrase_pattern ESCAPE '\\' THEN 4
                         ELSE 5
                     END,
                     LENGTH(cu.unit_name_raw),
                     cu.unit_code
-                LIMIT :row_limit
+                LIMIT :candidate_limit
                 """,
+                tiers,
                 {
-                    "pattern": pattern,
-                    "exact": query,
-                    "prefix": f"{query}%",
-                    "row_limit": max_rows - len(results),
+                    "exact": phrase,
+                    "prefix_pattern": f"{_escape_ncs_search_like(phrase)}%",
+                    "candidate_limit": candidate_limit,
                 },
-            ).fetchall()
+            )
             for row in rows:
-                results.append(
+                raw_candidates["unit"].append(
                     {
                         "type": "unit",
                         "id": row["unit_code"],
@@ -2449,43 +2684,77 @@ def search_ncs(query: str, scope: str = "all", limit: int = 50) -> dict[str, Any
                         "unit_level": row["unit_level_raw"],
                         "path": unit_path(row),
                         "api_definition": row["api_definition"],
+                        "_match_tier": int(row["match_tier"]),
+                        "_search_fields": {
+                            "unit_code": row["unit_code"],
+                            "unit_name": row["unit_name_raw"],
+                            "definition": row["api_definition"],
+                            "classification": " ".join(
+                                str(row[key] or "")
+                                for key in ("major_name", "middle_name", "small_name", "sub_name")
+                            ),
+                            "alias": row["alias_search_text"],
+                        },
                     }
                 )
-        if scope in {"all", "element"} and len(results) < max_rows:
-            rows = conn.execute(
+
+        if "element" in requested_types:
+            columns = ("ce.element_name_raw",)
+            tiers = _ncs_search_tier_predicates(
+                columns, phrase, fallback_tokens
+            )
+            rows = _execute_ncs_search_tiers(
+                conn,
                 """
-                SELECT ce.element_id, ce.element_name_raw, ce.unit_code, cu.unit_name_raw
+                SELECT ce.element_id, ce.element_name_raw, ce.unit_code, cu.unit_name_raw,
+                       :match_tier AS match_tier
                 FROM competency_elements ce
                 JOIN competency_units cu ON cu.unit_code = ce.unit_code
-                WHERE ce.element_name_raw LIKE ?
-                LIMIT ?
+                WHERE {where_clause}
+                ORDER BY match_tier, LENGTH(ce.element_name_raw), ce.element_id
+                LIMIT :candidate_limit
                 """,
-                (pattern, max_rows - len(results)),
-            ).fetchall()
+                tiers,
+                {"candidate_limit": candidate_limit},
+            )
             for row in rows:
-                results.append(
+                raw_candidates["element"].append(
                     {
                         "type": "element",
                         "id": row["element_id"],
                         "text": row["element_name_raw"],
-                        "path": {"unit_code": row["unit_code"], "unit_name": row["unit_name_raw"]},
+                        "path": {
+                            "unit_code": row["unit_code"],
+                            "unit_name": row["unit_name_raw"],
+                        },
+                        "_match_tier": int(row["match_tier"]),
+                        "_search_fields": {"element_name": row["element_name_raw"]},
                     }
                 )
-        if scope in {"all", "criteria"} and len(results) < max_rows:
-            rows = conn.execute(
+
+        if "criteria" in requested_types:
+            columns = ("pc.criteria_text_raw", "pc.criteria_text_refined")
+            tiers = _ncs_search_tier_predicates(
+                columns, phrase, fallback_tokens
+            )
+            rows = _execute_ncs_search_tiers(
+                conn,
                 """
-                SELECT pc.criteria_id, pc.criteria_text_raw, ce.element_id,
-                       ce.element_name_raw, ce.unit_code, cu.unit_name_raw
+                SELECT pc.criteria_id, pc.criteria_text_raw, pc.criteria_text_refined,
+                       ce.element_id, ce.element_name_raw, ce.unit_code, cu.unit_name_raw,
+                       :match_tier AS match_tier
                 FROM performance_criteria pc
                 JOIN competency_elements ce ON ce.element_id = pc.element_id
                 JOIN competency_units cu ON cu.unit_code = ce.unit_code
-                WHERE pc.criteria_text_raw LIKE ? OR pc.criteria_text_refined LIKE ?
-                LIMIT ?
+                WHERE {where_clause}
+                ORDER BY match_tier, pc.criteria_id
+                LIMIT :candidate_limit
                 """,
-                (pattern, pattern, max_rows - len(results)),
-            ).fetchall()
+                tiers,
+                {"candidate_limit": candidate_limit},
+            )
             for row in rows:
-                results.append(
+                raw_candidates["criteria"].append(
                     {
                         "type": "criteria",
                         "id": row["criteria_id"],
@@ -2496,23 +2765,37 @@ def search_ncs(query: str, scope: str = "all", limit: int = 50) -> dict[str, Any
                             "element_id": row["element_id"],
                             "element_name": row["element_name_raw"],
                         },
+                        "_match_tier": int(row["match_tier"]),
+                        "_search_fields": {
+                            "criteria_text": row["criteria_text_raw"],
+                            "criteria_text_refined": row["criteria_text_refined"],
+                        },
                     }
                 )
-        if scope in {"all", "ksa"} and len(results) < max_rows:
-            rows = conn.execute(
+
+        if "ksa" in requested_types:
+            columns = ("ki.ksa_text_raw", "ki.ksa_text_refined")
+            tiers = _ncs_search_tier_predicates(
+                columns, phrase, fallback_tokens
+            )
+            rows = _execute_ncs_search_tiers(
+                conn,
                 """
-                SELECT ki.ksa_id, ki.ksa_type_name, ki.ksa_text_raw, ce.element_id,
-                       ce.element_name_raw, ce.unit_code, cu.unit_name_raw
+                SELECT ki.ksa_id, ki.ksa_type_name, ki.ksa_text_raw, ki.ksa_text_refined,
+                       ce.element_id, ce.element_name_raw, ce.unit_code, cu.unit_name_raw,
+                       :match_tier AS match_tier
                 FROM ksa_items ki
                 JOIN competency_elements ce ON ce.element_id = ki.element_id
                 JOIN competency_units cu ON cu.unit_code = ce.unit_code
-                WHERE ki.ksa_text_raw LIKE ? OR ki.ksa_text_refined LIKE ?
-                LIMIT ?
+                WHERE {where_clause}
+                ORDER BY match_tier, ki.ksa_id
+                LIMIT :candidate_limit
                 """,
-                (pattern, pattern, max_rows - len(results)),
-            ).fetchall()
+                tiers,
+                {"candidate_limit": candidate_limit},
+            )
             for row in rows:
-                results.append(
+                raw_candidates["ksa"].append(
                     {
                         "type": "ksa",
                         "id": row["ksa_id"],
@@ -2524,14 +2807,98 @@ def search_ncs(query: str, scope: str = "all", limit: int = 50) -> dict[str, Any
                             "element_id": row["element_id"],
                             "element_name": row["element_name_raw"],
                         },
+                        "_match_tier": int(row["match_tier"]),
+                        "_search_fields": {
+                            "ksa_text": row["ksa_text_raw"],
+                            "ksa_text_refined": row["ksa_text_refined"],
+                        },
                     }
                 )
-    return {
-        "query": query,
-        "scope": scope,
-        "markdown_summary": _ncs_search_markdown(query, results),
-        "results": results,
+
+    selected_tier_by_type = {
+        item_type: min(
+            (int(item["_match_tier"]) for item in raw_candidates[item_type]),
+            default=None,
+        )
+        for item_type in requested_types
     }
+    match_mode_by_type = {
+        item_type: (
+            _NCS_SEARCH_MATCH_MODES.get(selected_tier)
+            if selected_tier is not None
+            else None
+        )
+        for item_type, selected_tier in selected_tier_by_type.items()
+    }
+    active_match_modes = {
+        mode for mode in match_mode_by_type.values() if mode is not None
+    }
+    match_mode = (
+        next(iter(active_match_modes))
+        if len(active_match_modes) == 1
+        else "mixed" if active_match_modes else None
+    )
+    candidates_by_type = {
+        item_type: [
+            item
+            for item in raw_candidates.get(item_type, [])
+            if item["_match_tier"] == selected_tier_by_type[item_type]
+        ]
+        for item_type in requested_types
+    }
+    merged = _round_robin_ncs_search_results(candidates_by_type, requested_types)
+    page_end = applied_offset + max_rows
+    page = merged[applied_offset:page_end]
+    consumed_by_type = {item_type: 0 for item_type in requested_types}
+    for item in merged[:page_end]:
+        consumed_by_type[item["type"]] += 1
+    has_more_by_type: dict[str, bool] = {}
+    for item_type in requested_types:
+        selected_candidates = candidates_by_type[item_type]
+        fetched = raw_candidates[item_type]
+        selected_tier = selected_tier_by_type[item_type]
+        may_have_more_selected = bool(
+            selected_tier is not None
+            and len(fetched) == candidate_limit
+            and fetched
+            and fetched[-1]["_match_tier"] == selected_tier
+        )
+        has_more_by_type[item_type] = (
+            len(selected_candidates) > consumed_by_type[item_type]
+            or may_have_more_selected
+        )
+    counts_by_type = {item_type: 0 for item_type in requested_types}
+    for item in page:
+        counts_by_type[item["type"]] += 1
+        _ncs_search_match_metadata(
+            item,
+            query_tokens=query_tokens,
+            phrase=phrase,
+            match_mode=str(match_mode_by_type[item["type"]]),
+        )
+    next_offset = page_end if page and any(has_more_by_type.values()) else None
+    result = {
+        "query": query,
+        "normalized_query": phrase,
+        "query_tokens": query_tokens,
+        "scope": normalized_scope,
+        "match_mode": match_mode,
+        "match_mode_by_type": match_mode_by_type,
+        "counts_by_type": counts_by_type,
+        "has_more_by_type": has_more_by_type,
+        "returned": len(page),
+        "offset": applied_offset,
+        "next_offset": next_offset,
+        "results": page,
+    }
+    result["markdown_summary"] = _ncs_search_markdown(
+        query,
+        page,
+        counts_by_type=counts_by_type,
+        offset=applied_offset,
+        next_offset=next_offset,
+    )
+    return result
 
 
 @mcp.tool()

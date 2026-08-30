@@ -13,6 +13,8 @@ except Exception:  # pragma: no cover - optional dependency guard
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "processed" / "ncs.db"
 DEFAULT_REPORTS_DIR = PROJECT_ROOT / "reports"
+_ENV_FILE_CACHE: dict[Path, tuple[int | None, dict[str, str]]] = {}
+_ENV_LOAD_STAMPS: dict[Path, int | None] = {}
 
 
 @dataclass(frozen=True)
@@ -47,7 +49,14 @@ def load_env_file(path: Path) -> None:
             os.environ[key] = value
 
 
-def read_env_values(path: Path) -> dict[str, str]:
+def _env_file_mtime_ns(path: Path) -> int | None:
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return None
+
+
+def _read_env_values_uncached(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     if not path.exists():
         return values
@@ -63,11 +72,30 @@ def read_env_values(path: Path) -> dict[str, str]:
     return values
 
 
+def read_env_values(path: Path) -> dict[str, str]:
+    stamp = _env_file_mtime_ns(path)
+    cached = _ENV_FILE_CACHE.get(path)
+    if cached is not None and cached[0] == stamp:
+        return dict(cached[1])
+    values = _read_env_values_uncached(path)
+    _ENV_FILE_CACHE[path] = (stamp, dict(values))
+    return values
+
+
+def _ensure_env_loaded(path: Path) -> None:
+    stamp = _env_file_mtime_ns(path)
+    if _ENV_LOAD_STAMPS.get(path) == stamp:
+        return
+    if load_dotenv and path.exists():
+        load_dotenv(path, override=False)
+    load_env_file(path)
+    _ENV_LOAD_STAMPS[path] = stamp
+    _ENV_FILE_CACHE.pop(path, None)
+
+
 def load_settings() -> Settings:
     env_path = PROJECT_ROOT / ".env"
-    if load_dotenv:
-        load_dotenv(env_path)
-    load_env_file(env_path)
+    _ensure_env_loaded(env_path)
     file_values = read_env_values(env_path)
 
     def value_for(*keys: str) -> str | None:

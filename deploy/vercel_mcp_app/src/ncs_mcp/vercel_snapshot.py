@@ -601,3 +601,67 @@ def materialize_sqlite_zip(
         minimum_rows=minimum_rows,
         lock_timeout_seconds=lock_timeout_seconds,
     )
+
+
+def measure_compact_snapshot_materialization(
+    archive_path: Path,
+    manifest_path: Path,
+    *,
+    required_tables: tuple[str, ...] = DEFAULT_REQUIRED_TABLES,
+    minimum_rows: Mapping[str, int] | None = None,
+) -> dict[str, Any]:
+    """Measure one cold materialization and one warm cached reuse pass."""
+
+    report: dict[str, Any] = {
+        "schema": "ncs_vercel_snapshot_benchmark_v1",
+        "archive_path": str(archive_path),
+        "manifest_path": str(manifest_path),
+        "archive_exists": archive_path.is_file(),
+        "manifest_exists": manifest_path.is_file(),
+        "runs": [],
+    }
+    if archive_path.is_file():
+        report["archive_bytes"] = archive_path.stat().st_size
+    if manifest_path.is_file():
+        report["manifest_bytes"] = manifest_path.stat().st_size
+    try:
+        manifest, _member = inspect_compact_archive(archive_path, manifest_path)
+    except ValueError as exc:
+        report["ok"] = False
+        report["error"] = str(exc)
+        return report
+
+    report["sqlite_bytes"] = manifest["sqlite_bytes"]
+    report["sqlite_sha256"] = manifest["sqlite_sha256"]
+    report["manifest_fingerprint"] = _manifest_fingerprint(manifest)
+    report["required_tables"] = list(required_tables)
+    report["minimum_rows"] = dict(minimum_rows or {})
+
+    with tempfile.TemporaryDirectory(prefix="ncs_snapshot_bench_") as raw_dir:
+        destination_path = Path(raw_dir) / COMPACT_SNAPSHOT_NAME
+        stamp_path = _verified_stamp_path(destination_path)
+        for label in ("cold", "warm"):
+            started = time.perf_counter()
+            ok = materialize_compact_snapshot(
+                archive_path,
+                manifest_path,
+                destination_path,
+                required_tables=required_tables,
+                minimum_rows=minimum_rows,
+            )
+            elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
+            run: dict[str, Any] = {
+                "label": label,
+                "ok": ok,
+                "elapsed_ms": elapsed_ms,
+                "destination_exists": destination_path.is_file(),
+                "verified_stamp_exists": stamp_path.is_file(),
+            }
+            if destination_path.is_file():
+                run["destination_bytes"] = destination_path.stat().st_size
+            report["runs"].append(run)
+            if not ok:
+                break
+
+    report["ok"] = bool(report["runs"]) and all(run.get("ok") for run in report["runs"])
+    return report

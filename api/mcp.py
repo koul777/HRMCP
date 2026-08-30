@@ -7,6 +7,7 @@ import logging
 import os
 import shutil
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -44,6 +45,10 @@ _MCP_DATABASE_UNAVAILABLE_BODY = (
 )
 
 _MCP_BOOTSTRAP_READY = True
+_MCP_BOOTSTRAP_METRICS: dict[str, object] = {
+    "schema": "ncs_vercel_bootstrap_metrics_v1",
+    "ready": None,
+}
 
 
 def _is_vercel_read_only_configuration() -> bool:
@@ -272,6 +277,7 @@ def _app_with_path_prefix_fix() -> object:
 
 
 def _configure_for_vercel() -> None:
+    started = time.perf_counter()
     host = os.getenv("NCS_MCP_HOST", "127.0.0.1")
     configure_transport(
         transport="streamable-http",
@@ -286,21 +292,37 @@ def _configure_for_vercel() -> None:
     _prepare_transport_security()
     required_tables = readiness_required_tables()
     minimum_rows = readiness_required_min_rows()
+    source = "local_snapshot"
+    ready = False
     if _bootstrap_db_from_url(
         required_tables=required_tables,
         minimum_rows=minimum_rows,
     ):
-        return
-    if _bootstrap_db_from_explicit_path(
+        source = "url_override"
+        ready = True
+    elif _bootstrap_db_from_explicit_path(
         required_tables=required_tables,
         minimum_rows=minimum_rows,
     ):
-        return
-    global _MCP_BOOTSTRAP_READY
-    _MCP_BOOTSTRAP_READY = _bootstrap_db_from_local_snapshot(
-        required_tables=required_tables,
-        minimum_rows=minimum_rows,
-    )
+        source = "explicit_path_override"
+        ready = True
+    else:
+        global _MCP_BOOTSTRAP_READY
+        _MCP_BOOTSTRAP_READY = _bootstrap_db_from_local_snapshot(
+            required_tables=required_tables,
+            minimum_rows=minimum_rows,
+        )
+        ready = _MCP_BOOTSTRAP_READY
+    global _MCP_BOOTSTRAP_METRICS
+    _MCP_BOOTSTRAP_METRICS = {
+        "schema": "ncs_vercel_bootstrap_metrics_v1",
+        "source": source,
+        "ready": ready,
+        "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+        "required_tables": list(required_tables),
+        "minimum_rows": minimum_rows,
+        "read_only_configuration": _is_vercel_read_only_configuration(),
+    }
 
 
 _configure_for_vercel()

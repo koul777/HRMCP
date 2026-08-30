@@ -1287,6 +1287,10 @@ CREATE INDEX IF NOT EXISTS idx_career_path_unit ON ncs_career_paths(matched_unit
 """
 
 
+READ_ONLY_MMAP_BYTES = 268_435_456
+READ_ONLY_CACHE_KIB = 32_768
+
+
 def connect(db_path: Path | str, *, read_only: bool = False) -> sqlite3.Connection:
     path = Path(db_path)
     if read_only:
@@ -1299,6 +1303,14 @@ def connect(db_path: Path | str, *, read_only: bool = False) -> sqlite3.Connecti
     conn.execute("PRAGMA busy_timeout = 30000")
     conn.execute("PRAGMA foreign_keys = ON")
     if read_only:
+        for pragma in (
+            f"PRAGMA mmap_size = {READ_ONLY_MMAP_BYTES}",
+            f"PRAGMA cache_size = {-READ_ONLY_CACHE_KIB}",
+        ):
+            try:
+                conn.execute(pragma)
+            except sqlite3.DatabaseError:
+                pass
         conn.execute("PRAGMA query_only = ON")
     return conn
 
