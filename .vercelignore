@@ -7,8 +7,11 @@
 !uv.lock
 !build/
 !build/**/*.py
-!api/
+!api
+!api/**/*.py
 !api/__init__.py
+!api/bootstrap_runtime.py
+!api/bootstrap_state.py
 !api/health.py
 !api/index.py
 !api/mcp.py
