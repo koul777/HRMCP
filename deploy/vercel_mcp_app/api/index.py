@@ -45,15 +45,11 @@ async def app(scope, receive, send) -> None:
         await _reject_standalone_mcp_get(send)
         return
     if path in {"/api/health", "/api/health/"}:
-        # Importing api.mcp first preserves the existing Vercel DB bootstrap
-        # used by health/readiness without charging it to rejected MCP GETs.
-        from api import mcp as _configured_mcp  # noqa: F401
         from api.health import app as _health_app
 
         await _health_app(scope, receive, send)
         return
     if path in {"/api/ready", "/api/ready/"}:
-        from api import mcp as _configured_mcp  # noqa: F401
         from api.ready import app as _ready_app
 
         await _ready_app(scope, receive, send)

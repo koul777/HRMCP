@@ -26,7 +26,14 @@ class VercelDeploySourceSyncTests(unittest.TestCase):
                 )
 
     def test_shared_vercel_entrypoints_match_the_canonical_api_tree(self) -> None:
-        for name in ("health.py", "mcp.py"):
+        for name in (
+            "bootstrap_runtime.py",
+            "bootstrap_state.py",
+            "health.py",
+            "index.py",
+            "mcp.py",
+            "ready.py",
+        ):
             canonical_path = ROOT / "api" / name
             deployed_path = DEPLOY_ROOT / "api" / name
             with self.subTest(path=name):

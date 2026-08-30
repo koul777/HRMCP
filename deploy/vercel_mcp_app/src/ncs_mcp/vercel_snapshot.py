@@ -53,6 +53,27 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _VERIFIED_STAMP_SCHEMA = "ncs_ontology_compact_verified_v1"
 
 
+def _record_metric_stage(
+    metrics: dict[str, Any] | None,
+    stage_name: str,
+    started: float,
+) -> None:
+    if metrics is None:
+        return
+    stages = metrics.setdefault("stages_ms", {})
+    if isinstance(stages, dict):
+        stages[stage_name] = round((time.perf_counter() - started) * 1000, 3)
+
+
+def _record_metric_value(
+    metrics: dict[str, Any] | None,
+    key: str,
+    value: Any,
+) -> None:
+    if metrics is not None:
+        metrics[key] = value
+
+
 def external_db_override_allowed(env: Mapping[str, str] | None = None) -> bool:
     """Return whether an external path/URL may replace the bundled release."""
 
@@ -505,33 +526,77 @@ def materialize_compact_snapshot(
     required_tables: tuple[str, ...] = DEFAULT_REQUIRED_TABLES,
     minimum_rows: Mapping[str, int] | None = None,
     lock_timeout_seconds: float = 45.0,
+    metrics: dict[str, Any] | None = None,
 ) -> bool:
     """Extract, content-validate, and atomically publish the compact DB once."""
 
+    if metrics is not None:
+        metrics.clear()
+        metrics["schema"] = "ncs_vercel_snapshot_materialization_metrics_v1"
+        metrics["stages_ms"] = {}
+        metrics["cache_hit_before_lock"] = False
+        metrics["cache_hit_after_lock"] = False
+        metrics["used_cached_snapshot"] = False
+        metrics["lock_acquired"] = False
+        metrics["published"] = False
+
     try:
+        inspect_started = time.perf_counter()
         manifest, expected_member = inspect_compact_archive(archive_path, manifest_path)
+        _record_metric_stage(metrics, "inspect_manifest_archive", inspect_started)
     except ValueError as exc:
+        _record_metric_value(metrics, "result", "manifest_invalid")
+        _record_metric_value(metrics, "error", str(exc))
         LOGGER.error("Compact Vercel DB package validation failed: %s", exc)
         return False
 
+    cache_started = time.perf_counter()
     if _cached_snapshot_is_verified(destination_path, manifest):
+        _record_metric_stage(metrics, "cache_probe_pre_lock", cache_started)
+        _record_metric_value(metrics, "cache_hit_before_lock", True)
+        _record_metric_value(metrics, "used_cached_snapshot", True)
+        _record_metric_value(metrics, "published", True)
+        _record_metric_value(metrics, "result", "cache_reused_before_lock")
         return True
+    _record_metric_stage(metrics, "cache_probe_pre_lock", cache_started)
 
+    prepare_started = time.perf_counter()
     destination_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = destination_path.with_suffix(destination_path.suffix + ".lock")
+    _record_metric_stage(metrics, "destination_prepare", prepare_started)
+    lock_started = time.perf_counter()
     lock_fd = _acquire_lock(lock_path, timeout_seconds=lock_timeout_seconds)
+    _record_metric_stage(metrics, "destination_prepare_lock", lock_started)
+    _record_metric_value(metrics, "lock_acquired", lock_fd is not None)
     if lock_fd is None:
-        return _cached_snapshot_is_verified(destination_path, manifest)
+        cache_started = time.perf_counter()
+        cached = _cached_snapshot_is_verified(destination_path, manifest)
+        _record_metric_stage(metrics, "cache_probe_lock_timeout", cache_started)
+        _record_metric_value(metrics, "used_cached_snapshot", cached)
+        _record_metric_value(
+            metrics,
+            "result",
+            "cache_reused_after_timeout" if cached else "lock_timeout_without_cache",
+        )
+        return cached
 
     temp_path: Path | None = None
     try:
+        cache_started = time.perf_counter()
         if _cached_snapshot_is_verified(destination_path, manifest):
+            _record_metric_stage(metrics, "cache_probe_post_lock", cache_started)
+            _record_metric_value(metrics, "cache_hit_after_lock", True)
+            _record_metric_value(metrics, "used_cached_snapshot", True)
+            _record_metric_value(metrics, "published", True)
+            _record_metric_value(metrics, "result", "cache_reused_after_lock")
             return True
+        _record_metric_stage(metrics, "cache_probe_post_lock", cache_started)
         # An invalid cached file is not a published snapshot. Removing it before
         # extraction keeps peak /tmp usage below the standard function allowance.
         destination_path.unlink(missing_ok=True)
         _verified_stamp_path(destination_path).unlink(missing_ok=True)
 
+        tempfile_started = time.perf_counter()
         temp_fd, temp_name = tempfile.mkstemp(
             prefix=f".{destination_path.name}.",
             suffix=".tmp",
@@ -539,7 +604,10 @@ def materialize_compact_snapshot(
         )
         os.close(temp_fd)
         temp_path = Path(temp_name)
+        _record_metric_stage(metrics, "tempfile_prepare", tempfile_started)
         digest = hashlib.sha256()
+        extract_started = time.perf_counter()
+        flush_started = extract_started
         with zipfile.ZipFile(archive_path, "r") as archive:
             member = archive.getinfo(COMPACT_SNAPSHOT_NAME)
             if (
@@ -556,8 +624,12 @@ def materialize_compact_snapshot(
                     digest.update(block)
                     output.write(block)
                 output.flush()
+                flush_started = time.perf_counter()
                 os.fsync(output.fileno())
+        _record_metric_stage(metrics, "extract_stream_write_sha256", extract_started)
+        _record_metric_stage(metrics, "extracted_file_flush_fsync", flush_started)
 
+        validation_started = time.perf_counter()
         if not _validate_compact_database(
             temp_path,
             manifest,
@@ -565,20 +637,33 @@ def materialize_compact_snapshot(
             required_tables=required_tables,
             minimum_rows=minimum_rows,
         ):
+            _record_metric_stage(metrics, "sqlite_validation_open", validation_started)
+            _record_metric_value(metrics, "result", "validation_failed")
             LOGGER.error("Extracted compact Vercel DB snapshot failed validation")
             return False
+        _record_metric_stage(metrics, "sqlite_validation_open", validation_started)
+        publish_started = time.perf_counter()
         os.replace(temp_path, destination_path)
+        _record_metric_stage(metrics, "publish_rename", publish_started)
         temp_path = None
+        stamp_started = time.perf_counter()
         _write_verified_stamp(destination_path, manifest)
+        _record_metric_stage(metrics, "verified_stamp_fsync_rename", stamp_started)
+        _record_metric_value(metrics, "published", True)
+        _record_metric_value(metrics, "result", "published_new_snapshot")
         return True
     except (OSError, KeyError, zipfile.BadZipFile, zipfile.LargeZipFile, zlib.error):
+        _record_metric_value(metrics, "result", "materialization_exception")
+        _record_metric_value(metrics, "error", "materialization_exception")
         LOGGER.exception("Unable to materialize the compact Vercel DB snapshot")
         return False
     finally:
+        cleanup_started = time.perf_counter()
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
         os.close(lock_fd)
         lock_path.unlink(missing_ok=True)
+        _record_metric_stage(metrics, "lock_release_cleanup", cleanup_started)
 
 
 def materialize_sqlite_zip(

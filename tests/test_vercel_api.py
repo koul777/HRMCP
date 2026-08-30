@@ -16,10 +16,12 @@ SRC = ROOT / "src"
 
 class VercelApiContractTests(unittest.TestCase):
     def test_mcp_entrypoints_have_byte_parity(self) -> None:
-        self.assertEqual(
-            (ROOT / "api" / "mcp.py").read_bytes(),
-            (ROOT / "deploy" / "vercel_mcp_app" / "api" / "mcp.py").read_bytes(),
-        )
+        for name in ("bootstrap_runtime.py", "bootstrap_state.py", "health.py", "mcp.py", "ready.py"):
+            with self.subTest(path=name):
+                self.assertEqual(
+                    (ROOT / "api" / name).read_bytes(),
+                    (ROOT / "deploy" / "vercel_mcp_app" / "api" / name).read_bytes(),
+                )
 
     def test_mcp_get_short_circuits_before_mcp_or_database_import(self) -> None:
         env = os.environ.copy()
@@ -115,10 +117,11 @@ class VercelApiContractTests(unittest.TestCase):
             api_root = package_root / "api"
             api_root.mkdir(parents=True)
             (api_root / "__init__.py").write_text("", encoding="utf-8")
-            (api_root / "mcp.py").write_text(
-                (ROOT / "api" / "mcp.py").read_text(encoding="utf-8"),
-                encoding="utf-8",
-            )
+            for name in ("bootstrap_runtime.py", "bootstrap_state.py", "mcp.py"):
+                (api_root / name).write_text(
+                    (ROOT / "api" / name).read_text(encoding="utf-8"),
+                    encoding="utf-8",
+                )
             (api_root / "ncs_ontology_compact.zip").write_bytes(b"not a zip archive")
             (api_root / "ncs_ontology_compact.manifest.json").write_text(
                 "{}", encoding="utf-8"

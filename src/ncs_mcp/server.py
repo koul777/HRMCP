@@ -73,6 +73,13 @@ from ncs_mcp.review_safety import (
     resolve_repo_reports_artifact,
     review_packet_sha256 as shared_review_packet_sha256,
 )
+from ncs_mcp.runtime_readiness import (
+    READINESS_CORE_TABLES,
+    READINESS_EXTRA_TABLES_ENV,
+    READINESS_PUBLIC_TOOL_TABLES,
+    database_readiness_metadata as shared_database_readiness_metadata,
+    runtime_health_metadata as shared_runtime_health_metadata,
+)
 from ncs_mcp.server_legacy_facade import search_ncs_reference_chunks_payload as legacy_search_ncs_reference_chunks_payload
 from ncs_mcp.server_legacy_wrappers import (
     build_legacy_operation_handlers,
@@ -162,52 +169,6 @@ mcp = FastMCP("ncs-mcp", instructions=MCP_INSTRUCTIONS)
 mcp._mcp_server.version = MCP_SERVER_VERSION
 
 CURRENT_TRANSPORT = "stdio"
-
-
-READINESS_CORE_TABLES = (
-    "competency_units",
-    "performance_criteria",
-    "ksa_items",
-    "ncs_training_courses",
-)
-READINESS_PUBLIC_TOOL_TABLES = (
-    "classifications",
-    "competency_elements",
-    "ncs_training_course_unit_links",
-    "ncs_training_course_concept_links",
-    "ncs_training_course_element_links",
-    "training_goal_concept_links",
-    "training_delivery_relations",
-    "ncs_career_paths",
-    "ncs_qualification_items",
-    "ncs_unit_qualification_links",
-    "ncs_job_base_competencies",
-    "ncs_job_base_factors",
-    "ncs_unit_job_base_links",
-    "ontology_concepts",
-    "ontology_concept_aliases",
-)
-READINESS_CAPABILITY_TABLES = {
-    "structure_search": ("classifications", "competency_elements"),
-    "training": (
-        "ncs_training_courses",
-        "ncs_training_course_unit_links",
-        "ncs_training_course_concept_links",
-        "ncs_training_course_element_links",
-        "training_goal_concept_links",
-        "training_delivery_relations",
-    ),
-    "career_path": ("ncs_career_paths",),
-    "qualification": ("ncs_qualification_items", "ncs_unit_qualification_links"),
-    "job_base": (
-        "ncs_job_base_competencies",
-        "ncs_job_base_factors",
-        "ncs_unit_job_base_links",
-    ),
-    "ontology": ("ontology_concepts", "ontology_concept_aliases"),
-}
-READINESS_EXTRA_TABLES_ENV = "NCS_MCP_READINESS_EXTRA_TABLES"
-_SQLITE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 PUBLIC_UNIT_DETAIL_MAX_CHARS = 7_600
 PUBLIC_UNIT_ELEMENT_FIELDS = (
     "element_id",
@@ -424,34 +385,7 @@ def db():
 
 
 def runtime_health_metadata() -> dict[str, Any]:
-    settings = load_settings()
-    read_only_mode = bool(getattr(settings, "read_only_mode", False))
-    operator_tools_requested = bool(settings.operator_tools_enabled)
-    operator_tools_enabled = operator_tools_requested and not read_only_mode
-    max_concurrent_recommendations = int(
-        getattr(settings, "max_concurrent_recommendations", 2)
-    )
-    api_keys = {
-        "service_key_present": bool(settings.service_key),
-        "training_course_service_key_present": bool(settings.training_course_service_key),
-        "qualification_service_key_present": bool(settings.qualification_service_key),
-        "job_base_service_key_present": bool(settings.job_base_service_key),
-        "sqf_service_key_present": bool(settings.sqf_service_key),
-        "study_module_service_key_present": bool(settings.study_module_service_key),
-    }
-    return {
-        "database": database_readiness_metadata(settings.db_path),
-        "operator_tools_enabled": operator_tools_enabled,
-        "operator_tools_requested": operator_tools_requested,
-        "operator_tools_blocked_by_read_only": operator_tools_requested and read_only_mode,
-        "read_only_mode": read_only_mode,
-        "max_concurrent_recommendations": max_concurrent_recommendations,
-        "recommendation_queue_timeout_seconds": float(
-            getattr(settings, "recommendation_queue_timeout_seconds", 30.0)
-        ),
-        "api_keys": api_keys,
-        "api_key_present_count": sum(1 for present in api_keys.values() if present),
-    }
+    return shared_runtime_health_metadata()
 
 
 def current_transport_metadata() -> dict[str, str | None]:
@@ -464,132 +398,8 @@ def current_transport_metadata() -> dict[str, str | None]:
     return {"transport": CURRENT_TRANSPORT, "endpoint": endpoint}
 
 
-def _readiness_required_tables() -> tuple[tuple[str, ...], list[str]]:
-    required_tables = list(READINESS_CORE_TABLES)
-    seen = {table_name.casefold() for table_name in required_tables}
-    invalid_extra_tables: list[str] = []
-    invalid_seen: set[str] = set()
-
-    for raw_table_name in os.environ.get(READINESS_EXTRA_TABLES_ENV, "").split(","):
-        table_name = raw_table_name.strip()
-        if not table_name:
-            continue
-        if _SQLITE_IDENTIFIER_RE.fullmatch(table_name) is None:
-            if table_name not in invalid_seen:
-                invalid_extra_tables.append(table_name)
-                invalid_seen.add(table_name)
-            continue
-        normalized_name = table_name.casefold()
-        if normalized_name in seen:
-            continue
-        required_tables.append(table_name)
-        seen.add(normalized_name)
-
-    return tuple(required_tables), invalid_extra_tables
-
-
 def database_readiness_metadata(db_path) -> dict[str, Any]:
-    required_tables, invalid_extra_tables = _readiness_required_tables()
-    configured = bool(db_path)
-    exists = bool(configured and db_path.exists())
-    result: dict[str, Any] = {
-        "configured": configured,
-        "exists": exists,
-        "openable": False,
-        "ready": False,
-        "required_tables": list(required_tables),
-        "core_tables": {},
-        "public_tool_tables": {},
-    }
-    if invalid_extra_tables:
-        result["invalid_extra_tables"] = invalid_extra_tables
-    if not configured:
-        result["error"] = {"code": "database_not_configured"}
-        return result
-    if not exists:
-        result["error"] = {"code": "database_missing"}
-        return result
-    try:
-        db_uri = db_path.resolve().as_uri() + "?mode=ro"
-        conn = sqlite3.connect(db_uri, uri=True)
-        try:
-            result["openable"] = True
-            for table_name in required_tables:
-                exists_row = conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?",
-                    (table_name,),
-                ).fetchone()
-                if exists_row is None:
-                    result["core_tables"][table_name] = {"exists": False, "row_count": None}
-                    continue
-                row_count = int(
-                    conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
-                )
-                result["core_tables"][table_name] = {"exists": True, "row_count": row_count}
-            for table_name in READINESS_PUBLIC_TOOL_TABLES:
-                exists_row = conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?",
-                    (table_name,),
-                ).fetchone()
-                if exists_row is None:
-                    result["public_tool_tables"][table_name] = {
-                        "exists": False,
-                        "has_rows": False,
-                    }
-                    continue
-                has_rows = conn.execute(
-                    f'SELECT 1 FROM "{table_name}" LIMIT 1'
-                ).fetchone() is not None
-                result["public_tool_tables"][table_name] = {
-                    "exists": True,
-                    "has_rows": has_rows,
-                }
-            core_ready = all(
-                item.get("exists") and int(item.get("row_count") or 0) > 0
-                for item in result["core_tables"].values()
-            ) and len(result["core_tables"]) == len(required_tables)
-            capabilities: dict[str, dict[str, Any]] = {}
-            degraded_capabilities: list[str] = []
-            for capability, table_names in READINESS_CAPABILITY_TABLES.items():
-                missing_tables: list[str] = []
-                empty_tables: list[str] = []
-                for table_name in table_names:
-                    table_state = (
-                        result["core_tables"].get(table_name)
-                        or result["public_tool_tables"].get(table_name)
-                        or {}
-                    )
-                    if not table_state.get("exists"):
-                        missing_tables.append(table_name)
-                        continue
-                    has_rows = table_state.get("has_rows")
-                    if has_rows is None:
-                        has_rows = int(table_state.get("row_count") or 0) > 0
-                    if not has_rows:
-                        empty_tables.append(table_name)
-                available = not missing_tables and not empty_tables
-                capabilities[capability] = {
-                    "available": available,
-                    "missing_tables": missing_tables,
-                    "empty_tables": empty_tables,
-                }
-                if not available:
-                    degraded_capabilities.append(capability)
-            public_tools_ready = not degraded_capabilities
-            # Core readiness controls /ready. Optional public capabilities are
-            # surfaced separately and enforced by the post-deploy tools/call gate.
-            result["ready"] = core_ready
-            result["core_ready"] = core_ready
-            result["public_tools_ready"] = public_tools_ready
-            result["capabilities"] = capabilities
-            result["degraded_capabilities"] = degraded_capabilities
-            if not result["ready"]:
-                result["error"] = {"code": "database_not_ready"}
-        finally:
-            conn.close()
-    except Exception as exc:  # pragma: no cover - defensive health path
-        result["error"] = {"code": "database_unopenable", "type": type(exc).__name__}
-    return result
+    return shared_database_readiness_metadata(db_path)
 
 
 @contextmanager

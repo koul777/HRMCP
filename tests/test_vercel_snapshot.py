@@ -489,13 +489,29 @@ class VercelSnapshotTests(unittest.TestCase):
             root = Path(temp_dir)
             _, archive, manifest, _ = self._create_package(root)
             destination = root / "runtime" / COMPACT_SNAPSHOT_NAME
+            first_metrics: dict[str, object] = {}
+            second_metrics: dict[str, object] = {}
 
-            self.assertTrue(materialize_compact_snapshot(archive, manifest, destination))
+            self.assertTrue(
+                materialize_compact_snapshot(
+                    archive,
+                    manifest,
+                    destination,
+                    metrics=first_metrics,
+                )
+            )
             first_mtime = destination.stat().st_mtime_ns
             first_stamp_mtime = destination.with_suffix(
                 destination.suffix + ".verified.json"
             ).stat().st_mtime_ns
-            self.assertTrue(materialize_compact_snapshot(archive, manifest, destination))
+            self.assertTrue(
+                materialize_compact_snapshot(
+                    archive,
+                    manifest,
+                    destination,
+                    metrics=second_metrics,
+                )
+            )
             self.assertEqual(destination.stat().st_mtime_ns, first_mtime)
             self.assertEqual(
                 destination.with_suffix(
@@ -503,6 +519,15 @@ class VercelSnapshotTests(unittest.TestCase):
                 ).stat().st_mtime_ns,
                 first_stamp_mtime,
             )
+            self.assertEqual(
+                first_metrics["schema"],
+                "ncs_vercel_snapshot_materialization_metrics_v1",
+            )
+            self.assertEqual(first_metrics["result"], "published_new_snapshot")
+            self.assertFalse(first_metrics["cache_hit_before_lock"])
+            self.assertIn("extract_stream_write_sha256", first_metrics["stages_ms"])
+            self.assertEqual(second_metrics["result"], "cache_reused_before_lock")
+            self.assertTrue(second_metrics["cache_hit_before_lock"])
 
     def test_concurrent_cold_starts_publish_one_valid_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

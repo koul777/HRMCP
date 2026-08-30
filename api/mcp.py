@@ -5,10 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import shutil
 import sys
 import time
-import urllib.request
 from pathlib import Path
 
 # Ensure local source package import works in Vercel function runtime.
@@ -19,16 +17,23 @@ if str(_SRC) not in sys.path:
 
 from mcp.server.transport_security import TransportSecuritySettings
 
+from .bootstrap_runtime import ensure_bootstrap, is_vercel_read_only_configuration
+from .bootstrap_state import get_bootstrap_metrics, merge_bootstrap_metrics
+
+_MODULE_IMPORT_STARTED = time.perf_counter()
+_BOOTSTRAP_SNAPSHOT = ensure_bootstrap()
+_MCP_BOOTSTRAP_READY = bool(_BOOTSTRAP_SNAPSHOT.get("ready"))
+_SERVER_IMPORT_STARTED = time.perf_counter()
 from ncs_mcp.server import configure_transport, mcp
-from ncs_mcp.vercel_snapshot import (
-    COMPACT_ARCHIVE_NAME,
-    COMPACT_MANIFEST_NAME,
-    COMPACT_SNAPSHOT_NAME,
-    external_db_override_allowed,
-    materialize_compact_snapshot,
-    readiness_required_min_rows,
-    readiness_required_tables,
-    sqlite_snapshot_is_usable,
+
+merge_bootstrap_metrics(
+    {
+        "stages_ms": {
+            "server_import": round(
+                (time.perf_counter() - _SERVER_IMPORT_STARTED) * 1000, 3
+            )
+        }
+    }
 )
 
 
@@ -44,25 +49,10 @@ _MCP_DATABASE_UNAVAILABLE_BODY = (
     b'"message":"Service Unavailable: no verified NCS database snapshot is available"}}'
 )
 
-_MCP_BOOTSTRAP_READY = True
-_MCP_BOOTSTRAP_METRICS: dict[str, object] = {
-    "schema": "ncs_vercel_bootstrap_metrics_v1",
-    "ready": None,
-}
-
-
 def bootstrap_metrics() -> dict[str, object]:
-    return dict(_MCP_BOOTSTRAP_METRICS)
+    """Backward-compatible accessor for process-local bootstrap diagnostics."""
 
-
-def _is_vercel_read_only_configuration() -> bool:
-    """Return whether the deployed, read-only Vercel contract is active."""
-
-    truthy = {"1", "true", "on", "yes", "y"}
-    return (
-        os.getenv("VERCEL", "").strip().lower() in truthy
-        and os.getenv("NCS_MCP_READ_ONLY", "").strip().lower() in truthy
-    )
+    return get_bootstrap_metrics()
 
 
 async def _reject_unavailable_mcp(send) -> None:
@@ -140,99 +130,6 @@ def _prepare_transport_security() -> None:
         )
 
 
-def _bootstrap_db_from_url(
-    *,
-    required_tables: tuple[str, ...],
-    minimum_rows: dict[str, int],
-) -> bool:
-    # A remote database can replace the bundled release only when the operator
-    # explicitly enables that behavior.  The default deployment never performs
-    # a DB download and therefore has no network/bootstrap dependency.
-    if not external_db_override_allowed():
-        return False
-    download_url = os.getenv("NCS_DB_URL")
-    if not download_url:
-        return False
-
-    db_path = Path(os.getenv("NCS_DB_PATH", "/tmp/ncs_interview_serving.db"))
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    if sqlite_snapshot_is_usable(
-        db_path,
-        required_tables=required_tables,
-        minimum_rows=minimum_rows,
-    ):
-        os.environ["NCS_DB_PATH"] = str(db_path)
-        return True
-
-    tmp_path = db_path.with_suffix(db_path.suffix + ".download")
-    try:
-        with urllib.request.urlopen(download_url, timeout=120) as response:
-            with tmp_path.open("wb") as output:
-                shutil.copyfileobj(response, output)
-        if not sqlite_snapshot_is_usable(
-            tmp_path,
-            required_tables=required_tables,
-            minimum_rows=minimum_rows,
-        ):
-            LOGGER.error("Explicit remote Vercel DB override failed validation")
-            return False
-        tmp_path.replace(db_path)
-        os.environ["NCS_DB_PATH"] = str(db_path)
-        return True
-    except OSError:
-        LOGGER.exception("Unable to download the explicitly enabled remote Vercel DB")
-        return False
-    finally:
-        tmp_path.unlink(missing_ok=True)
-
-
-def _bootstrap_db_from_explicit_path(
-    *,
-    required_tables: tuple[str, ...],
-    minimum_rows: dict[str, int],
-) -> bool:
-    if not external_db_override_allowed():
-        return False
-    raw_path = os.getenv("NCS_DB_PATH", "").strip()
-    if not raw_path:
-        return False
-    db_path = Path(raw_path)
-    return sqlite_snapshot_is_usable(
-        db_path,
-        required_tables=required_tables,
-        minimum_rows=minimum_rows,
-    )
-
-
-def _bootstrap_db_from_local_snapshot(
-    *,
-    required_tables: tuple[str, ...],
-    minimum_rows: dict[str, int],
-) -> bool:
-    # The standard function bundles only a compressed snapshot and its signed-
-    # by-content sidecar.  Materialize once per warm instance into /tmp; never
-    # place the raw database in the function package.
-    archive_path = _ROOT / "api" / COMPACT_ARCHIVE_NAME
-    manifest_path = _ROOT / "api" / COMPACT_MANIFEST_NAME
-    runtime_db = Path("/tmp") / COMPACT_SNAPSHOT_NAME
-    if materialize_compact_snapshot(
-        archive_path,
-        manifest_path,
-        runtime_db,
-        required_tables=required_tables,
-        minimum_rows=minimum_rows,
-    ):
-        os.environ["NCS_DB_PATH"] = str(runtime_db)
-        return True
-
-    LOGGER.error(
-        "Bundled compact ontology snapshot is missing or failed validation: %s",
-        archive_path,
-    )
-    os.environ["NCS_DB_PATH"] = str(runtime_db)
-    return False
-
-
 def _app_with_path_prefix_fix() -> object:
     base_app = mcp.streamable_http_app()
     streamable_path = getattr(mcp.settings, "streamable_http_path", "/mcp")
@@ -260,7 +157,7 @@ def _app_with_path_prefix_fix() -> object:
             if str(scope.get("method", "")).upper() == "GET":
                 await _reject_standalone_get(send)
                 return
-            if _is_vercel_read_only_configuration() and not _MCP_BOOTSTRAP_READY:
+            if is_vercel_read_only_configuration() and not _MCP_BOOTSTRAP_READY:
                 await _reject_unavailable_mcp(send)
                 return
             await _ensure_lifespan_ready()
@@ -294,41 +191,35 @@ def _configure_for_vercel() -> None:
     mcp.settings.streamable_http_path = streamable_http_path
 
     _prepare_transport_security()
-    required_tables = readiness_required_tables()
-    minimum_rows = readiness_required_min_rows()
-    source = "local_snapshot"
-    ready = False
-    if _bootstrap_db_from_url(
-        required_tables=required_tables,
-        minimum_rows=minimum_rows,
-    ):
-        source = "url_override"
-        ready = True
-    elif _bootstrap_db_from_explicit_path(
-        required_tables=required_tables,
-        minimum_rows=minimum_rows,
-    ):
-        source = "explicit_path_override"
-        ready = True
-    else:
-        global _MCP_BOOTSTRAP_READY
-        _MCP_BOOTSTRAP_READY = _bootstrap_db_from_local_snapshot(
-            required_tables=required_tables,
-            minimum_rows=minimum_rows,
-        )
-        ready = _MCP_BOOTSTRAP_READY
-    global _MCP_BOOTSTRAP_METRICS
-    _MCP_BOOTSTRAP_METRICS = {
-        "schema": "ncs_vercel_bootstrap_metrics_v1",
-        "source": source,
-        "ready": ready,
-        "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
-        "required_tables": list(required_tables),
-        "minimum_rows": minimum_rows,
-        "read_only_configuration": _is_vercel_read_only_configuration(),
-    }
+    merge_bootstrap_metrics(
+        {
+            "stages_ms": {
+                "transport_config": round(
+                    (time.perf_counter() - started) * 1000, 3
+                )
+            },
+            "transport": {
+                "mode": "streamable-http",
+                "endpoint": streamable_http_path,
+            },
+        }
+    )
 
 
 _configure_for_vercel()
 
+_APP_STARTED = time.perf_counter()
 app = _app_with_path_prefix_fix()
+merge_bootstrap_metrics(
+    {
+        "ready": _MCP_BOOTSTRAP_READY,
+        "status": "ready" if _MCP_BOOTSTRAP_READY else "not_ready",
+        "stages_ms": {
+            "app_construction": round((time.perf_counter() - _APP_STARTED) * 1000, 3),
+            "module_import_total": round(
+                (time.perf_counter() - _MODULE_IMPORT_STARTED) * 1000, 3
+            ),
+        },
+        "mcp_surface_initialized": True,
+    }
+)
