@@ -51,6 +51,10 @@ _MCP_BOOTSTRAP_METRICS: dict[str, object] = {
 }
 
 
+def bootstrap_metrics() -> dict[str, object]:
+    return dict(_MCP_BOOTSTRAP_METRICS)
+
+
 def _is_vercel_read_only_configuration() -> bool:
     """Return whether the deployed, read-only Vercel contract is active."""
 
