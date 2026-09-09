@@ -191,11 +191,32 @@ def build_snapshot(
     manifest: Path,
     report_path: Path,
     dry_run: bool = False,
+    progress_file: Path | None = None,
 ) -> dict[str, Any]:
     """Build the fixed compact snapshot pipeline and return its audit report."""
     source, output_db, archive, manifest, report_path = _validate_paths(
         source, output_db, archive, manifest, report_path
     )
+    if progress_file is not None:
+        progress_file = _resolved_output_path(progress_file)
+        if progress_file in (source, output_db, archive, manifest, report_path) or progress_file.exists():
+            raise SnapshotBuildError("progress path must be a new, distinct output")
+
+    def progress(stage: str, completed: int, total: int | None = 3) -> None:
+        if progress_file is None or dry_run:
+            return
+        progress_file.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=progress_file.parent,
+                                         prefix=".progress-", suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump({"stage": stage, "completed": completed,
+                       "total": total, "unit": "공정 완료"}, stream, ensure_ascii=False)
+        try:
+            temporary.replace(progress_file)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    progress("경량 DB 원본 검사 중", 0, None)
     source_record = _source_artifact(source)
     plan = build_plan(source, output_db, archive, manifest)
     report: dict[str, Any] = {
@@ -229,7 +250,9 @@ def build_snapshot(
         "package_compact_snapshot": (archive, manifest),
         "verify_archive_only": (archive, manifest),
     }
-    for stage in plan:
+    labels = ("경량 DB 생성 중", "경량 DB 압축 중", "압축 파일 검증 중")
+    for index, stage in enumerate(plan):
+        progress(labels[index], index)
         stage_record = _run_stage(stage)
         report["stages"].append(stage_record)
         if stage_record["returncode"] != 0:
@@ -245,6 +268,7 @@ def build_snapshot(
             report["error"] = {"stage": stage["name"], "message": str(exc)}
             return report
 
+    progress("최종 산출물 검사 중", 2)
     try:
         report["artifacts"] = {
             "source": source_record,
@@ -262,6 +286,7 @@ def build_snapshot(
         report["error"] = {"stage": "final_artifact_validation", "message": str(exc)}
         return report
     report["ok"] = True
+    progress("경량 DB 생성·검증 완료", 3)
     return report
 
 
@@ -273,6 +298,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--manifest", type=Path, required=True, help="new compact snapshot manifest path")
     parser.add_argument("--report", type=Path, required=True, help="new JSON build report path")
     parser.add_argument("--dry-run", action="store_true", help="print the exact argv plan without execution or writes")
+    parser.add_argument("--progress-file", type=Path, help="new atomic JSON file reporting completed build stages")
     args = parser.parse_args(argv)
     try:
         report = build_snapshot(
@@ -282,6 +308,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             manifest=args.manifest,
             report_path=args.report,
             dry_run=args.dry_run,
+            progress_file=args.progress_file,
         )
     except (OSError, SnapshotBuildError) as exc:
         parser.error(str(exc))

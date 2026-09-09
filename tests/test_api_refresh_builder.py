@@ -4,6 +4,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,6 +17,34 @@ from ncs_mcp.api_refresh_builder import (
 
 
 class ApiRefreshBuilderTests(unittest.TestCase):
+    def test_optional_dbstat_schema_does_not_block_refresh_or_trusted_checks(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("PRAGMA writable_schema=ON")
+        conn.execute("INSERT INTO sqlite_master(type,name,tbl_name,rootpage,sql) VALUES ('table','page_statistics','page_statistics',0,'CREATE VIRTUAL TABLE page_statistics USING dbstat')")
+        conn.commit()
+        conn.close()
+        counts = trusted_review_status_counts(self.db_path)
+        self.assertEqual(counts['review_fixture.review_status.human_reviewed'], 1)
+        from ncs_mcp.ontology_refresh_builder import _trusted_counts
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            self.assertEqual(_trusted_counts(connection)['review_fixture'], 1)
+        result = refresh_ncs_api_evidence(
+            self.db_path, apply=True, credentials=self.credentials,
+            output_path=self.db_path.parent / 'prepared.db',
+            callables=RefreshCallables(collect_training=self._ok_training,
+                                      collect_job_base=self._ok_job_base,
+                                      build_training_links=lambda *args, **kwargs: {}))
+        self.assertEqual(result['outcome'], 'succeeded_append_only', result)
+
+    def test_local_error_reports_safe_reason_and_stage(self) -> None:
+        with patch('ncs_mcp.api_refresh_builder.trusted_review_status_counts',
+                   side_effect=sqlite3.OperationalError('no such module: dbstat secret-key')):
+            result = refresh_ncs_api_evidence(self.db_path, apply=True, credentials=self.credentials,
+                                              output_path=self.db_path.parent / 'prepared.db')
+        self.assertEqual(result['failed_phase'], 'source_invariant_check')
+        self.assertEqual(result['failure_reason'], 'sqlite_dbstat_module_unavailable')
+        self.assertNotIn('secret-key', str(result))
+
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.tempdir.name) / "ncs.db"

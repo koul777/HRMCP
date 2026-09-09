@@ -7,7 +7,7 @@ import sqlite3
 import tempfile
 from contextlib import closing
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .db import (
     build_task_ksa_concept_relations,
@@ -18,6 +18,7 @@ from .db import (
     preprocess_ksa_atomic_items,
 )
 from .source_change_plan import build_source_change_plan
+from .sqlite_diagnostics import is_dbstat_table
 from .training_recommendation import build_training_course_ontology_links
 
 
@@ -179,7 +180,10 @@ def resolve_managed_baseline(state_dir: str | Path) -> Path:
     return baseline
 
 
-def _sqlite_online_snapshot(source: Path, target: Path) -> None:
+def _sqlite_online_snapshot(
+    source: Path, target: Path,
+    progress: Callable[[str | dict[str, Any]], None] | None = None,
+) -> None:
     """Copy a coherent SQLite view, including committed WAL pages, atomically."""
     target.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
@@ -191,8 +195,16 @@ def _sqlite_online_snapshot(source: Path, target: Path) -> None:
         source_uri = f"{source.resolve().as_uri()}?mode=ro"
         with closing(sqlite3.connect(source_uri, uri=True, timeout=30)) as source_conn:
             with closing(sqlite3.connect(temporary, timeout=30)) as target_conn:
-                source_conn.backup(target_conn)
+                if progress:
+                    progress({'stage': 'DB 복사', 'completed': 0, 'total': None, 'unit': '페이지'})
+                def backup_progress(status: int, remaining: int, total: int) -> None:
+                    if progress:
+                        progress({'stage': 'DB 복사', 'completed': total - remaining,
+                                  'total': total, 'unit': '페이지'})
+                source_conn.backup(target_conn, pages=4096, progress=backup_progress)
                 target_conn.commit()
+                if progress:
+                    progress({'stage': '복사 DB 무결성 검사', 'completed': 0, 'total': None, 'unit': '검사'})
                 quick_check = str(
                     target_conn.execute("PRAGMA quick_check").fetchone()[0]
                 )
@@ -224,8 +236,10 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
 def _trusted_counts(conn: sqlite3.Connection) -> dict[str, int]:
     counts: dict[str, int] = {}
     for row in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+        "SELECT name, sql FROM sqlite_master WHERE type='table' ORDER BY name"
     ):
+        if is_dbstat_table(row[1]):
+            continue
         table = str(row[0])
         columns = {
             str(column[1]) for column in conn.execute(f'PRAGMA table_info("{table}")')
@@ -480,29 +494,47 @@ def _incremental_conflicts(path: Path) -> dict[str, int]:
 
 
 def _run_pipeline(
-    path: Path, *, bootstrap: bool
+    path: Path, *, bootstrap: bool,
+    progress: Callable[[str | dict[str, Any]], None] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     stages: list[dict[str, Any]] = []
+    def announce(label: str) -> None:
+        if progress:
+            progress({'stage': label, 'completed': 0, 'total': None, 'unit': '단계'})
+
+    def completed() -> None:
+        if progress:
+            progress({'stage': '온톨로지 처리 단계 완료', 'completed': len(stages),
+                      'total': 6, 'unit': '단계'})
+
     conn = connect(path)
     try:
+        announce('온톨로지 처리 전 원문·검토 상태 검사')
         raw_before = _raw_ksa_hash(conn)
         trusted_before = _trusted_counts(conn)
+        announce('온톨로지 기본 개념 연결')
         stages.append(
             {"name": "ensure_ontology_seeded", "result": ensure_ontology_seeded(conn)}
         )
+        completed()
+        announce('원자 KSA 전처리')
         stages.append(
             {
                 "name": "preprocess_ksa_atomic_items",
                 "result": preprocess_ksa_atomic_items(conn, reset=False),
             }
         )
+        completed()
+        announce('과업·KSA 관계 구축')
         stages.append(
             {
                 "name": "build_task_ksa_concept_relations",
                 "result": build_task_ksa_concept_relations(conn, reset=False),
             }
         )
+        completed()
         if not bootstrap:
+            announce('자동 생성 관계 재계산 준비')
             conn.execute(
                 "DELETE FROM ontology_concept_relations "
                 "WHERE relation_type='co_required_in_element' "
@@ -512,24 +544,31 @@ def _run_pipeline(
                 f"DELETE FROM task_similarity_links WHERE review_status NOT IN ({TRUSTED_SQL})"
             )
             conn.commit()
+        announce('온톨로지 개념 관계 구축')
         stages.append(
             {
                 "name": "ensure_ncs_ontology_relations",
                 "result": ensure_ncs_ontology_relations(conn, reset=False),
             }
         )
+        completed()
+        announce('과업 유사도 관계 구축')
         stages.append(
             {
                 "name": "build_task_similarity_links",
                 "result": build_task_similarity_links(conn, reset=False),
             }
         )
+        completed()
+        announce('훈련과정·온톨로지 연결')
         stages.append(
             {
                 "name": "build_training_course_ontology_links",
                 "result": build_training_course_ontology_links(conn, reset=False),
             }
         )
+        completed()
+        announce('온톨로지 처리 후 원문·검토 상태 검증')
         raw_after = _raw_ksa_hash(conn)
         trusted_after = _trusted_counts(conn)
         if raw_after != raw_before:

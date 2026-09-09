@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import load_settings
+from .sqlite_diagnostics import is_dbstat_table
 from .db import connect
 from .job_base_api import collect_job_base_competencies
 from .training_course_api import collect_training_courses
@@ -126,15 +127,22 @@ def _resolve_prepared_output(
     return candidate, _prepared_output_error(source_db, candidate)
 
 
-def file_sha256(file_path: Path) -> str:
+def file_sha256(file_path: Path, progress: Callable | None = None, stage: str = "DB 파일 해시 검사") -> str:
     digest = hashlib.sha256()
+    total = Path(file_path).stat().st_size
+    completed = 0
+    if progress:
+        progress({"stage": stage, "completed": 0, "total": total, "unit": "바이트"})
     with Path(file_path).open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
+            completed += len(chunk)
+            if progress and (completed % (32 * 1024 * 1024) == 0 or completed == total):
+                progress({"stage": stage, "completed": completed, "total": total, "unit": "바이트"})
     return digest.hexdigest()
 
 
-def _prepare_working_copy(source_db: Path, prepared_output: Path) -> Path:
+def _prepare_working_copy(source_db: Path, prepared_output: Path, progress: Callable | None = None) -> Path:
     """Create a consistent SQLite snapshot without checkpointing the source DB.
 
     ``sqlite3.Connection.backup`` reads committed WAL frames as part of its
@@ -154,7 +162,12 @@ def _prepare_working_copy(source_db: Path, prepared_output: Path) -> Path:
             f"file:{source_db.resolve().as_posix()}?mode=ro", uri=True
         )
         destination_conn = sqlite3.connect(temporary)
-        source_conn.backup(destination_conn)
+        source_conn.backup(destination_conn, pages=4096,
+                           progress=(lambda status, remaining, total: progress({
+                               "stage": "작업 DB 복사", "completed": total - remaining,
+                               "total": total, "unit": "페이지"})) if progress else None)
+        if progress:
+            progress("복사한 DB 무결성 검사")
         quick_check = destination_conn.execute("PRAGMA quick_check").fetchall()
         if not quick_check or any(str(row[0]).lower() != "ok" for row in quick_check):
             raise sqlite3.DatabaseError("prepared_working_copy_quick_check_failed")
@@ -217,10 +230,12 @@ def trusted_review_status_counts(db_path: Path) -> dict[str, int]:
     conn = sqlite3.connect(f"file:{db_path.resolve().as_posix()}?mode=ro", uri=True)
     try:
         tables = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
         ).fetchall()
         placeholders = ",".join("?" for _ in TRUSTED_REVIEW_STATUSES)
-        for (table_name,) in tables:
+        for table_name, create_sql in tables:
+            if is_dbstat_table(create_sql):
+                continue
             quoted_table = '"' + str(table_name).replace('"', '""') + '"'
             columns = conn.execute(f"PRAGMA table_info({quoted_table})").fetchall()
             for column in columns:
@@ -352,6 +367,7 @@ def refresh_ncs_api_evidence(
     retain_failed_output: bool = False,
     credentials: Mapping[str, str | None] | None = None,
     callables: RefreshCallables | None = None,
+    progress: Callable | None = None,
 ) -> dict[str, Any]:
     """Plan or run the narrow append-only supplemental API refresh.
 
@@ -454,10 +470,13 @@ def refresh_ncs_api_evidence(
     )
 
     operations = callables or RefreshCallables()
+    tell = progress or (lambda event: None)
     working_copy_created = False
+    phase = "source_invariant_check"
     try:
         with exclusive_refresh_lock(resolved_db):
-            source_before_file_hash = file_sha256(resolved_db)
+            source_before_file_hash = file_sha256(resolved_db, progress)
+            tell("원본 KSA와 사람 검토 상태 검사")
             source_before_raw_hash = raw_ksa_sha256(resolved_db)
             source_before_trusted = trusted_review_status_counts(resolved_db)
             evidence["source_invariants_before"] = {
@@ -465,8 +484,11 @@ def refresh_ncs_api_evidence(
                 "raw_ksa_sha256": source_before_raw_hash,
                 "trusted_review_status_counts": source_before_trusted,
             }
-            working_db = _prepare_working_copy(resolved_db, prepared_output)
+            phase = "working_copy_backup"
+            working_db = _prepare_working_copy(resolved_db, prepared_output, progress)
             working_copy_created = True
+            phase = "working_copy_invariant_check"
+            tell("작업 DB 원문·검토 상태 검사")
             before_raw_hash = raw_ksa_sha256(working_db)
             before_trusted = trusted_review_status_counts(working_db)
             evidence["working_copy_invariants_before"] = {
@@ -480,10 +502,16 @@ def refresh_ncs_api_evidence(
             source_failures: list[str] = []
             warnings: list[str] = []
 
+            phase = "api_collection"
+            proven_calls = 0
+            total_calls = len(selected_sources) * len(major_codes)
             for source in selected_sources:
                 credential = active_credentials[source]
                 for major_code in major_codes:
+                    tell({"stage": "API 수집 완료 범위", "completed": proven_calls, "total": total_calls,
+                          "unit": "API·대분류", "detail": f"현재 {source} / {major_code}"})
                     try:
+                        progress_options = {"progress_callback": progress} if progress and callables is None else {}
                         if source == "training-courses":
                             result = operations.collect_training(
                                 working_db,
@@ -493,6 +521,7 @@ def refresh_ncs_api_evidence(
                                 page_no=1,
                                 num_of_rows=500,
                                 max_pages=None,
+                                **progress_options,
                             )
                             safe_result = _safe_training_result(result)
                             proven = _training_completion_proven(result)
@@ -505,6 +534,7 @@ def refresh_ncs_api_evidence(
                                 page_no=1,
                                 num_of_rows=500,
                                 max_pages=None,
+                                **progress_options,
                             )
                             safe_result = _safe_job_base_result(result)
                             proven = _job_base_completion_proven(result)
@@ -521,6 +551,10 @@ def refresh_ncs_api_evidence(
                         )
                         if not proven:
                             source_unproven.append(f"{source}:{major_code}")
+                        else:
+                            proven_calls += 1
+                        tell({"stage": "API 수집 완료 범위", "completed": proven_calls,
+                              "total": total_calls, "unit": "API·대분류"})
                     except Exception as exc:  # Preserve later-major evidence; never reconcile failures.
                         source_results[source].append(
                             {
@@ -533,6 +567,10 @@ def refresh_ncs_api_evidence(
 
             evidence["source_results"] = source_results
             evidence["warnings"] = warnings
+            evidence["failed_sources"] = source_failures
+            evidence["unproven_sources"] = source_unproven
+            phase = "post_collection_invariant_check"
+            tell("API 수집 후 원문·검토 상태 검사")
             after_collection_raw_hash = raw_ksa_sha256(working_db)
             after_collection_trusted = trusted_review_status_counts(working_db)
             collection_invariants_unchanged = (
@@ -556,6 +594,8 @@ def refresh_ncs_api_evidence(
                 and collection_invariants_unchanged
             )
             if training_fully_proven:
+                phase = "training_link_build"
+                tell("교육과정·온톨로지 관계 연결 (전체 작업량 사전 산정 불가)")
                 try:
                     conn = connect(working_db)
                     try:
@@ -581,6 +621,8 @@ def refresh_ncs_api_evidence(
                     "reason": "training_completion_not_proven",
                 }
 
+            phase = "final_invariant_check"
+            tell("최종 원문·검토 상태 보존 검사")
             after_raw_hash = raw_ksa_sha256(working_db)
             after_trusted = trusted_review_status_counts(working_db)
             evidence["working_copy_invariants_after"] = {
@@ -604,7 +646,8 @@ def refresh_ncs_api_evidence(
                 evidence["outcome"] = "completed_with_warnings"
             else:
                 evidence["outcome"] = "succeeded_append_only"
-            source_after_file_hash = file_sha256(resolved_db)
+            source_after_file_hash = file_sha256(resolved_db, progress, "최종 원본 DB 해시 검사")
+            tell("최종 원문·검토 상태 비교")
             source_after_raw_hash = raw_ksa_sha256(resolved_db)
             source_after_trusted = trusted_review_status_counts(resolved_db)
             source_unchanged = (
@@ -649,6 +692,8 @@ def refresh_ncs_api_evidence(
             {
                 "outcome": "failed_no_reconcile",
                 "failure_type": type(exc).__name__,
+                "failed_phase": phase,
+                "failure_reason": _safe_local_failure_reason(exc),
                 "source_writes_performed": False,
             }
         )
@@ -660,6 +705,20 @@ def refresh_ncs_api_evidence(
                 evidence["failed_output_deleted"] = True
     evidence["finished_at"] = _utc_now()
     return evidence
+
+
+def _safe_local_failure_reason(exc: Exception) -> str:
+    """Return known diagnostic categories, never arbitrary exception text/URLs."""
+    message = str(exc).lower()
+    if "no such module: dbstat" in message:
+        return "sqlite_dbstat_module_unavailable"
+    if "database is locked" in message or "database table is locked" in message:
+        return "sqlite_database_locked"
+    if "disk is full" in message or "no space left" in message:
+        return "disk_full"
+    if "readonly" in message or "read-only" in message:
+        return "sqlite_read_only"
+    return "local_database_or_filesystem_error"
 
 
 def write_refresh_evidence(report: Mapping[str, Any], output_path: Path) -> Path:
