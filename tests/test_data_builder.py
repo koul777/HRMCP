@@ -12,10 +12,44 @@ from ncs_mcp.builder_desktop import format_result
 from ncs_mcp.data_builder import BuilderError, DataBuilder, inspect_workbook, api_failure_message
 from ncs_mcp.db import connect, initialize_database, now_utc
 from ncs_mcp.ontology_refresh_builder import _run_pipeline
+from ncs_mcp.api_refresh_builder import raw_ksa_sha256, trusted_review_status_counts
 from ncs_mcp.preprocess_excel import HEADER_ALIASES, Normalizer
 
 
 class DataBuilderTests(unittest.TestCase):
+    def interrupted_api_version(self):
+        report = self.engine.build_delta(self.source, self.baseline)
+        folder = self.engine._version_dir(report['version'])
+        report.update(kind='api', status='interrupted')
+        (folder / 'build.json').write_text(json.dumps(report), encoding='utf-8')
+        db = folder / 'ncs.db'
+        evidence = {'outcome':'completed_with_warnings', 'sources':['training-courses'],
+                    'prepared_output':str(db), 'working_copy_invariants_unchanged':True,
+                    'source_invariants_after':{'unchanged':True},
+                    'working_copy_invariants_after':{'raw_ksa_sha256':raw_ksa_sha256(db),
+                        'trusted_review_status_counts':trusted_review_status_counts(db)}}
+        (folder / 'api-refresh.json').write_text(json.dumps(evidence), encoding='utf-8')
+        return report, folder
+
+    def test_resume_completed_api_candidate_never_recollects(self):
+        report, folder = self.interrupted_api_version()
+        with patch('ncs_mcp.data_builder.refresh_ncs_api_evidence') as collect:
+            resumed = self.engine.resume(report['version'])
+            collect.assert_not_called()
+        self.assertEqual(resumed['status'], 'ready')
+        self.assertEqual(resumed['version'], report['version'])
+        self.assertFalse((self.engine.state / 'deployed.json').exists())
+
+    def test_resume_rejects_changed_raw_candidate(self):
+        report, folder = self.interrupted_api_version()
+        with closing(sqlite3.connect(folder / 'ncs.db')) as conn:
+            conn.execute("UPDATE ksa_items SET ksa_text_raw='fixture tamper'")
+            conn.commit()
+        with patch('ncs_mcp.data_builder.refresh_ncs_api_evidence') as collect:
+            with self.assertRaises(BuilderError):
+                self.engine.resume(report['version'])
+            collect.assert_not_called()
+
     def test_failure_message_explains_db_stage_and_source_failures(self):
         message = api_failure_message({'outcome': 'failed_no_reconcile',
                                       'failed_phase': 'source_invariant_check',

@@ -16,7 +16,7 @@ import sqlite3
 import tempfile
 import uuid
 from collections.abc import Callable, Iterable, Mapping
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -368,6 +368,8 @@ def refresh_ncs_api_evidence(
     credentials: Mapping[str, str | None] | None = None,
     callables: RefreshCallables | None = None,
     progress: Callable | None = None,
+    checkpoint_dir: Path | None = None,
+    resume: bool = False,
 ) -> dict[str, Any]:
     """Plan or run the narrow append-only supplemental API refresh.
 
@@ -375,6 +377,10 @@ def refresh_ncs_api_evidence(
     connection.  ``apply=True`` copies the canonical source DB before any
     collector runs; collectors and link building receive only that copy.
     A failed or unprovable source never implies deletion or stale-row cleanup.
+    With ``checkpoint_dir`` and an explicit ``output_path``, proven source-major
+    calls are journaled and the working copy is retained. ``resume=True`` checks
+    source, parameters, DB identity and original invariants before reusing it.
+    Interrupted majors rerun their idempotent upserts; final guards always rerun.
     """
 
     selected_sources = tuple(
@@ -449,11 +455,36 @@ def refresh_ncs_api_evidence(
         )
         return evidence
 
+    checkpoint_path = Path(checkpoint_dir).resolve() / "api_checkpoint.json" if checkpoint_dir else None
+    checkpoint: dict[str, Any] | None = None
+    if resume and (checkpoint_path is None or output_path is None):
+        return {**evidence, "outcome": "blocked_preflight", "preflight_errors": ["resume_requires_checkpoint_and_output"]}
+    if checkpoint_path and output_path is None:
+        return {**evidence, "outcome": "blocked_preflight", "preflight_errors": ["checkpoint_requires_output_path"]}
+    if checkpoint_path and checkpoint_path.exists():
+        if not resume:
+            return {**evidence, "outcome": "blocked_preflight", "preflight_errors": ["checkpoint_already_exists_use_resume"]}
+        try:
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            if (not isinstance(checkpoint, dict)
+                    or not isinstance(checkpoint.get("identity"), dict)
+                    or not isinstance(checkpoint.get("completed"), dict)
+                    or not all(isinstance(value, dict) and value.get("completion_proven") is True
+                               for value in checkpoint["completed"].values())):
+                raise ValueError("invalid checkpoint")
+        except (OSError, ValueError):
+            return {**evidence, "outcome": "blocked_preflight", "preflight_errors": ["checkpoint_unreadable"]}
+    elif resume:
+        return {**evidence, "outcome": "blocked_preflight", "preflight_errors": ["checkpoint_missing"]}
     prepared_output, output_error = _resolve_prepared_output(
         resolved_db,
         output_path=output_path,
         state_dir=state_dir,
     )
+    if checkpoint is not None and output_error == "prepared_output_already_exists":
+        output_error = None
+    if checkpoint_path:
+        retain_failed_output = True
     if output_error or prepared_output is None:
         evidence.update(
             {
@@ -484,8 +515,24 @@ def refresh_ncs_api_evidence(
                 "raw_ksa_sha256": source_before_raw_hash,
                 "trusted_review_status_counts": source_before_trusted,
             }
+            identity = {
+                "schema": "ncs_api_checkpoint_v1", "source": str(resolved_db),
+                "source_invariants": evidence["source_invariants_before"],
+                "source_wal_sha256": file_sha256(Path(str(resolved_db) + "-wal")) if checkpoint_path and Path(str(resolved_db) + "-wal").exists() else None,
+                "output": str(prepared_output), "sources": list(selected_sources),
+                "major_codes": major_codes, "parameters": evidence["limits"],
+            }
+            if checkpoint is not None:
+                if checkpoint.get("identity") != identity:
+                    return {**evidence, "outcome": "blocked_preflight", "preflight_errors": ["checkpoint_identity_mismatch"]}
+                if not prepared_output.is_file() or prepared_output.stat().st_ino != checkpoint.get("working_inode"):
+                    return {**evidence, "outcome": "blocked_preflight", "preflight_errors": ["checkpoint_working_db_mismatch"]}
+                with closing(sqlite3.connect(f"file:{prepared_output.as_posix()}?mode=ro", uri=True)) as binding:
+                    token = binding.execute("SELECT token FROM builder_api_checkpoint_identity").fetchone()
+                if not token or token[0] != checkpoint.get("token"):
+                    return {**evidence, "outcome": "blocked_preflight", "preflight_errors": ["checkpoint_working_db_mismatch"]}
             phase = "working_copy_backup"
-            working_db = _prepare_working_copy(resolved_db, prepared_output, progress)
+            working_db = prepared_output if checkpoint is not None else _prepare_working_copy(resolved_db, prepared_output, progress)
             working_copy_created = True
             phase = "working_copy_invariant_check"
             tell("작업 DB 원문·검토 상태 검사")
@@ -495,6 +542,17 @@ def refresh_ncs_api_evidence(
                 "raw_ksa_sha256": before_raw_hash,
                 "trusted_review_status_counts": before_trusted,
             }
+            if checkpoint is not None and checkpoint.get("baseline") != evidence["working_copy_invariants_before"]:
+                return {**evidence, "outcome": "blocked_preflight", "preflight_errors": ["checkpoint_invariant_mismatch"]}
+            if checkpoint_path and checkpoint is None:
+                checkpoint = {"identity": identity, "baseline": evidence["working_copy_invariants_before"],
+                              "token": uuid.uuid4().hex, "working_inode": working_db.stat().st_ino, "completed": {}}
+                with closing(sqlite3.connect(working_db)) as binding, binding:
+                    binding.execute("CREATE TABLE IF NOT EXISTS builder_api_checkpoint_identity(token TEXT NOT NULL)")
+                    binding.execute("DELETE FROM builder_api_checkpoint_identity")
+                    binding.execute("INSERT INTO builder_api_checkpoint_identity VALUES (?)", (checkpoint["token"],))
+                write_refresh_evidence(checkpoint, checkpoint_path)
+            evidence["resumed"] = resume
             source_results: dict[str, list[dict[str, Any]]] = {
                 source: [] for source in selected_sources
             }
@@ -508,6 +566,13 @@ def refresh_ncs_api_evidence(
             for source in selected_sources:
                 credential = active_credentials[source]
                 for major_code in major_codes:
+                    call_key = f"{source}:{major_code}"
+                    if checkpoint is not None and call_key in checkpoint["completed"]:
+                        source_results[source].append({**checkpoint["completed"][call_key], "resumed_from_checkpoint": True})
+                        proven_calls += 1
+                        if source == "job-base" and checkpoint["completed"][call_key].get("missing_local_units"):
+                            warnings.append(f"job-base:{major_code}:missing_local_units")
+                        continue
                     tell({"stage": "API 수집 완료 범위", "completed": proven_calls, "total": total_calls,
                           "unit": "API·대분류", "detail": f"현재 {source} / {major_code}"})
                     try:
@@ -553,6 +618,9 @@ def refresh_ncs_api_evidence(
                             source_unproven.append(f"{source}:{major_code}")
                         else:
                             proven_calls += 1
+                            if checkpoint is not None:
+                                checkpoint["completed"][call_key] = source_results[source][-1]
+                                write_refresh_evidence(checkpoint, checkpoint_path)
                         tell({"stage": "API 수집 완료 범위", "completed": proven_calls,
                               "total": total_calls, "unit": "API·대분류"})
                     except Exception as exc:  # Preserve later-major evidence; never reconcile failures.
@@ -655,6 +723,11 @@ def refresh_ncs_api_evidence(
                 and source_before_raw_hash == source_after_raw_hash
                 and source_before_trusted == source_after_trusted
             )
+            if checkpoint_path:
+                source_wal = Path(str(resolved_db) + "-wal")
+                source_unchanged = source_unchanged and identity["source_wal_sha256"] == (
+                    file_sha256(source_wal) if source_wal.exists() else None
+                )
             evidence["source_invariants_after"] = {
                 "file_sha256": source_after_file_hash,
                 "raw_ksa_sha256": source_after_raw_hash,

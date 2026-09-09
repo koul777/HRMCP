@@ -13,7 +13,7 @@ from typing import Callable
 
 from openpyxl import load_workbook
 
-from .api_refresh_builder import file_sha256, refresh_ncs_api_evidence
+from .api_refresh_builder import file_sha256, refresh_ncs_api_evidence, raw_ksa_sha256, trusted_review_status_counts
 from .config import PROJECT_ROOT, load_settings
 from .ontology_refresh_builder import validate_ontology_database, _sqlite_online_snapshot
 from .preprocess_excel import build_header_map
@@ -143,28 +143,15 @@ class DataBuilder:
             raise BuilderError(f"작업 공간이 부족합니다. 최소 {required / 1024**3:.1f} GB 여유 공간이 필요합니다.")
 
     def _finish(self, folder: Path, report: dict) -> dict:
-        db = folder / "ncs.db"
-        self.progress("결과 검증: SQLite·KSA·온톨로지 구조 및 데이터 건수")
-        validation = validate_ontology_database(db)
-        if not validation["ok"]:
-            raise BuilderError("온톨로지 검증에 실패했습니다. 이 버전은 MCP에 반영할 수 없습니다.")
-        with closing(sqlite3.connect(db)) as conn:
-            if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
-                raise BuilderError("DB 관계 무결성 검증에 실패했습니다.")
-            checkpoint = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-            if checkpoint and checkpoint[0]:
-                raise BuilderError("작업 DB가 사용 중입니다. 검증 후 다시 시도하세요.")
-            counts = {}
-            for table in ("competency_units", "competency_elements", "performance_criteria", "ksa_items",
-                          "ontology_concepts", "ncs_training_courses", "ncs_qualification_items",
-                          "ncs_job_base_competencies", "ncs_career_paths"):
-                exists = conn.execute("SELECT 1 FROM sqlite_master WHERE name=? AND type='table'", (table,)).fetchone()
-                counts[table] = conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0] if exists else 0
-        if any(counts[t] == 0 for t in ("competency_units", "performance_criteria", "ksa_items")):
-            raise BuilderError("필수 원천 테이블이 비어 있어 MCP 반영을 차단했습니다.")
-        report.update(status="ready", counts=counts, validation=validation,
-                      sha256=file_sha256(db, self.progress, "완성 DB 해시 검사"), bytes=db.stat().st_size)
-        atomic_json(folder / "build.json", report)
+        from .builder_validation import validate_candidate
+        report['checkpoint'] = 'final_validation'
+        atomic_json(folder / 'build.json', report)
+        try:
+            result = validate_candidate(folder / 'ncs.db', folder / 'validation-checkpoint.json', self.progress)
+        except ValueError as exc:
+            raise BuilderError(str(exc)) from exc
+        report.update(status='ready', **result)
+        atomic_json(folder / 'build.json', report)
         return report
 
     def _failed(self, folder: Path, report: dict, exc: Exception) -> None:
@@ -247,8 +234,11 @@ class DataBuilder:
             try:
                 self.progress("API 사전 점검 및 별도 작업 DB 생성")
                 report["parent_database"] = str(source)
+                report['sources'] = sources
+                atomic_json(folder / 'build.json', report)
                 evidence = refresh_ncs_api_evidence(source, sources=sources, apply=True,
-                                                    output_path=folder / "ncs.db", progress=self.progress)
+                                                    output_path=folder / "ncs.db", progress=self.progress,
+                                                    checkpoint_dir=folder / 'api-checkpoint')
                 atomic_json(folder / "api-refresh.json", evidence)
                 if evidence.get("outcome") not in {"succeeded_append_only", "completed_with_warnings"}:
                     raise BuilderError(api_failure_message(evidence) + f"\n상세 보고서: {folder / 'api-refresh.json'}")
@@ -274,6 +264,73 @@ class DataBuilder:
         if self.root == PROJECT_ROOT.resolve():
             return load_settings().db_path
         return self.root / "data/processed/ncs.db"
+
+    def resume_kind(self, version: str) -> str | None:
+        """Read only the saved work evidence; never claim the DB is ready here."""
+        folder = self._version_dir(version)
+        try:
+            report = json.loads((folder / 'build.json').read_text(encoding='utf-8'))
+            if report.get('status') == 'ready' or not (folder / 'ncs.db').is_file():
+                return None
+            if report.get('kind') == 'api':
+                evidence_path = folder / 'api-refresh.json'
+                evidence = json.loads(evidence_path.read_text(encoding='utf-8')) if evidence_path.exists() else {}
+                if (evidence.get('outcome') in {'succeeded_append_only', 'completed_with_warnings'}
+                        and evidence.get('working_copy_invariants_unchanged') is True
+                        and (evidence.get('source_invariants_after') or {}).get('unchanged') is True
+                        and Path(evidence.get('prepared_output', '')).resolve() == (folder / 'ncs.db').resolve()):
+                    return 'api-validation'
+                if (folder / 'api-checkpoint/api_checkpoint.json').is_file() and report.get('parent_database') and report.get('sources'):
+                    return 'api-collection'
+            if report.get('kind') == 'excel-delta':
+                delta = json.loads((folder / 'delta.json').read_text(encoding='utf-8'))
+                if delta.get('ok') is True:
+                    return 'excel-validation'
+        except (OSError, ValueError, TypeError):
+            return None
+        return None
+
+    def resume(self, version: str) -> dict:
+        with self.exclusive():
+            folder = self._version_dir(version)
+            kind = self.resume_kind(version)
+            if not kind:
+                raise BuilderError('재개할 완료 기록이 없습니다. 이 버전을 완료로 사용하지 않습니다.')
+            report = json.loads((folder / 'build.json').read_text(encoding='utf-8'))
+            report.update(status='building', resumed_at=datetime.now(timezone.utc).isoformat())
+            atomic_json(folder / 'build.json', report)
+            try:
+                if kind == 'api-collection':
+                    evidence = refresh_ncs_api_evidence(Path(report['parent_database']),
+                        sources=report['sources'], apply=True, output_path=folder / 'ncs.db',
+                        checkpoint_dir=folder / 'api-checkpoint', resume=True, progress=self.progress)
+                    atomic_json(folder / 'api-refresh.json', evidence)
+                    if evidence.get('outcome') not in {'succeeded_append_only', 'completed_with_warnings'}:
+                        raise BuilderError(api_failure_message(evidence))
+                if kind.startswith('api-'):
+                    evidence = json.loads((folder / 'api-refresh.json').read_text(encoding='utf-8'))
+                    self.progress('저장된 API 결과 재사용: 원문·검토 상태 보존 확인 (재수집 없음)')
+                    expected = evidence.get('working_copy_invariants_after') or {}
+                    if (raw_ksa_sha256(folder / 'ncs.db') != expected.get('raw_ksa_sha256')
+                            or trusted_review_status_counts(folder / 'ncs.db') != expected.get('trusted_review_status_counts')):
+                        raise BuilderError('저장된 API 결과와 후보 DB의 원문·검토 상태가 달라 재개를 중단했습니다.')
+                    report.update(api_outcome=evidence['outcome'], sources=evidence['sources'])
+                    if report.get('parent_database'):
+                        parent_path = Path(report['parent_database']).resolve()
+                        parent_report = parent_path.parent / 'build.json'
+                        if parent_path.is_relative_to(self.state / 'versions') and parent_report.is_file():
+                            parent = json.loads(parent_report.read_text(encoding='utf-8'))
+                            for key in ('source_delta', 'ontology_processing'):
+                                if key in parent:
+                                    report[key] = parent[key]
+                else:
+                    evidence = json.loads((folder / 'delta.json').read_text(encoding='utf-8'))
+                    report.update(source_delta=evidence.get('source_delta'), ontology_processing=evidence.get('ontology_processing'))
+                atomic_json(folder / 'build.json', report)
+                return self._finish(folder, report)
+            except Exception as exc:
+                self._failed(folder, report, exc)
+                raise
 
     def copy_current(self) -> dict:
         with self.exclusive():

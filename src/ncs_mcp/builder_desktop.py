@@ -90,6 +90,7 @@ class BuilderWindow:
                                         ("직업기초능력 API", self.job_base, bool(settings.job_base_service_key))):
             ttk.Checkbutton(api_tab, text=f"{title}  ·  키 {'설정됨' if present else '미설정'}", variable=variable).pack(anchor="w", pady=8)
         self.button(api_tab, "선택 API 점검 · 갱신", self.refresh_api, accent=True).pack(anchor="w", pady=15)
+        self.button(api_tab, "중단한 작업 이어하기", self.resume_selected).pack(anchor="w", pady=3)
         ttk.Label(api_tab, text="선택 버전이 있으면 그 버전을, 없으면 비교 기준 DB를 사용합니다.\n수집 실패나 응답 누락이 있으면 배포 가능 버전을 만들지 않습니다.\nAPI에서 보이지 않는 행을 자동 삭제하지 않습니다.", wraplength=940).pack(anchor="w", pady=10)
         ttk.Separator(api_tab).pack(fill="x", pady=14)
         ttk.Label(api_tab, text=f"자격 API · 키 {'설정됨' if settings.qualification_service_key else '미설정'}\n자격·NCS006은 재시도 제한과 운영자 실행 조건이 있어 자동 일괄 수집에서 제외됩니다.\n해당 수집의 상태·실행 가능 여부는 기존 운영 대시보드에서 확인합니다.", wraplength=940).pack(anchor="w")
@@ -121,6 +122,7 @@ class BuilderWindow:
         row.pack(fill="x", pady=8)
         self.button(row, "새로고침", self.reload_history).pack(side="left")
         self.button(row, "선택 버전 보고서 열기", self.open_version).pack(side="left", padx=8)
+        self.button(row, "선택 작업 이어하기", self.resume_selected, accent=True).pack(side="left")
         ttk.Label(outer, textvariable=self.status, wraplength=1080).pack(anchor="w", pady=(12, 5))
         self.bar = ttk.Progressbar(outer, mode="indeterminate")
         self.bar.pack(fill="x")
@@ -136,10 +138,13 @@ class BuilderWindow:
         for attempt in self.session.data['attempts'][-20:]:
             self.log.insert('end', f"{attempt['phase']}단계 · {attempt['status']} · {attempt.get('started_at', '')}\n")
         saved_version = self.session.data.get('selected_version')
+        resumable = next((item['version'] for item in self.engine.versions() if self.engine.resume_kind(item['version'])), None)
+        if resumable:
+            saved_version = resumable
         if saved_version and self.history.exists(saved_version):
             self.history.selection_set(saved_version)
             self.select_history()
-            self.status.set("이전 작업 버전을 불러왔습니다. 완료 표시를 확인하고 남은 단계 버튼을 누르세요.")
+            self.status.set("중단 작업을 찾았습니다. '중단한 작업 이어하기'를 누르면 저장된 완료 지점부터 진행합니다." if resumable else "이전 작업 버전을 불러왔습니다. 완료 표시를 확인하고 남은 단계 버튼을 누르세요.")
         root.protocol("WM_DELETE_WINDOW", self.close)
         root.after(150, self.poll)
 
@@ -246,6 +251,9 @@ class BuilderWindow:
         self.start("업로드된 원본의 변경분과 영향을 검사합니다.", operation, phase=1)
 
     def refresh_api(self):
+        if self.selected_version and self.engine.resume_kind(self.selected_version):
+            self.resume_selected()
+            return
         sources, version, baseline = self.selected_sources(), self.selected_version, Path(self.baseline.get())
         if not sources:
             messagebox.showinfo("API 선택", "갱신할 API를 선택하세요.")
@@ -254,6 +262,17 @@ class BuilderWindow:
             source = self.engine.candidate(version) if version else baseline
             return self.engine.refresh_api(source, sources)
         self.start("API를 자동 점검·갱신합니다. 전체 수집에는 시간이 걸릴 수 있습니다.", operation, phase=2)
+
+    def resume_selected(self):
+        version = self._require_version()
+        if not version:
+            return
+        kind = self.engine.resume_kind(version)
+        if not kind:
+            messagebox.showinfo('이어하기', '이 버전에 재사용 가능한 중간 완료 기록이 없습니다. 버전 목록에서 중단 작업을 선택하세요.')
+            return
+        self.start('저장된 완료 기록을 확인하고 남은 작업을 이어갑니다.',
+                   lambda: self.engine.resume(version), phase=1 if kind.startswith('excel') else 2)
 
     def _require_version(self):
         if not self.selected_version:
