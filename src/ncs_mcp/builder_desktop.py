@@ -18,17 +18,23 @@ from .builder_discovery import discover_project
 from .builder_session import BuilderSession
 
 
+class BuilderCancelled(BaseException):
+    """Unwind collectors without treating cancellation as an API retry error."""
+
+
 class BuilderWindow:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.events: queue.Queue = queue.Queue()
         self.busy = False
+        self.closing = False
+        self.cancel_requested = threading.Event()
         self.active_phase = None
         self.started_at = None
         self.operation_failed = False
         self.phase_states = {number: "pending" for number in range(1, 5)}
         self.phase_labels = {number: tk.StringVar(value=f"{number}단계 · 대기") for number in range(1, 5)}
-        self.engine = DataBuilder(progress=lambda text: self.events.put(("progress", text)))
+        self.engine = DataBuilder(progress=self.report_progress)
         self.session = BuilderSession(self.engine.state)
         self.last_journal_at = 0.0
         self.selected_version: str | None = None
@@ -186,6 +192,11 @@ class BuilderWindow:
     def selected_sources(self):
         return [name for name, enabled in (("training-courses", self.training.get()), ("job-base", self.job_base.get())) if enabled]
 
+    def report_progress(self, value):
+        if self.cancel_requested.is_set():
+            raise BuilderCancelled()
+        self.events.put(('progress', value))
+
     def start(self, title, operation, phase=None):
         if self.busy:
             return
@@ -195,6 +206,7 @@ class BuilderWindow:
         if phase:
             self.session.start(phase, self.selected_version)
         self.busy = True
+        self.cancel_requested.clear()
         self.active_phase = phase
         self.started_at = time.monotonic()
         self.operation_failed = False
@@ -211,6 +223,8 @@ class BuilderWindow:
         def run():
             try:
                 self.events.put(("result", operation()))
+            except BuilderCancelled:
+                self.events.put(('cancelled', '사용자 종료 요청으로 중단했습니다. 미완료 산출물은 다음 단계에 사용하지 않습니다.'))
             except Exception as exc:
                 message = str(exc) if isinstance(exc, BuilderError) else f"{type(exc).__name__}: 실행을 완료하지 못했습니다. 버전 보고서를 확인하세요."
                 self.events.put(("error", message))
@@ -356,7 +370,7 @@ class BuilderWindow:
                     self.bar.configure(mode="determinate", value=100)
                     self.status.set("완료 · 결과와 버전 보고서를 확인하세요.")
                     self.log.insert("end", "작업 완료\n")
-                elif kind == "error":
+                elif kind in {"error", "cancelled"}:
                     self.session.fail(value)
                     self.operation_failed = True
                     if self.active_phase:
@@ -367,13 +381,17 @@ class BuilderWindow:
                     self.bar.configure(mode="determinate", value=0)
                     self.status.set(value)
                     self.log.insert("end", value + "\n")
-                    messagebox.showerror("작업을 완료하지 못했습니다", value)
+                    if not self.closing and kind == 'error':
+                        messagebox.showerror("작업을 완료하지 못했습니다", value)
                 elif kind == "done":
                     self.busy = False
                     self.bar.stop()
                     for button in self._buttons:
                         button.state(["!disabled"])
                     self.reload_history()
+                    if self.closing:
+                        self.root.destroy()
+                        return
                 self.log.see("end")
         except queue.Empty:
             pass
@@ -384,7 +402,17 @@ class BuilderWindow:
 
     def close(self):
         if self.busy:
-            messagebox.showinfo("작업 실행 중", "데이터 작업이 진행 중입니다. 완료 후 창을 닫아주세요.")
+            if self.closing:
+                return
+            deploying = self.active_phase == 4
+            text = ("창을 닫고 진행 중인 배포·운영 검증을 백그라운드에서 마무리할까요?\n운영 전환 도중에는 강제로 중단하지 않습니다."
+                    if deploying else "작업 중단을 요청하고 창을 닫을까요?\n진행 중인 DB 처리·API 응답이 안전한 중단 지점에 도달하면 종료합니다.\n완료한 이전 버전은 보존되며 정리 중에는 새 작업을 시작할 수 없습니다.")
+            if not messagebox.askyesno('빌더 종료', text):
+                return
+            self.closing = True
+            if not deploying:
+                self.cancel_requested.set()
+            self.root.withdraw()
             return
         self.root.destroy()
 
