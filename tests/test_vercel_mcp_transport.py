@@ -38,6 +38,8 @@ class VercelMcpTransportTests(unittest.TestCase):
             env["NCS_MCP_ENABLE_OPERATOR_TOOLS"] = "0"
             env["NCS_MCP_ENABLE_ADVANCED_TOOLS"] = "0"
             env["NCS_MCP_DISABLE_DNS_REBINDING_PROTECTION"] = "1"
+            env["PYTHONIOENCODING"] = "utf-8"
+            env["PYTHONUTF8"] = "1"
             local_python = ROOT / ".venv" / "Scripts" / "python.exe"
             python_executable = local_python if local_python.exists() else Path(sys.executable)
             completed = subprocess.run(
@@ -46,6 +48,7 @@ class VercelMcpTransportTests(unittest.TestCase):
                 env=env,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=45,
                 check=False,
             )
@@ -237,6 +240,11 @@ async def main():
         "duration_seconds": time.perf_counter() - started,
         "persistent_task_delta": len(asyncio.all_tasks()) - tasks_before,
     }
+    from api.mcp import app as mcp_app
+
+    shutdown_lifespan = getattr(mcp_app, "_shutdown_lifespan", None)
+    if shutdown_lifespan is not None:
+        await shutdown_lifespan()
     print(json.dumps(results, ensure_ascii=False))
 
 

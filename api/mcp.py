@@ -147,6 +147,23 @@ def _app_with_path_prefix_fix() -> object:
             await lifespan_context.__aenter__()
             lifespan_started = True
 
+    async def _shutdown_lifespan() -> None:
+        """Close a manually started lifespan in the task that opened it.
+
+        Vercel keeps the function process alive between requests, so normal
+        request handling intentionally leaves this lifespan running.  Local
+        ASGI contract tests can call this hook before their event loop exits;
+        otherwise Python may finalize the SDK async generator from a different
+        task and AnyIO rejects the cross-task cancel-scope exit.
+        """
+
+        nonlocal lifespan_started
+        async with lifespan_lock:
+            if not lifespan_started:
+                return
+            await lifespan_context.__aexit__(None, None, None)
+            lifespan_started = False
+
     async def app(scope, receive, send) -> None:
         if scope.get("type") == "http":
             # This stateless service does not emit server-initiated MCP
@@ -173,6 +190,8 @@ def _app_with_path_prefix_fix() -> object:
             elif path == "/api/index":
                 scope["path"] = streamable_path
         await base_app(scope, receive, send)
+
+    app._shutdown_lifespan = _shutdown_lifespan  # type: ignore[attr-defined]
 
     return app
 

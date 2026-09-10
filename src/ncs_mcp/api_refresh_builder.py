@@ -56,6 +56,12 @@ class RefreshLockError(RuntimeError):
     """Raised when an append-only refresh is already in progress for a DB."""
 
 
+def _absolute_path(path: str | Path) -> Path:
+    """Make *path* absolute without expanding Windows 8.3 path spelling."""
+
+    return Path(os.path.abspath(Path(path).expanduser()))
+
+
 def _utc_now() -> str:
     return (
         datetime.now(timezone.utc)
@@ -89,11 +95,15 @@ def _canonical_db_error(db_path: Path) -> str | None:
 
 
 def _prepared_output_error(source_db: Path, output_db: Path) -> str | None:
-    if output_db == source_db:
+    if output_db.resolve(strict=False) == source_db.resolve(strict=False):
         return "prepared_output_must_not_be_the_source_db"
     if output_db.suffix.lower() != ".db":
         return "prepared_output_must_be_a_db_file"
-    parts = {part.lower() for part in output_db.parts}
+    parts = {
+        part.lower()
+        for candidate in (output_db, output_db.resolve(strict=False))
+        for part in candidate.parts
+    }
     forbidden = {"deploy", ".vercel", "vercel"}
     if _truthy(os.getenv("VERCEL")):
         forbidden.add("tmp")
@@ -113,10 +123,10 @@ def _resolve_prepared_output(
     if output_path is not None and state_dir is not None:
         return None, "output_path_and_state_dir_are_mutually_exclusive"
     if output_path is not None:
-        candidate = Path(output_path).expanduser().resolve()
+        candidate = _absolute_path(output_path)
     else:
         base_dir = (
-            Path(state_dir).expanduser().resolve()
+            _absolute_path(state_dir)
             if state_dir is not None
             else DEFAULT_STATE_DIR
         )

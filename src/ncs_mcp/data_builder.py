@@ -28,6 +28,12 @@ class BuilderError(RuntimeError):
     """User-facing operational failure without credentials or API response bodies."""
 
 
+def _absolute_path(path: str | Path) -> Path:
+    """Make *path* absolute without expanding Windows 8.3 path spelling."""
+
+    return Path(os.path.abspath(Path(path).expanduser()))
+
+
 def api_failure_message(evidence: dict) -> str:
     phase_names = {
         "source_invariant_check": "원본 DB 검사",
@@ -129,7 +135,11 @@ class DataBuilder:
     def __init__(
         self, root: Path = PROJECT_ROOT, progress: Callable[[str], None] | None = None
     ):
-        self.root = Path(root).resolve()
+        # Keep the caller's absolute path spelling.  On GitHub Windows runners,
+        # ``resolve()`` expands RUNNER~1 to runneradmin, which makes paths to the
+        # same file compare differently across Builder reports and call sites.
+        # Individual containment checks still use resolved paths.
+        self.root = _absolute_path(root)
         self.state = self.root / ".state/ncs-data-builder"
         self.state.mkdir(parents=True, exist_ok=True)
         self.progress = progress or (lambda message: None)
@@ -691,7 +701,7 @@ class DataBuilder:
         if pointer.exists():
             payload = json.loads(pointer.read_text(encoding="utf-8"))
             return self.candidate(payload["version"])
-        if self.root == PROJECT_ROOT.resolve():
+        if self.root.resolve() == PROJECT_ROOT.resolve():
             return load_settings().db_path
         return self.root / "data/processed/ncs.db"
 

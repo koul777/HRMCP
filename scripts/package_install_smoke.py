@@ -517,9 +517,17 @@ def _unsafe_link_kind(path: Path) -> str | None:
         except OSError:
             return "unreadable_reparse_candidate"
     try:
-        attributes = int(getattr(path.lstat(), "st_file_attributes", 0))
+        path_stat = path.lstat()
     except OSError:
         return None
+    reparse_tag = int(getattr(path_stat, "st_reparse_tag", 0))
+    junction_tag = int(getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003))
+    if reparse_tag == junction_tag:
+        # pathlib.Path.is_junction() was added in Python 3.12.  Python 3.11
+        # still exposes the mount-point reparse tag through lstat(), so use it
+        # to keep the source-boundary check equivalent on CI.
+        return "junction"
+    attributes = int(getattr(path_stat, "st_file_attributes", 0))
     reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
     if reparse_flag and attributes & reparse_flag:
         return "reparse_point"

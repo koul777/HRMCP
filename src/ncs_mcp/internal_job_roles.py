@@ -7,7 +7,7 @@ only a reviewable hypothesis and never an approval or HR decision.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 import copy
 import hashlib
@@ -249,7 +249,9 @@ class InternalJobRole:
     target_level: str | None = None
     source: str | None = None
     effective_date: str | date | None = None
-    provenance: Mapping[str, Any] = MappingProxyType({})
+    provenance: Mapping[str, Any] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.organization_namespace, str):
@@ -415,7 +417,9 @@ class RoleAlignmentCandidate:
     model: str | None = None
     evidence: tuple[Any, ...] = ()
     status: str = "candidate"
-    provenance: Mapping[str, Any] = MappingProxyType({})
+    provenance: Mapping[str, Any] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.role_gold_id, str) or not normalize_semantic_text(self.role_gold_id):

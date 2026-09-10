@@ -24,8 +24,17 @@ class VercelFreshInstanceMeasurementTests(unittest.TestCase):
         self.assertEqual(
             Path(args.deploy_root).resolve(), MODULE.DEFAULT_DEPLOY_ROOT.resolve()
         )
-        self.assertTrue((MODULE.DEFAULT_DEPLOY_ROOT / ".vercel" / "project.json").is_file())
-        self.assertTrue((MODULE.DEFAULT_DEPLOY_ROOT / "api" / "ncs_ontology_compact.zip").is_file())
+        linked_candidates = [
+            candidate
+            for candidate in (
+                MODULE.REPO_ROOT,
+                MODULE.REPO_ROOT / "deploy" / "vercel_mcp_app",
+            )
+            if (candidate / ".vercel" / "project.json").is_file()
+            and (candidate / "api" / "ncs_ontology_compact.zip").is_file()
+        ]
+        expected = linked_candidates[0] if linked_candidates else MODULE.REPO_ROOT
+        self.assertEqual(MODULE.DEFAULT_DEPLOY_ROOT.resolve(), expected.resolve())
 
     def test_redaction_is_allowlist_based(self) -> None:
         payload = {
