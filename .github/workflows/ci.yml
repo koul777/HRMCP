@@ -106,7 +106,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p docker-smoke
-          docker run --rm -v "${PWD}/docker-smoke:/data" ncs-mcp:ci \
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -v "${PWD}/docker-smoke:/data" ncs-mcp:ci \
             python -m ncs_mcp.smoke_data --out /data/ncs.db
           docker run -d --name ncs-mcp-ci --read-only --cap-drop ALL \
             --security-opt no-new-privileges --tmpfs /tmp -p 127.0.0.1:8777:8777 \

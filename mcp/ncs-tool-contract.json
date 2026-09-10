@@ -213,12 +213,17 @@
         "qualification",
         "job base",
         "ontology",
-        "evidence"
+        "evidence",
+        "internal role",
+        "enterprise role",
+        "semantic",
+        "사내 직무",
+        "시맨틱"
       ],
       "categories": [
         "evidence_analysis"
       ],
-      "description": "Read career path, qualification, job-base, or ontology evidence.",
+      "description": "Read career path, qualification, job-base, ontology, internal-role, or optional semantic Gold context.",
       "executable_via_meta": true,
       "meta_compact_default": false,
       "meta_save_forced_false": false,
