@@ -95,7 +95,19 @@ def run_stdio_smoke(*, python_executable: str, timeout: float) -> dict[str, Any]
         if "error" in discover_response:
             raise RuntimeError(f"tools/call ncs_discover_tools failed: {discover_response['error']}")
 
-        required = {"ncs_discover_tools", "ncs_execute_tool", "recommend_training_transition"}
+        required = {
+            "ncs_discover_tools",
+            "ncs_execute_tool",
+            "ncs_analysis",
+            "recommend_training_for_task",
+        }
+        if env.get("NCS_MCP_ENABLE_ADVANCED_TOOLS", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            required.add("recommend_training_transition")
         missing = sorted(required - set(tool_names))
         return {
             "ok": not missing,

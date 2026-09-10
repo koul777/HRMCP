@@ -190,6 +190,24 @@ PUBLIC_JOB_BASE_LINK_FIELDS = (
 )
 PUBLIC_SOURCE_FOOTER = "출처: 한국산업인력공단 NCS (공공데이터포털). 표준 원문: ncs.go.kr"
 _RENDERED_MARKDOWN_ATTR = "_mcp_markdown"
+_GOLD_MCP_FACADE: Any | None = None
+_GOLD_MCP_FACADE_LOCK = threading.Lock()
+
+
+def _get_gold_mcp_facade():
+    """Return the process-local optional Gold facade without eager I/O."""
+
+    global _GOLD_MCP_FACADE
+    if _GOLD_MCP_FACADE is not None:
+        return _GOLD_MCP_FACADE
+    with _GOLD_MCP_FACADE_LOCK:
+        if _GOLD_MCP_FACADE is None:
+            # Keep Neo4j, torch, and sentence-transformers out of the default
+            # SQLite/Vercel import path.  The facade itself stays lazy.
+            from ncs_mcp.gold_mcp import GoldMCPFacade
+
+            _GOLD_MCP_FACADE = GoldMCPFacade()
+    return _GOLD_MCP_FACADE
 
 
 class RenderedToolPayload(dict[str, Any]):
@@ -844,6 +862,123 @@ _PUBLIC_MARKDOWN_RENDERERS["ncs_training"] = _render_ncs_training_markdown
 
 
 def _render_ncs_analysis_markdown(result: dict[str, Any]) -> str | None:
+    if result.get("operation") == "internal_role_context":
+        context = result.get("context")
+        rows = context.get("rows") if isinstance(context, dict) else None
+        if not isinstance(rows, list):
+            return None
+        lines = ["## Gold 사내직무→NCS→KSA 맥락"]
+        count_line = _returned_total_line(len(rows), min(len(rows), 5))
+        if count_line:
+            lines.append(count_line)
+        lines.extend(
+            [
+                "",
+                _markdown_table(
+                    ["사내직무", "NCS 직무", "KSA 유형", "KSA", "근거 수"],
+                    [
+                        [
+                            _short_markdown_text(
+                                row.get("internal_job_role_name")
+                                or row.get("internal_job_role_id"),
+                                max_chars=22,
+                            ),
+                            _short_markdown_text(
+                                row.get("ncs_job_name") or row.get("ncs_job_id"),
+                                max_chars=22,
+                            ),
+                            row.get("ksa_concept_type"),
+                            _short_markdown_text(
+                                row.get("ksa_concept_name") or row.get("ksa_concept_id"),
+                                max_chars=30,
+                            ),
+                            row.get("source_link_count"),
+                        ]
+                        for row in rows[:5]
+                        if isinstance(row, dict)
+                    ],
+                ),
+            ]
+        )
+        nested_audit = context.get("audit") if isinstance(context, dict) else None
+        return _append_markdown_footer(
+            lines,
+            nested_audit if isinstance(nested_audit, dict) else result.get("audit"),
+        )
+    if result.get("operation") == "semantic_context":
+        context = result.get("context")
+        rows = context.get("rows") if isinstance(context, dict) else None
+        if not isinstance(rows, list):
+            return None
+
+        def first_ksa(row: dict[str, Any], key: str) -> str:
+            values = row.get(key)
+            if not isinstance(values, list):
+                return ""
+            value = next((str(item).strip() for item in values if str(item).strip()), "")
+            return _short_markdown_text(value, max_chars=18)
+
+        lines = ["## Gold 시맨틱 직무·역량 분석"]
+        count_line = _returned_total_line(len(rows), min(len(rows), 5))
+        if count_line:
+            lines.append(count_line)
+        table_rows: list[list[Any]] = []
+        for raw_row in rows[:5]:
+            if not isinstance(raw_row, dict):
+                continue
+            ksa = " / ".join(
+                part
+                for part in (
+                    f"K:{first_ksa(raw_row, 'required_knowledge')}",
+                    f"S:{first_ksa(raw_row, 'required_skills')}",
+                    f"A:{first_ksa(raw_row, 'required_attitudes')}",
+                )
+                if not part.endswith(":")
+            )
+            score = raw_row.get("score")
+            table_rows.append(
+                [
+                    f"{score:.4f}" if isinstance(score, (int, float)) else score,
+                    _short_markdown_text(raw_row.get("ncs_job_name"), max_chars=20),
+                    _short_markdown_text(
+                        " ".join(
+                            str(value).strip()
+                            for value in (
+                                raw_row.get("competency_unit_code"),
+                                raw_row.get("competency_unit_name"),
+                            )
+                            if value
+                        ),
+                        max_chars=28,
+                    ),
+                    _short_markdown_text(
+                        " ".join(
+                            str(value).strip()
+                            for value in (
+                                raw_row.get("performance_criterion_id"),
+                                raw_row.get("performance_criterion_text"),
+                            )
+                            if value
+                        ),
+                        max_chars=42,
+                    ),
+                    _short_markdown_text(ksa, max_chars=62),
+                ]
+            )
+        lines.extend(
+            [
+                "",
+                _markdown_table(
+                    ["점수", "NCS 직무", "능력단위", "수행준거", "K/S/A"],
+                    table_rows,
+                ),
+            ]
+        )
+        nested_audit = context.get("audit") if isinstance(context, dict) else None
+        return _append_markdown_footer(
+            lines,
+            nested_audit if isinstance(nested_audit, dict) else result.get("audit"),
+        )
     if isinstance(result.get("career_paths"), list):
         rows = result["career_paths"]
         lines = ["## 경력개발경로 분석"]
@@ -1371,6 +1506,38 @@ def ontology_schema() -> str:
     return json.dumps(ONTOLOGY_SCHEMA, ensure_ascii=False, indent=2)
 
 
+@mcp.resource("ontology://gold/schema")
+def gold_ontology_schema() -> str:
+    """Return the active NCS Gold LPG vocabulary and serving guardrails."""
+
+    from ncs_mcp.gold_lpg import (
+        ALLOWED_NODE_IMPORT_GROUPS,
+        ALLOWED_RELATIONSHIP_TYPES,
+        GOLD_LPG_SCHEMA,
+    )
+
+    return json.dumps(
+        {
+            "schema": GOLD_LPG_SCHEMA,
+            "node_groups": dict(sorted(ALLOWED_NODE_IMPORT_GROUPS.items())),
+            "relationship_types": sorted(ALLOWED_RELATIONSHIP_TYPES),
+            "authority": "SQLite source of truth; Neo4j Gold is an optional serving projection",
+            "default_profile": "serving_core",
+            "deep_evidence": "bounded on-demand",
+            "human_approval_claim": False,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+@mcp.resource("ncs://gold/status")
+def gold_runtime_status() -> str:
+    """Return secret-free Gold/embedding readiness without backend I/O."""
+
+    return json.dumps(_get_gold_mcp_facade().status(), ensure_ascii=False, indent=2)
+
+
 @mcp.resource("sqf://mvp/management-support")
 def management_support_mvp() -> str:
     """Return the first NCS-SQF ontology MVP scope: SQF management support duties."""
@@ -1559,8 +1726,14 @@ def ncs_analysis(
     unit_code: str | None = None,
     concept_type: str | None = None,
     limit: int = 20,
+    internal_role_id: str | None = None,
+    summary: bool = True,
+    entity_kind: str = "performance_criterion",
+    top_k: int = 5,
+    include_training: bool = False,
+    training_limit: int = 3,
 ) -> dict[str, Any]:
-    """경력개발·자격·직업기초능력·온톨로지 근거를 조회합니다. Analyze supporting NCS evidence."""
+    """경력·자격·온톨로지와 선택적 Gold 직무/시맨틱 맥락을 조회합니다."""
     if mode == "career_path":
         result = search_career_paths(query=query, unit_code=unit_code, limit=limit)
         items = result.get("career_paths") or result.get("data", {}).get("career_paths", [])
@@ -1609,11 +1782,108 @@ def ncs_analysis(
             limit=limit,
         )
         items = result.get("concepts") or result.get("data", {}).get("concepts", [])
+    elif mode == "internal_role":
+        context = _get_gold_mcp_facade().internal_role_context(
+            internal_role_id or "",
+            summary=summary,
+            limit=limit,
+        )
+        chain: dict[str, Any] = {
+            "status": "not_requested",
+            "source": "internal_role_context",
+            "next_tool": "recommend_training_for_task",
+            "planning_tool": "plan_ncs_education_path",
+            "read_only": True,
+            "save": False,
+            "results": [],
+        }
+        if include_training:
+            try:
+                if isinstance(training_limit, bool):
+                    raise ValueError
+                bounded_training_limit = int(training_limit)
+                if not 1 <= bounded_training_limit <= 5:
+                    raise ValueError
+            except (TypeError, ValueError):
+                return error_response(
+                    "invalid_training_limit",
+                    training_limit=training_limit,
+                    allowed_range=[1, 5],
+                )
+            if context.get("status") != "ok":
+                chain.update(
+                    status="unavailable",
+                    fallback="Gold role context unavailable; no NCS/KSA or course was inferred.",
+                )
+            else:
+                rows_container = context.get("context")
+                rows = (
+                    rows_container.get("rows", [])
+                    if isinstance(rows_container, dict)
+                    else []
+                )
+                targets: list[dict[str, str]] = []
+                seen_targets: set[tuple[str, str]] = set()
+                for row in rows if isinstance(rows, list) else []:
+                    if not isinstance(row, dict):
+                        continue
+                    unit = str(row.get("competency_unit_code") or "").strip()
+                    job = str(row.get("ncs_job_name") or "").strip()
+                    target = {"unit_code": unit} if unit else {"query": job} if job else None
+                    if target is None:
+                        continue
+                    key = next(iter(target.items()))
+                    if key in seen_targets:
+                        continue
+                    seen_targets.add(key)
+                    targets.append(target)
+                    if len(targets) >= 3:
+                        break
+                if not targets:
+                    chain.update(
+                        status="no_alignment_evidence",
+                        fallback="No aligned NCS job or unit was available for training lookup.",
+                    )
+                else:
+                    for target in targets:
+                        invocation = {
+                            **target,
+                            "limit": bounded_training_limit,
+                            "save": False,
+                            "compact": True,
+                        }
+                        chain["results"].append(
+                            {
+                                "target": target,
+                                "result": recommend_training_for_task(**invocation),
+                            }
+                        )
+                    chain.update(
+                        status="executed",
+                        target_count=len(targets),
+                        recommendation_limit=bounded_training_limit,
+                    )
+        context["training_recommendation_chain"] = chain
+        return context
+    elif mode == "semantic":
+        return _get_gold_mcp_facade().semantic_context(
+            query or "",
+            entity_kind=entity_kind,
+            top_k=top_k,
+            limit=limit,
+        )
     else:
         return error_response(
             "unsupported_analysis_mode",
             mode=mode,
-            allowed=["career_path", "qualification", "job_base", "ontology"],
+            allowed=[
+                "career_path",
+                "qualification",
+                "job_base",
+                "ontology",
+                "internal_role",
+                "semantic",
+            ],
         )
     if not items:
         return not_found_response(f"{mode} 분석 결과가 없습니다.")

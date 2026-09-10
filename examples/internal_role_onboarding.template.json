@@ -1,0 +1,25 @@
+{
+  "schema": "enterprise_internal_role_onboarding_v1",
+  "organization_namespace": "sample-org",
+  "template_only": true,
+  "roles": [
+    {
+      "role_id": "hr-planning-manager",
+      "role_name": "인사기획 담당",
+      "dept": "인사 부서",
+      "job_description": "조직 목표에 맞춰 인사전략과 중장기 인력운영계획을 수립하고 인건비 운영계획을 검토한다.",
+      "tasks": [
+        "인사전략을 수립한다.",
+        "인력운영계획과 인건비 운영계획을 수립한다."
+      ],
+      "skills": [
+        "직무분석",
+        "정원산정",
+        "인사평가"
+      ],
+      "target_level": "NCS 4~5 수준 검토 대상",
+      "effective_date": "2026-01-01",
+      "source_ref": "sample_role_catalog_v1"
+    }
+  ]
+}

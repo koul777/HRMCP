@@ -12,7 +12,7 @@ import time
 import zipfile
 import zlib
 from collections import defaultdict
-from contextlib import nullcontext
+from contextlib import closing, nullcontext
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -832,46 +832,49 @@ def run_audit(
         if database_bytes != int(manifest["sqlite_bytes"]):
             raise ValueError("extracted SQLite byte size does not match manifest")
 
-        connection = sqlite3.connect(
-            f"file:{database_path.resolve().as_posix()}?mode=ro&immutable=1",
-            uri=True,
-        )
-        connection.row_factory = sqlite3.Row
-        page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
-        page_count = int(connection.execute("PRAGMA page_count").fetchone()[0])
-        freelist_count = int(connection.execute("PRAGMA freelist_count").fetchone()[0])
-        schema = _schema_inventory(connection)
-        view_dependencies = _view_dependencies(schema)
-        objects = _dbstat_objects(connection)
-        _add_independent_deflate_estimates(
-            connection, database_path, page_size, objects
-        )
-        object_sizes = {item["name"]: item for item in objects}
-        indexes, duplicate_indexes = _index_inventory(connection, object_sizes)
-        footprints = _table_footprints(schema, objects)
-        source_references = _source_references(root, schema)
-        public_trace = (
-            _trace_public_tool_tables(connection, root)
-            if trace_public_tools
-            else {
-                "public_tools": list(EXPECTED_PUBLIC_TOOLS),
-                "public_tool_count": len(EXPECTED_PUBLIC_TOOLS),
-                "expected_public_tools": list(EXPECTED_PUBLIC_TOOLS),
-                "surface_matches_expected": None,
-                "tool_reads": {},
-                "all_observed_tables": [],
-                "all_traces_read_only": None,
-                "skipped": True,
-            }
-        )
-        dictionary_spike = (
-            _measure_ontology_dictionary_spike(database_path, temporary_path)
-            if run_dictionary_spike
-            and "ontology_concepts" in schema
-            and schema["ontology_concepts"]["type"] == "table"
-            else None
-        )
-        connection.close()
+        with closing(
+            sqlite3.connect(
+                f"file:{database_path.resolve().as_posix()}?mode=ro&immutable=1",
+                uri=True,
+            )
+        ) as connection:
+            connection.row_factory = sqlite3.Row
+            page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
+            page_count = int(connection.execute("PRAGMA page_count").fetchone()[0])
+            freelist_count = int(
+                connection.execute("PRAGMA freelist_count").fetchone()[0]
+            )
+            schema = _schema_inventory(connection)
+            view_dependencies = _view_dependencies(schema)
+            objects = _dbstat_objects(connection)
+            _add_independent_deflate_estimates(
+                connection, database_path, page_size, objects
+            )
+            object_sizes = {item["name"]: item for item in objects}
+            indexes, duplicate_indexes = _index_inventory(connection, object_sizes)
+            footprints = _table_footprints(schema, objects)
+            source_references = _source_references(root, schema)
+            public_trace = (
+                _trace_public_tool_tables(connection, root)
+                if trace_public_tools
+                else {
+                    "public_tools": list(EXPECTED_PUBLIC_TOOLS),
+                    "public_tool_count": len(EXPECTED_PUBLIC_TOOLS),
+                    "expected_public_tools": list(EXPECTED_PUBLIC_TOOLS),
+                    "surface_matches_expected": None,
+                    "tool_reads": {},
+                    "all_observed_tables": [],
+                    "all_traces_read_only": None,
+                    "skipped": True,
+                }
+            )
+            dictionary_spike = (
+                _measure_ontology_dictionary_spike(database_path, temporary_path)
+                if run_dictionary_spike
+                and "ontology_concepts" in schema
+                and schema["ontology_concepts"]["type"] == "table"
+                else None
+            )
 
         public_tables = set(public_trace.get("all_observed_tables", []))
         readiness_tables = set(readiness["required_tables"])

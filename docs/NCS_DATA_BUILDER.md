@@ -1,5 +1,20 @@
 # NCS DB 업데이트 빌더
 
+## Gold/Neo4j 및 사내 직무 연결
+
+선택형 `Gold · Neo4j` 탭은 검증된 SQLite 버전에서 서빙용 NDJSON을
+준비하고, dry-run 검증 후 명시적 확인이 있을 때만 Neo4j에 Upsert한다.
+`scripts/map_internal_roles.py`가 만든 후보 매핑 JSON을 선택하면 사내 직무
+노드와 후보 `ALIGNED_TO` 관계가 같은 Gold 스트림에 포함된다. 개인/직원
+필드와 사람 승인 상태는 거부되며, 입력 패킷은 canonical SHA-256과 건수로
+`gold/gold-build.json`에 추적된다.
+
+임베딩은 본문 그래프와 분리된 텍스트 비포함 패치로 생성한다. 같은 탭에서
+기본 20건 smoke 또는 계획된 전체 배치를 만들고, dry-run 검증 후 명시적
+확인이 있을 때만 그래프 대조가 끝난 동일 Builder 버전에 적용한다. CLI
+`scripts/export_gold_embeddings.py`와 `scripts/load_gold_embeddings_neo4j.py`도
+동일 계약을 사용한다.
+
 정기적으로 갱신되는 NCS 원본의 추가·삭제·변경을 비교하고 관련 온톨로지·경량 DB·MCP까지 갱신하는 도구다. 온톨로지 편집기에 한정되지 않는다. 처음 사용하는 경우 [README의 단계별 안내](../README.md#ncs-db-업데이트-빌더-사용하기)를 먼저 읽는다.
 
 `run_ncs_builder.bat`를 더블클릭한다. 프로젝트의 `.venv`와 기존 API 키, Vercel CLI 로그인을 사용한다.
@@ -13,6 +28,44 @@
 4. **③ 경량 DB 생성**: 연결 프로젝트 폴더를 확인하고 경량 DB를 만든다. 온톨로지를 포함한 DB와 ZIP·manifest를 검증한다. 자동 배포하지 않는다.
 5. **④ Vercel 반영**: 별도 탭의 업데이트 버튼에서 대상 프로젝트와 운영 URL을 확인하면 임시 배포, MCP 및 빌드 식별자 검증, 운영 전환, 운영 MCP 검증 순서로 진행한다.
 6. 운영 검증까지 성공한 버전만 다음 비교 기준이 된다. 기존 로컬 `data/processed/ncs.db`는 덮어쓰지 않는다.
+
+### 선택형 Gold · Neo4j 단계
+
+검증된 버전을 선택하면 `Gold · Neo4j (선택)` 탭에서 별도의 서빙
+프로젝션을 만들 수 있다. 이 단계는 기존 4단계 완료율이나 Vercel 배포에
+포함되지 않으며 자동 시작하지 않는다.
+
+1. **Gold 스트림 준비 · 검증**은 `gold/ncs_gold_serving_core.ndjson`을
+   메모리 제한형으로 생성하고 manifest, digest, 노드 참조를 전수 검사한다.
+2. **Neo4j 적재 Dry-run**은 드라이버나 네트워크 없이 같은 검사를 반복한다.
+3. **Neo4j 실제 동기화 · 대조**는 확인 창과 `NCS_MCP_GOLD_*` 설정이 모두
+   있을 때만 Upsert하고 노드/관계 수를 대조한다. 삭제 계획은 적용하지 않는다.
+4. **임베딩 생성 · 검증**은 로컬 캐시 모델을 기본으로 사용해 Criterion,
+   Element, KSAConcept 벡터 패치를 만든다. 기본 20건은 연결 확인용 스모크이며,
+   데스크톱 UI에서는 단일 대용량 파일 방식의 전체 실행을 허용하지 않는다.
+5. **전체 샤드 준비 · 이어하기**는 전체 대상을 고정 keyset 범위로 나눠 원문
+   텍스트가 없는 원자적 NDJSON 샤드를 만든다. 이미 완료된 샤드는 digest와
+   계획 결합을 확인한 뒤 건너뛰므로 중단 후 같은 버튼으로 재개할 수 있다.
+6. **전체 샤드 적재 Dry-run/실제 적용**은 최종 manifest와 모든 샤드를 다시
+   검사한다. 실제 적용은 같은 버전의 Gold 그래프 대조와 records digest 일치가
+   필요하다. 완료 판단은 로컬 파일이 아니라 Neo4j 서버 측 샤드 영수증을
+   기준으로 하며, 모든 샤드가 확인된 뒤에만 세 개의 고정 코사인 인덱스를 만든다.
+
+증거는 버전 폴더의 `gold/gold-build.json`, `gold/gold-load.json`,
+`gold/gold-load-checkpoint.json`, `gold/gold-embeddings.json`,
+`gold/gold-embeddings-shards.json`, `gold/embeddings-shards/`,
+`gold/gold-embedding-load.json`에 남는다. 이전 버전과 비교할 때 생성되는
+tombstone은 운영자 승인 전까지 계획일 뿐이다. Gold 준비나 연결 실패는 이미
+검증된 SQLite 후보의 `status=ready`를 바꾸지 않는다.
+
+데스크톱을 열지 않는 로컬 운영에서는 아래처럼 같은 Builder 계약을 사용한다.
+첫 명령은 쓰기 없는 전수 검증이며, 두 번째 명령만 고정 로컬 Neo4j 컨테이너의
+자격증명을 메모리에서 읽어 실제 적용한다.
+
+```powershell
+python scripts\sync_local_gold_embedding_shards.py --version <builder-version>
+python scripts\sync_local_gold_embedding_shards.py --version <builder-version> --apply
+```
 
 프로젝트 루트와 `deploy/vercel_mcp_app`에는 서로 다른 Vercel 프로젝트 연결이 있을 수 있다. 마지막 성공 배포 폴더, `deploy/vercel_mcp_app` 순서로 유효한 `.vercel/project.json`과 `vercel.json`을 찾아 폴더·운영 URL을 자동 입력한다. `기존 연결 자동 찾기`로 다시 탐색하고, 없을 때만 수동으로 선택한다. 현재 배포 기능은 선택 프로젝트의 기본 `https://<projectName>.vercel.app/api/mcp` 주소를 지원한다. 사용자 정의 도메인은 자동 검증 대상에 포함하지 않는다.
 
@@ -59,6 +112,7 @@ API 재개는 동일 원본·수집 설정·작업 DB 식별자·원문 및 검�
 - `ncs.db`, `build.json`: 검증된 후보 DB, 건수·해시·상태.
 - `api-refresh.json`: API 실행 근거(API 갱신 버전).
 - `release.json`, `release/`: 경량 패키지·배포·원격 검증 근거.
+- `gold/`: 선택형 Gold NDJSON, 증분 계획, 임베딩 패치, Neo4j 적재·대조 근거.
 
 원본·대용량 DB는 배포 폴더 밖에 남고, Vercel에는 허용된 애플리케이션 코드와 경량 ZIP·manifest만 업로드한다. 패키지 생성 후 파일이 변경되면 배포를 차단한다.
 임시 배포 검증에 실패하면 운영 전환을 하지 않는다. 운영 전환 후 최종 검증이 실패한 경우에는 운영이 이미 전환되었을 수 있으므로 `promotion_performed`와 `failed_phase`를 확인하고 Vercel의 이전 배포 복귀 기능을 사용한다. 실패했다고 자동으로 롤백된 것으로 간주하면 안 된다.

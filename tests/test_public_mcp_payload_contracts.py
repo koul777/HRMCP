@@ -869,6 +869,49 @@ class PublicMcpPayloadContractTests(unittest.TestCase):
                 self.assertRegex(analysis_text, rf"\b{re.escape(str(identifier))}\b")
                 self.assertTrue(analysis_text.endswith(SOURCE_FOOTER), analysis_text)
 
+    def test_semantic_analysis_wire_is_compact_and_preserves_graph_context(self) -> None:
+        class SemanticFacade:
+            def semantic_context(self, query, *, entity_kind, top_k, limit):
+                row = {
+                    "score": 0.91234,
+                    "ncs_job_id": "ncs:ncs_job:02020201",
+                    "ncs_job_name": "인사",
+                    "competency_unit_code": "0202020101_23v1",
+                    "competency_unit_name": "인사기획",
+                    "performance_element_id": "200",
+                    "performance_element_name": "인력운영계획 수립",
+                    "performance_criterion_id": "100",
+                    "performance_criterion_text": "인력운영계획을 수립할 수 있다.",
+                    "required_knowledge": ["정원산정 기법"],
+                    "required_skills": ["인력예측 기술"],
+                    "required_attitudes": ["전략적 분석 태도"],
+                }
+                return {
+                    "schema": "ncs_gold_mcp_context_v1",
+                    "operation": "semantic_context",
+                    "status": "ok",
+                    "context": {
+                        "rows": [dict(row, performance_criterion_id=str(index)) for index in range(10)],
+                        "audit": {"retrieval_method": "vector_search", "row_count": 10},
+                    },
+                }
+
+        with patch(
+            "ncs_mcp.server._get_gold_mcp_facade",
+            return_value=SemanticFacade(),
+        ):
+            wire, text = self._call_tool_wire(
+                "ncs_analysis",
+                {"mode": "semantic", "query": "인사기획", "top_k": 5, "limit": 10},
+            )
+
+        self.assertNotIn("structuredContent", wire)
+        self.assertLessEqual(len(text), MAX_MARKDOWN_TEXT_CHARS["ncs_analysis"])
+        self.assertIn("인사기획", text)
+        self.assertIn("정원산정", text)
+        self.assertIn("0.9123", text)
+        self.assertTrue(text.endswith(SOURCE_FOOTER), text)
+
     def test_qualification_without_collection_status_remains_usable(self) -> None:
         conn = connect(self.db_path)
         try:
