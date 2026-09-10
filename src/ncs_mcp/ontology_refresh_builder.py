@@ -175,7 +175,11 @@ def _read_managed_baseline_pointer(
 
 def resolve_managed_baseline(state_dir: str | Path) -> Path:
     """Resolve and validate the promoted baseline, with legacy baseline.db fallback."""
-    state = Path(state_dir).expanduser().resolve(strict=False)
+    # Preserve the operator-supplied absolute spelling for the legacy fallback.
+    # ``resolve()`` expands RUNNER~1 on Windows even though it is the same path.
+    # Pointer targets still pass through _contained_path's resolved containment
+    # checks before they are returned.
+    state = Path(os.path.abspath(Path(state_dir).expanduser()))
     baseline, _pointer = _read_managed_baseline_pointer(state, validate_artifacts=True)
     return baseline
 

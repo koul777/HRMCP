@@ -4,7 +4,7 @@ import json
 import re
 import sqlite3
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import unquote
 from xml.etree import ElementTree
 
@@ -508,6 +508,7 @@ def collect_job_base_competencies(
     timeout: int = 30,
     max_retries: int = 2,
     retry_backoff_seconds: float = 1.0,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     conn = connect(db_path)
     initialize_database(conn)
@@ -520,6 +521,8 @@ def collect_job_base_competencies(
     page = page_no
     errors: list[dict[str, str]] = []
     try:
+        if progress_callback:
+            progress_callback({"stage": f"직업기초능력 API 수집 · 대분류 {major_code}", "completed": 0, "total": None, "unit": "페이지"})
         while True:
             try:
                 payload = fetch_job_base_page(
@@ -556,6 +559,11 @@ def collect_job_base_competencies(
             links_upserted += upserted["links_upserted"]
             missing_local_units += upserted["missing_local_units"]
             pages_processed += 1
+            if progress_callback:
+                target_pages = max(1, total_page - page_no + 1) if total_page > 0 else None
+                if target_pages is not None and max_pages and max_pages > 0:
+                    target_pages = min(target_pages, max_pages)
+                progress_callback({"stage": f"직업기초능력 API 수집 · 대분류 {major_code}", "completed": pages_processed, "total": target_pages, "unit": "페이지"})
             if max_pages and pages_processed >= max_pages:
                 break
             if page >= total_page or not payload["rows"]:

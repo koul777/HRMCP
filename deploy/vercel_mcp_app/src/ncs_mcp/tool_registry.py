@@ -25,8 +25,11 @@ NCS_TOOL_PROFILES: dict[str, dict[str, Any]] = {
         "aliases": ["training", "course", "\ud6c8\ub828", "\uad50\uc721"],
     },
     "ncs_analysis": {
-        "description": "Read career path, qualification, job-base, or ontology evidence.",
-        "aliases": ["career path", "qualification", "job base", "ontology", "evidence"],
+        "description": "Read career path, qualification, job-base, ontology, internal-role, or optional semantic Gold context.",
+        "aliases": [
+            "career path", "qualification", "job base", "ontology", "evidence",
+            "internal role", "enterprise role", "semantic", "사내 직무", "시맨틱",
+        ],
     },
     "recommend_training_for_task": {
         "description": "Recommend training courses for a current NCS task from KSA evidence.",
@@ -125,7 +128,10 @@ NCS_TOOL_ALIASES: dict[str, list[str]] = {
         "\uad50\uc721\uccb4\uacc4",
         "\uad50\uc721\uacc4\ud68d",
     ],
-    "evidence_analysis": ["evidence", "qualification", "career path", "job base", "ontology"],
+    "evidence_analysis": [
+        "evidence", "qualification", "career path", "job base", "ontology",
+        "internal role", "enterprise role", "semantic", "사내 직무", "시맨틱",
+    ],
     "operator_review": ["review", "quality", "human review", "\uac80\ud1a0"],
 }
 

@@ -7,6 +7,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.audit_compact_snapshot_size import (
     SCHEMA,
@@ -15,6 +16,20 @@ from scripts.audit_compact_snapshot_size import (
     render_markdown,
     run_audit,
 )
+
+
+def _dbstat_available() -> bool:
+    connection = sqlite3.connect(":memory:")
+    try:
+        connection.execute("SELECT 1 FROM dbstat LIMIT 1").fetchone()
+    except sqlite3.DatabaseError:
+        return False
+    finally:
+        connection.close()
+    return True
+
+
+DBSTAT_AVAILABLE = _dbstat_available()
 
 
 def sha256(path: Path) -> str:
@@ -99,6 +114,7 @@ class CompactSnapshotSizeAuditTests(unittest.TestCase):
         )
         return archive, manifest, vercel
 
+    @unittest.skipUnless(DBSTAT_AVAILABLE, "SQLite dbstat is unavailable")
     def test_read_only_audit_accounts_for_pages_and_preserves_sources(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -161,6 +177,7 @@ class CompactSnapshotSizeAuditTests(unittest.TestCase):
         self.assertEqual(1.0, inference["full_cold_upper_bound_savings_seconds"])
         self.assertIn("inference", inference["basis"])
 
+    @unittest.skipUnless(DBSTAT_AVAILABLE, "SQLite dbstat is unavailable")
     def test_markdown_leads_with_no_change_and_contract_counts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -178,6 +195,31 @@ class CompactSnapshotSizeAuditTests(unittest.TestCase):
             self.assertIn("Readiness required tables: `5`", markdown)
             self.assertIn("Candidate Trims", markdown)
             self.assertIn("linear byte-scaling inferences", markdown)
+
+    def test_dbstat_failure_closes_extracted_database_before_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive, manifest, vercel = self.make_package(root)
+            before = set(
+                Path(tempfile.gettempdir()).glob("ncs-compact-size-audit-*")
+            )
+            with patch(
+                "scripts.audit_compact_snapshot_size._dbstat_objects",
+                side_effect=RuntimeError("dbstat sentinel"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "dbstat sentinel"):
+                    run_audit(
+                        archive,
+                        manifest,
+                        vercel_config=vercel,
+                        root=root,
+                        trace_public_tools=False,
+                        run_dictionary_spike=False,
+                    )
+            after = set(
+                Path(tempfile.gettempdir()).glob("ncs-compact-size-audit-*")
+            )
+            self.assertEqual(before, after)
 
 
 if __name__ == "__main__":

@@ -42,6 +42,18 @@ class BuilderWindow:
         self.baseline = tk.StringVar(value=str(self.engine.current_db()))
         self.deploy_root = tk.StringVar(value=str(PROJECT_ROOT / "deploy/vercel_mcp_app"))
         self.production_url = tk.StringVar()
+        self.internal_role_mapping_packet = tk.StringVar()
+        self.gold_embedding_model = tk.StringVar(
+            value=os.environ.get(
+                "NCS_MCP_GOLD_LOCAL_EMBEDDING_MODEL",
+                "Qwen/Qwen3-Embedding-0.6B",
+            )
+        )
+        self.gold_embedding_dimensions = tk.StringVar(
+            value=os.environ.get("NCS_MCP_GOLD_EMBEDDING_DIMENSIONS", "1024")
+        )
+        self.gold_embedding_max_records = tk.StringVar(value="20")
+        self.gold_embedding_shard_size = tk.StringVar(value="10000")
         self.project_label = tk.StringVar(value="연결 설정을 찾지 못했습니다. 기존 MCP 프로젝트 폴더를 찾아보기로 선택하세요.")
         self.detect_project()
         settings = load_settings()
@@ -68,8 +80,8 @@ class BuilderWindow:
         ttk.Label(outer, text="원본 변경분 검토  →  온톨로지 갱신  →  경량 DB 검증  →  Vercel MCP 업데이트").pack(anchor="w", pady=(4, 18))
         tabs = ttk.Notebook(outer)
         tabs.pack(fill="both", expand=True)
-        source_tab, api_tab, release_tab, deploy_tab, history_tab = [ttk.Frame(tabs, padding=20) for _ in range(5)]
-        for frame, title in zip((source_tab, api_tab, release_tab, deploy_tab, history_tab), ("① 원본 · 온톨로지", "② API 갱신", "③ 경량 DB 생성", "④ Vercel 반영", "버전 · 실행 기록")):
+        source_tab, api_tab, release_tab, deploy_tab, gold_tab, history_tab = [ttk.Frame(tabs, padding=20) for _ in range(6)]
+        for frame, title in zip((source_tab, api_tab, release_tab, deploy_tab, gold_tab, history_tab), ("① 원본 · 온톨로지", "② API 갱신", "③ 경량 DB 생성", "④ Vercel 반영", "Gold · Neo4j (선택)", "버전 · 실행 기록")):
             tabs.add(frame, text=title)
         for number, frame in enumerate((source_tab, api_tab, release_tab, deploy_tab), 1):
             ttk.Label(frame, textvariable=self.phase_labels[number], wraplength=1020).pack(anchor="w", pady=(0, 8))
@@ -112,6 +124,102 @@ class BuilderWindow:
         self.deploy_selection = ttk.Label(deploy_tab, text="선택된 버전 없음", wraplength=900)
         self.deploy_selection.pack(anchor="w", pady=10)
         ttk.Label(deploy_tab, text="③에서 만든 패키지를 검증용으로 배포한 뒤, 연결 검증을 통과하면 운영 주소에 반영합니다.\n각 단계는 버튼을 눌러 실행하며 자동으로 다음 단계가 시작되지 않습니다.", wraplength=950).pack(anchor="w", pady=10)
+        ttk.Label(
+            gold_tab,
+            text=(
+                "검증된 SQLite 버전에서 Neo4j용 Gold 스트림을 별도로 만듭니다. "
+                "기존 4단계와 Vercel 배포에는 영향을 주지 않습니다.\n"
+                "준비와 dry-run 검증은 Neo4j를 수정하지 않습니다. 실제 동기화는 명시적 확인과 "
+                "NCS_MCP_GOLD_* 연결 설정이 있을 때만 실행됩니다."
+            ),
+            wraplength=950,
+        ).pack(anchor="w", pady=(0, 16))
+        self.gold_selection = ttk.Label(gold_tab, text="선택된 버전 없음", wraplength=900)
+        self.gold_selection.pack(anchor="w", pady=10)
+        self._path_row(
+            gold_tab,
+            "사내 직무 매핑 패킷 (선택 · map_internal_roles.py 결과 JSON)",
+            self.internal_role_mapping_packet,
+            self.choose_internal_role_mapping_packet,
+        )
+        gold_row = ttk.Frame(gold_tab)
+        gold_row.pack(fill="x", pady=10)
+        self.button(gold_row, "Gold 스트림 준비 · 검증", self.prepare_gold, accent=True).pack(side="left", padx=(0, 8))
+        self.button(gold_row, "Neo4j 적재 Dry-run", self.validate_gold).pack(side="left", padx=(0, 8))
+        self.button(gold_tab, "Neo4j 실제 동기화 · 대조", self.sync_gold, accent=True).pack(anchor="w", pady=8)
+        ttk.Separator(gold_tab).pack(fill="x", pady=12)
+        ttk.Label(
+            gold_tab,
+            text=(
+                "시맨틱 임베딩은 로컬 모델로 생성하며 본문 텍스트를 패치 파일에 넣지 않습니다. "
+                "기본 20건은 연결 확인용 스모크입니다. 전체 약 77.8만 건은 아래의 "
+                "재시작 가능한 샤드 작업으로만 실행합니다."
+            ),
+            wraplength=950,
+        ).pack(anchor="w", pady=(0, 8))
+        ttk.Label(gold_tab, text="로컬 임베딩 모델").pack(anchor="w", pady=(4, 3))
+        ttk.Entry(gold_tab, textvariable=self.gold_embedding_model).pack(fill="x")
+        embedding_settings_row = ttk.Frame(gold_tab)
+        embedding_settings_row.pack(fill="x", pady=8)
+        ttk.Label(embedding_settings_row, text="차원").pack(side="left")
+        ttk.Entry(
+            embedding_settings_row,
+            textvariable=self.gold_embedding_dimensions,
+            width=10,
+        ).pack(side="left", padx=(6, 18))
+        ttk.Label(embedding_settings_row, text="스모크 최대 건수").pack(side="left")
+        ttk.Entry(
+            embedding_settings_row,
+            textvariable=self.gold_embedding_max_records,
+            width=12,
+        ).pack(side="left", padx=6)
+        ttk.Label(embedding_settings_row, text="전체 샤드 크기").pack(
+            side="left", padx=(18, 0)
+        )
+        ttk.Entry(
+            embedding_settings_row,
+            textvariable=self.gold_embedding_shard_size,
+            width=12,
+        ).pack(side="left", padx=6)
+        embedding_row = ttk.Frame(gold_tab)
+        embedding_row.pack(fill="x", pady=8)
+        self.button(
+            embedding_row,
+            "임베딩 생성 · 검증",
+            self.prepare_gold_embeddings,
+            accent=True,
+        ).pack(side="left", padx=(0, 8))
+        self.button(
+            embedding_row,
+            "임베딩 적재 Dry-run",
+            self.validate_gold_embeddings,
+        ).pack(side="left", padx=(0, 8))
+        self.button(
+            gold_tab,
+            "스모크 임베딩 실제 적용 · 벡터 인덱스",
+            self.sync_gold_embeddings,
+            accent=True,
+        ).pack(anchor="w", pady=8)
+        ttk.Separator(gold_tab).pack(fill="x", pady=10)
+        full_embedding_row = ttk.Frame(gold_tab)
+        full_embedding_row.pack(fill="x", pady=8)
+        self.button(
+            full_embedding_row,
+            "전체 샤드 준비 · 이어하기",
+            self.prepare_gold_embedding_shards,
+            accent=True,
+        ).pack(side="left", padx=(0, 8))
+        self.button(
+            full_embedding_row,
+            "전체 샤드 적재 Dry-run",
+            self.validate_gold_embedding_shards,
+        ).pack(side="left", padx=(0, 8))
+        self.button(
+            gold_tab,
+            "전체 샤드 실제 적용 · 벡터 인덱스",
+            self.sync_gold_embedding_shards,
+            accent=True,
+        ).pack(anchor="w", pady=8)
         self.history = ttk.Treeview(history_tab, columns=("version", "kind", "status"), show="headings", height=8)
         for column, title, width in (("version", "버전", 390), ("kind", "작업", 160), ("status", "결과", 140)):
             self.history.heading(column, text=title)
@@ -164,6 +272,14 @@ class BuilderWindow:
         path = filedialog.askopenfilename(title="업데이트된 NCS 원본 선택", filetypes=[("NCS Excel", "*.xlsx")])
         if path:
             self.source.set(path)
+
+    def choose_internal_role_mapping_packet(self):
+        path = filedialog.askopenfilename(
+            title="사내 직무→NCS 후보 매핑 패킷 선택",
+            filetypes=[("Internal role mapping JSON", "*.json"), ("All files", "*.*")],
+        )
+        if path:
+            self.internal_role_mapping_packet.set(path)
             self.full_snapshot.set(False)
             self.preview()
 
@@ -307,6 +423,172 @@ class BuilderWindow:
             return
         self.start("Vercel 배포·MCP 검증을 진행합니다.", lambda: self.engine.deploy(version, folder, url), phase=4)
 
+    def prepare_gold(self):
+        version = self._require_version()
+        if version:
+            self.start(
+                "선택 버전에서 메모리 제한형 Gold 스트림을 만들고 전체 무결성을 검사합니다.",
+                lambda: self.engine.prepare_gold(
+                    version,
+                    role_mapping_packet=(
+                        self.internal_role_mapping_packet.get().strip() or None
+                    ),
+                ),
+            )
+
+    def validate_gold(self):
+        version = self._require_version()
+        if version:
+            self.start(
+                "준비된 Gold 스트림을 Neo4j 연결 없이 dry-run 검사합니다.",
+                lambda: self.engine.sync_gold(version, apply=False),
+            )
+
+    def sync_gold(self):
+        version = self._require_version()
+        if not version:
+            return
+        if not messagebox.askyesno(
+            "Neo4j Gold 동기화",
+            f"버전: {version}\n\n준비된 Gold 그래프를 Neo4j에 Upsert하고 카운트를 대조할까요? "
+            "삭제 계획은 자동 적용하지 않습니다.",
+        ):
+            return
+        self.start(
+            "Neo4j Gold Upsert와 적재 후 카운트 대조를 실행합니다.",
+            lambda: self.engine.sync_gold(version, apply=True, reconcile=True),
+        )
+
+    def _gold_embedding_options(self):
+        model = self.gold_embedding_model.get().strip()
+        if not model:
+            messagebox.showinfo("임베딩 모델", "로컬 임베딩 모델을 입력하세요.")
+            return None
+        try:
+            dimensions = int(self.gold_embedding_dimensions.get().strip())
+            if not 1 <= dimensions <= 8192:
+                raise ValueError
+            raw_max_records = self.gold_embedding_max_records.get().strip()
+            max_records = int(raw_max_records) if raw_max_records else None
+            if max_records is not None and max_records <= 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showinfo(
+                "임베딩 설정",
+                "차원은 1~8192 정수, 최대 건수는 양의 정수 또는 공란이어야 합니다.",
+            )
+            return None
+        return {
+            "model": model,
+            "dimensions": dimensions,
+            "max_records": max_records,
+        }
+
+    def _gold_embedding_shard_options(self):
+        model = self.gold_embedding_model.get().strip()
+        if not model:
+            messagebox.showinfo("임베딩 모델", "로컬 임베딩 모델을 입력하세요.")
+            return None
+        try:
+            dimensions = int(self.gold_embedding_dimensions.get().strip())
+            shard_size = int(self.gold_embedding_shard_size.get().strip())
+            if not 1 <= dimensions <= 8192 or not 1 <= shard_size <= 5_000_000:
+                raise ValueError
+        except ValueError:
+            messagebox.showinfo(
+                "전체 임베딩 설정",
+                "차원은 1~8192 정수, 샤드 크기는 1~5,000,000 정수여야 합니다.",
+            )
+            return None
+        return {
+            "model": model,
+            "dimensions": dimensions,
+            "shard_size": shard_size,
+        }
+
+    def prepare_gold_embeddings(self):
+        version = self._require_version()
+        options = self._gold_embedding_options() if version else None
+        if version and options is not None:
+            if options["max_records"] is None:
+                messagebox.showinfo(
+                    "스모크 최대 건수",
+                    "스모크 최대 건수를 입력하세요. 전체 실행은 재시작 가능한 "
+                    "'전체 샤드 준비 · 이어하기'를 사용합니다.",
+                )
+                return
+            mode = f"최대 {options['max_records']}건"
+            self.start(
+                f"로컬 모델로 Gold 임베딩을 생성합니다 ({mode}).",
+                lambda: self.engine.prepare_gold_embeddings(version, **options),
+            )
+
+    def prepare_gold_embedding_shards(self):
+        version = self._require_version()
+        options = self._gold_embedding_shard_options() if version else None
+        if not version or options is None:
+            return
+        if not messagebox.askyesno(
+            "전체 Gold 임베딩 샤드 생성",
+            f"버전: {version}\n\n전체 Criterion·Element·KSAConcept 약 77.8만 건을 "
+            f"{options['shard_size']:,}건 단위로 처리합니다. 중단 후 같은 버튼으로 "
+            "완료된 샤드를 검증하고 이어갈 수 있습니다. 시작할까요?",
+        ):
+            return
+        self.start(
+            "재시작 가능한 전체 Gold 임베딩 샤드를 준비합니다.",
+            lambda: self.engine.prepare_gold_embedding_shards(version, **options),
+        )
+
+    def validate_gold_embedding_shards(self):
+        version = self._require_version()
+        if version:
+            self.start(
+                "전체 임베딩 샤드와 벡터 인덱스를 쓰기 없이 검증합니다.",
+                lambda: self.engine.sync_gold_embedding_shards(
+                    version, apply=False
+                ),
+            )
+
+    def sync_gold_embedding_shards(self):
+        version = self._require_version()
+        if not version:
+            return
+        if not messagebox.askyesno(
+            "전체 Gold 임베딩 샤드 적용",
+            f"버전: {version}\n\n검증된 전체 샤드를 Neo4j에 재시작 가능한 방식으로 "
+            "적용하고, 모든 서버 측 영수증이 확인된 뒤 벡터 인덱스를 생성할까요?",
+        ):
+            return
+        self.start(
+            "전체 Gold 임베딩 샤드를 Neo4j에 적용합니다.",
+            lambda: self.engine.sync_gold_embedding_shards(version, apply=True),
+        )
+
+    def validate_gold_embeddings(self):
+        version = self._require_version()
+        if version:
+            self.start(
+                "임베딩 패치와 벡터 인덱스를 Neo4j 연결 없이 dry-run 검사합니다.",
+                lambda: self.engine.sync_gold_embeddings(version, apply=False),
+            )
+
+    def sync_gold_embeddings(self):
+        version = self._require_version()
+        if not version:
+            return
+        if not messagebox.askyesno(
+            "Gold 임베딩 적용",
+            f"버전: {version}\n\n검증된 임베딩 패치를 Neo4j에 적용하고 "
+            "고정 코사인 벡터 인덱스를 생성할까요? 먼저 같은 버전의 Gold 그래프가 "
+            "대조 완료되어 있어야 합니다.",
+        ):
+            return
+        self.start(
+            "Gold 임베딩 패치와 벡터 인덱스를 Neo4j에 적용합니다.",
+            lambda: self.engine.sync_gold_embeddings(version, apply=True),
+        )
+
     def reload_history(self):
         self.history.delete(*self.history.get_children())
         for item in self.engine.versions():
@@ -320,6 +602,7 @@ class BuilderWindow:
             self.selected_version = selection[0]
             self.selection_label.configure(text=f"선택 버전: {self.selected_version}")
             self.deploy_selection.configure(text=f"선택 버전: {self.selected_version}")
+            self.gold_selection.configure(text=f"선택 버전: {self.selected_version}")
             self.restore_phase_states(self.selected_version)
 
     def restore_phase_states(self, version):

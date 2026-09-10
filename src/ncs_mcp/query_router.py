@@ -439,6 +439,7 @@ def route_ncs_query(
     available_tool_names: set[str] | None = None,
 ) -> dict[str, Any]:
     normalized = normalize_query(query)
+    internal_role_request = _is_internal_role_request(normalized)
     scored: list[tuple[int, int, RoutePattern]] = []
     for pattern in ROUTE_PATTERNS:
         score = _score_pattern(pattern, normalized)
@@ -452,17 +453,35 @@ def route_ncs_query(
         reverse=True,
     )
     score, _, pattern = scored[0]
+    if internal_role_request:
+        pattern = _pattern_by_scenario(EVIDENCE_ANALYSIS)
+        score = max(score, 1)
     if score <= 0:
         pattern = _pattern_by_scenario(STRUCTURE_SEARCH)
         score = 1
 
     params = _params_for_pattern(pattern, query)
-    missing = [name for name in pattern.required_params if _is_missing(params.get(name))]
+    required_params = list(pattern.required_params)
+    if (
+        pattern.scenario == EVIDENCE_ANALYSIS
+        and params.get("mode") == "internal_role"
+        and "internal_role_id" not in required_params
+    ):
+        required_params.append("internal_role_id")
+    missing = [name for name in required_params if _is_missing(params.get(name))]
     unavailable = bool(available_tool_names is not None and pattern.tool not in available_tool_names)
     matched_signals = _matched_signals(pattern, normalized)
     risk_flags = risk_flags_for_query(query)
-    pipeline = [{"tool": tool_name} for tool_name in pattern.pipeline]
-    allowed_tools = [pattern.tool, *[tool_name for tool_name in pattern.pipeline if tool_name != pattern.tool]]
+    pipeline_tools = list(pattern.pipeline)
+    if (
+        pattern.scenario == EVIDENCE_ANALYSIS
+        and params.get("mode") == "internal_role"
+        and params.get("include_training") is True
+        and "recommend_training_for_task" not in pipeline_tools
+    ):
+        pipeline_tools.append("recommend_training_for_task")
+    pipeline = [{"tool": tool_name} for tool_name in pipeline_tools]
+    allowed_tools = [pattern.tool, *[tool_name for tool_name in pipeline_tools if tool_name != pattern.tool]]
     guard_flags = _guard_flags_for_route(
         missing_params=missing,
         unavailable=unavailable,
@@ -477,10 +496,10 @@ def route_ncs_query(
         "route_first": True,
         "primary_tool": pattern.tool,
         "allowed_tools": allowed_tools,
-        "required_params": list(pattern.required_params),
+        "required_params": required_params,
         "provided_params": sorted(
             key for key, value in params.items()
-            if key in pattern.required_params and not _is_missing(value)
+            if key in required_params and not _is_missing(value)
         ),
         "missing_params": missing,
         "execution_policy": {
@@ -515,7 +534,7 @@ def route_ncs_query(
             "scenario": pattern.scenario,
             "tool": pattern.tool,
             "params": params,
-            "required_params": list(pattern.required_params),
+            "required_params": required_params,
             "missing_params": missing,
             "available": not unavailable,
             "matched_signals": matched_signals,
@@ -541,7 +560,7 @@ def route_ncs_query(
         "scenario": pattern.scenario,
         "tool": pattern.tool,
         "params": params,
-        "required_params": list(pattern.required_params),
+        "required_params": required_params,
         "missing_params": missing,
         "available": not unavailable,
         "reason": pattern.reason,
@@ -776,6 +795,11 @@ def _params_for_pattern(pattern: RoutePattern, query: str) -> dict[str, Any]:
     if pattern.scenario == EVIDENCE_ANALYSIS:
         params.setdefault("query", _analysis_scope_query(query))
         params["mode"] = _analysis_mode(query)
+        if params["mode"] == "internal_role":
+            role_id = _extract_internal_role_id(query)
+            if role_id:
+                params["internal_role_id"] = role_id
+            params["include_training"] = _requests_training(query)
         return params
     if pattern.scenario == OPERATOR_REVIEW:
         params.update(_operator_review_params(query))
@@ -812,6 +836,13 @@ def _extract_transition_terms(query: str) -> dict[str, str]:
 
 def _analysis_mode(query: str) -> str:
     normalized = normalize_query(query)
+    if any(
+        signal in normalized
+        for signal in ("internal role", "enterprise role", "사내 직무", "내부 직무")
+    ):
+        return "internal_role"
+    if any(signal in normalized for signal in ("semantic", "vector", "시맨틱", "벡터")):
+        return "semantic"
     if any(signal in normalized for signal in ("qualification", "\uc790\uaca9")):
         return "qualification"
     if any(signal in normalized for signal in ("career path", "\uacbd\ub825\uac1c\ubc1c")):
@@ -819,6 +850,46 @@ def _analysis_mode(query: str) -> str:
     if any(signal in normalized for signal in ("job base", "\uc9c1\uc5c5\uae30\ucd08")):
         return "job_base"
     return "ontology"
+
+
+def _is_internal_role_request(normalized: str) -> bool:
+    """Give explicit internal-role context precedence over generic training terms."""
+    role_language = any(signal in normalized for signal in (
+        "internal role", "enterprise role",
+        "\uc0ac\ub0b4 \uc9c1\ubb34", "\ub0b4\ubd80 \uc9c1\ubb34",
+    ))
+    return bool(role_language or _extract_internal_role_id(normalized))
+
+
+def _requests_training(query: str) -> bool:
+    normalized = normalize_query(query)
+    return any(
+        signal in normalized
+        for signal in (
+            "training",
+            "course",
+            "recommend",
+            "\uad50\uc721",
+            "\ud6c8\ub828",
+            "\ucd94\ucc9c",
+        )
+    )
+
+
+def _extract_internal_role_id(query: str) -> str | None:
+    """Extract only an explicit role identifier; never infer one from a title."""
+
+    text = str(query or "")
+    patterns = (
+        r"\bncs:internal_job_role:[A-Za-z0-9:_-]+\b",
+        r"ijr[_-][A-Za-z0-9_-]+",
+        r"\b(?:internal_role_id|role_id)\s*[:=]\s*([A-Za-z0-9:_-]+)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return match.group(1) if match.lastindex else match.group(0)
+    return None
 
 
 def _operator_review_params(query: str) -> dict[str, Any]:

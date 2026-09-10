@@ -35,6 +35,12 @@ class SnapshotPublishError(RuntimeError):
     """Raised when the snapshot pair cannot be published safely."""
 
 
+def _absolute_path(path: Path) -> Path:
+    """Make *path* absolute without expanding Windows 8.3 path spelling."""
+
+    return Path(os.path.abspath(path.expanduser()))
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -61,7 +67,8 @@ def _optional_artifact(path: Path) -> dict[str, Any] | None:
 
 
 def _require_contained(root: Path, candidate: Path, *, label: str) -> Path:
-    """Resolve *candidate* and reject equality with or escape from *root*."""
+    """Reject escape using canonical paths, but preserve caller path spelling."""
+    absolute_candidate = _absolute_path(candidate)
     resolved_root = root.expanduser().resolve(strict=False)
     resolved_candidate = candidate.expanduser().resolve(strict=False)
     try:
@@ -72,7 +79,7 @@ def _require_contained(root: Path, candidate: Path, *, label: str) -> Path:
         ) from exc
     if not relative.parts:
         raise SnapshotPublishError(f"{label} must be below deploy root")
-    return resolved_candidate
+    return absolute_candidate
 
 
 def _validate_paths(
@@ -90,20 +97,22 @@ def _validate_paths(
         raise SnapshotPublishError(
             f"deploy root must be a regular directory path: {deploy_root}"
         )
-    resolved_root = deploy_root.expanduser().resolve(strict=False)
-    api_dir = _require_contained(resolved_root, resolved_root / "api", label="deploy api directory")
+    absolute_root = _absolute_path(deploy_root)
+    api_dir = _require_contained(
+        absolute_root, absolute_root / "api", label="deploy api directory"
+    )
     archive = _require_contained(
-        resolved_root, api_dir / ARCHIVE_NAME, label="archive target"
+        absolute_root, api_dir / ARCHIVE_NAME, label="archive target"
     )
     manifest = _require_contained(
-        resolved_root, api_dir / MANIFEST_NAME, label="manifest target"
+        absolute_root, api_dir / MANIFEST_NAME, label="manifest target"
     )
     if api_dir.exists() and (api_dir.is_symlink() or not api_dir.is_dir()):
         raise SnapshotPublishError(f"deploy api path must be a regular directory: {api_dir}")
     for label, target in (("archive", archive), ("manifest", manifest)):
         if target.is_symlink():
             raise SnapshotPublishError(f"{label} target must not be a symlink: {target}")
-        if target == resolved_source:
+        if target.resolve(strict=False) == resolved_source:
             raise SnapshotPublishError(f"{label} target must not be the source database")
 
     resolved_report: Path | None = None
@@ -112,7 +121,7 @@ def _validate_paths(
         if resolved_report == resolved_source:
             raise SnapshotPublishError("report path must not be the source database")
         try:
-            resolved_report.relative_to(resolved_root)
+            resolved_report.relative_to(absolute_root.resolve(strict=False))
         except ValueError:
             pass
         else:
@@ -123,7 +132,7 @@ def _validate_paths(
             resolved_report.exists() and not resolved_report.is_file()
         ):
             raise SnapshotPublishError(f"report path must be a regular file path: {resolved_report}")
-    return resolved_source, resolved_root, archive, manifest, resolved_report
+    return resolved_source, absolute_root, archive, manifest, resolved_report
 
 
 def _pair_state(archive: Path, manifest: Path) -> tuple[str, dict[str, Any]]:

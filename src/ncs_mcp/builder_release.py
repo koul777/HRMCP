@@ -25,6 +25,18 @@ class ReleaseError(RuntimeError):
     """A bounded, credential-free release failure."""
 
 
+def _absolute_path(path: str | Path) -> Path:
+    """Make *path* absolute without expanding Windows 8.3 path spelling."""
+
+    return Path(os.path.abspath(Path(path).expanduser()))
+
+
+def _is_canonically_within(path: Path, root: Path) -> bool:
+    """Check containment after normalizing both sides of a path alias."""
+
+    return path.resolve(strict=True).is_relative_to(root.resolve(strict=True))
+
+
 SOURCE_COUNT_TABLES = ('ksa_items', 'ksa_atomic_items', 'ontology_concepts',
                        'ksa_concept_links', 'ksa_atomic_concept_links')
 
@@ -133,8 +145,8 @@ def build_release(version_dir: Path, *, repo_root: Path, deploy_root: Path,
                   expected_source_sha256: str, progress: Callable | None = None,
                   runner: Callable | None = None) -> dict:
     """Build a new immutable package; refuses reuse of an existing release folder."""
-    version = Path(version_dir).resolve()
-    repo = Path(repo_root).resolve()
+    version = _absolute_path(version_dir)
+    repo = _absolute_path(repo_root)
     run = runner or _run
     tell = progress or (lambda message: None)
     report = {'schema': 'ncs_builder_release_v1', 'ok': False, 'status': 'building',
@@ -167,7 +179,12 @@ def build_release(version_dir: Path, *, repo_root: Path, deploy_root: Path,
                 continue
             original = repo / name
             relative = original.relative_to(template)
-            if (original.is_symlink() or not original.resolve().is_relative_to(template)
+            # Compare canonical paths on both sides.  GitHub Windows runners
+            # can spell ``repo`` as RUNNER~1 while resolve() expands an
+            # individual file to runneradmin; comparing that resolved child to
+            # the lexical template falsely rejects every tracked file.
+            if (original.is_symlink()
+                    or not _is_canonically_within(original, template)
                     or any(part.startswith('.env') or part in {'.state', '.vercel'} for part in relative.parts)):
                 raise ReleaseError('Deployment template contains an unsafe file.')
             allowed = (relative.suffix == '.py' or relative.as_posix() in {
@@ -238,7 +255,7 @@ def deploy_release(version_dir: Path, *, production_mcp_url: str,
                    progress: Callable | None = None, runner: Callable | None = None,
                    verifier: Callable | None = None) -> dict:
     """Stage, verify exact identity, promote, then verify the production alias."""
-    version = Path(version_dir).resolve()
+    version = _absolute_path(version_dir)
     output = version / 'release.json'
     report = json.loads(output.read_text(encoding='utf-8'))
     run = runner or _run
@@ -266,9 +283,14 @@ def deploy_release(version_dir: Path, *, production_mcp_url: str,
             raise ReleaseError('Production MCP URL must be an HTTPS /api/mcp endpoint.')
         if production_mcp_url != report['project']['production_mcp_url']:
             raise ReleaseError('Production URL does not match the explicitly selected Vercel project.')
-        stage = Path(report['stage_dir']).resolve()
-        if stage != version / 'release/deploy':
+        expected_stage = version / 'release/deploy'
+        reported_stage = _absolute_path(report['stage_dir'])
+        if reported_stage.resolve() != expected_stage.resolve():
             raise ReleaseError('Deployment directory is outside this version package.')
+        # Use the version-root spelling supplied by the caller for subprocess
+        # cwd.  This avoids mixing Windows long and 8.3 aliases while the
+        # resolved comparison above still enforces containment.
+        stage = expected_stage
         if any(Path(str(version / 'ncs.db') + suffix).exists() for suffix in ('-wal', '-journal')):
             raise ReleaseError('Prepared source has an active SQLite sidecar.')
         if _hash(version / 'ncs.db') != report['source_sha256']:

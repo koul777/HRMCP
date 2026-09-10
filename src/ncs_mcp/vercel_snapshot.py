@@ -507,7 +507,13 @@ def _acquire_lock(lock_path: Path, *, timeout_seconds: float) -> int | None:
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             os.write(fd, str(os.getpid()).encode("ascii"))
             return fd
-        except FileExistsError:
+        except (FileExistsError, PermissionError) as exc:
+            # Windows can report sharing violations for an existing exclusive
+            # lock as PermissionError rather than FileExistsError.  Both mean
+            # another cold start currently owns this lock; retry until the
+            # verified cache is published or the bounded timeout expires.
+            if isinstance(exc, PermissionError) and os.name != "nt":
+                raise
             try:
                 if time.time() - lock_path.stat().st_mtime > stale_after_seconds:
                     lock_path.unlink(missing_ok=True)

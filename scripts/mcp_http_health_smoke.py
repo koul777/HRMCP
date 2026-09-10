@@ -111,11 +111,27 @@ def main(argv: list[str] | None = None) -> int:
                 {"health": payload, "ready": ready_payload}, ensure_ascii=False
             )
             response_secret_leaked = secret in response_text
+            database = payload.get("runtime", {}).get("database", {})
+            database_ready = database.get("ready") is True
+            public_tools_ready = database.get("public_tools_ready")
+            degraded_capabilities = database.get("degraded_capabilities")
+            capability_status_consistent = bool(
+                isinstance(public_tools_ready, bool)
+                and isinstance(degraded_capabilities, list)
+                and (
+                    (public_tools_ready and not degraded_capabilities)
+                    or (not public_tools_ready and bool(degraded_capabilities))
+                )
+            )
+            expected_health_status = (
+                "ok" if database_ready and public_tools_ready else "degraded"
+            )
             ok = (
-                payload.get("status") == "ok"
+                payload.get("status") == expected_health_status
                 and payload.get("endpoint") == "/mcp"
                 and payload.get("tools", {}).get("exposed") == expected_tools
-                and payload.get("runtime", {}).get("database", {}).get("ready") is True
+                and database_ready
+                and capability_status_consistent
                 and ready_payload.get("status") == "ready"
                 and payload.get("runtime", {}).get("read_only_mode") is True
                 and payload.get("runtime", {}).get("max_concurrent_recommendations") == 2
@@ -130,7 +146,10 @@ def main(argv: list[str] | None = None) -> int:
                 "tool_count": payload.get("tools", {}).get("exposed"),
                 "expected_tool_count": expected_tools,
                 "operator_tools_enabled": payload.get("runtime", {}).get("operator_tools_enabled"),
-                "database_ready": payload.get("runtime", {}).get("database", {}).get("ready"),
+                "database_ready": database.get("ready"),
+                "public_tools_ready": public_tools_ready,
+                "degraded_capabilities": degraded_capabilities,
+                "capability_status_consistent": capability_status_consistent,
                 "ready_status": ready_payload.get("status"),
                 "read_only_mode": payload.get("runtime", {}).get("read_only_mode"),
                 "max_concurrent_recommendations": payload.get("runtime", {}).get(

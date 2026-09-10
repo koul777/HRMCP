@@ -355,10 +355,12 @@ def markdown_text(pack: Mapping[str, Any]) -> str:
             title = str(result.get("title") or "").replace("|", "\\|")
             major = result["major_scope"].get("major_name") or ""
             unit = result["unit_scope"].get("unit_name") or ""
+            major_text = str(major).replace("|", "\\|")
+            unit_text = str(unit).replace("|", "\\|")
             lines.append(
                 f"| {result['rank']} | `{result['stable_result_id']}` | "
                 f"{result['result_type']} | {title} | {result['match'].get('mode') or ''} | "
-                f"{str(major).replace('|', '\\|')} | {str(unit).replace('|', '\\|')} |"
+                f"{major_text} | {unit_text} |"
             )
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"

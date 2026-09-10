@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import sys
 import tempfile
@@ -10,6 +11,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path, PurePosixPath
+from unittest.mock import patch
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SRC = REPOSITORY_ROOT / "src"
@@ -552,6 +554,40 @@ class VercelSnapshotTests(unittest.TestCase):
             self.assertTrue(destination.is_file())
             self.assertFalse(list(destination.parent.glob("*.lock")))
             self.assertFalse(list(destination.parent.glob(".*.tmp")))
+
+    def test_windows_permission_error_during_lock_contention_is_retried(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _, archive, manifest, _ = self._create_package(root)
+            destination = root / "runtime" / COMPACT_SNAPSHOT_NAME
+            real_open = os.open
+            contention_injected = False
+
+            def open_with_windows_contention(path, flags, mode=0o777):
+                nonlocal contention_injected
+                if str(path).endswith(".lock") and not contention_injected:
+                    contention_injected = True
+                    raise PermissionError("simulated Windows sharing violation")
+                return real_open(path, flags, mode)
+
+            with patch(
+                "ncs_mcp.vercel_snapshot.os.open",
+                side_effect=open_with_windows_contention,
+            ):
+                self.assertTrue(
+                    materialize_compact_snapshot(
+                        archive,
+                        manifest,
+                        destination,
+                        lock_timeout_seconds=2,
+                    )
+                )
+
+            self.assertTrue(contention_injected)
+            self.assertTrue(destination.is_file())
+            self.assertFalse(
+                destination.with_suffix(destination.suffix + ".lock").exists()
+            )
 
     def test_rejects_nested_or_unapproved_member_name(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
