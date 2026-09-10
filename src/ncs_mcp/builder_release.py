@@ -31,6 +31,12 @@ def _absolute_path(path: str | Path) -> Path:
     return Path(os.path.abspath(Path(path).expanduser()))
 
 
+def _is_canonically_within(path: Path, root: Path) -> bool:
+    """Check containment after normalizing both sides of a path alias."""
+
+    return path.resolve(strict=True).is_relative_to(root.resolve(strict=True))
+
+
 SOURCE_COUNT_TABLES = ('ksa_items', 'ksa_atomic_items', 'ontology_concepts',
                        'ksa_concept_links', 'ksa_atomic_concept_links')
 
@@ -173,7 +179,12 @@ def build_release(version_dir: Path, *, repo_root: Path, deploy_root: Path,
                 continue
             original = repo / name
             relative = original.relative_to(template)
-            if (original.is_symlink() or not original.resolve().is_relative_to(template)
+            # Compare canonical paths on both sides.  GitHub Windows runners
+            # can spell ``repo`` as RUNNER~1 while resolve() expands an
+            # individual file to runneradmin; comparing that resolved child to
+            # the lexical template falsely rejects every tracked file.
+            if (original.is_symlink()
+                    or not _is_canonically_within(original, template)
                     or any(part.startswith('.env') or part in {'.state', '.vercel'} for part in relative.parts)):
                 raise ReleaseError('Deployment template contains an unsafe file.')
             allowed = (relative.suffix == '.py' or relative.as_posix() in {

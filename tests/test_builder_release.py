@@ -4,9 +4,11 @@ import sqlite3
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from ncs_mcp.builder_release import (
-    ReleaseError, _verify, build_release, deploy_release, project_configuration,
+    ReleaseError, _is_canonically_within, _verify, build_release, deploy_release,
+    project_configuration,
 )
 
 
@@ -62,6 +64,26 @@ class BuilderReleaseTests(unittest.TestCase):
         self.assertEqual(project_configuration(stage)['projectName'], 'selected-project')
         self.assertEqual(json.loads((stage / 'vercel.json').read_text())['env']['NCS_MCP_BUILD_ID'],
                          report['build_id'])
+
+    def test_template_containment_canonicalizes_both_root_and_child(self):
+        original_resolve = Path.resolve
+        lexical_template = self.template
+        canonical_root = self.root / 'canonical-long-name/deploy/vercel_mcp_app'
+        lexical_child = lexical_template / 'api/index.py'
+
+        def resolve_with_alias(path, *args, **kwargs):
+            if path == lexical_template:
+                return canonical_root
+            try:
+                relative = path.relative_to(lexical_template)
+            except ValueError:
+                return original_resolve(path, *args, **kwargs)
+            return canonical_root / relative
+
+        with patch.object(Path, 'resolve', resolve_with_alias):
+            contained = _is_canonically_within(lexical_child, lexical_template)
+
+        self.assertTrue(contained)
 
     def test_source_change_blocks_build(self):
         (self.version / 'ncs.db').write_bytes(b'changed')

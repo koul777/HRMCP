@@ -40,10 +40,8 @@ class VercelMcpTransportTests(unittest.TestCase):
             env["NCS_MCP_DISABLE_DNS_REBINDING_PROTECTION"] = "1"
             env["PYTHONIOENCODING"] = "utf-8"
             env["PYTHONUTF8"] = "1"
-            local_python = ROOT / ".venv" / "Scripts" / "python.exe"
-            python_executable = local_python if local_python.exists() else Path(sys.executable)
             completed = subprocess.run(
-                [str(python_executable), "-c", _TRANSPORT_CONTRACT_SCRIPT],
+                [sys.executable, "-c", _TRANSPORT_CONTRACT_SCRIPT],
                 cwd=ROOT,
                 env=env,
                 capture_output=True,

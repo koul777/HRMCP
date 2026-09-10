@@ -133,36 +133,69 @@ def _prepare_transport_security() -> None:
 def _app_with_path_prefix_fix() -> object:
     base_app = mcp.streamable_http_app()
     streamable_path = getattr(mcp.settings, "streamable_http_path", "/mcp")
-    lifespan_context = base_app.router.lifespan_context(base_app)
     lifespan_started = False
+    lifespan_task: asyncio.Task[None] | None = None
+    lifespan_ready_event: asyncio.Event | None = None
+    lifespan_shutdown_event: asyncio.Event | None = None
     lifespan_lock = asyncio.Lock()
 
-    async def _ensure_lifespan_ready() -> None:
+    async def _run_lifespan(
+        ready_event: asyncio.Event,
+        shutdown_event: asyncio.Event,
+    ) -> None:
         nonlocal lifespan_started
-        if lifespan_started:
-            return
+        try:
+            async with base_app.router.lifespan_context(base_app):
+                lifespan_started = True
+                ready_event.set()
+                await shutdown_event.wait()
+        finally:
+            lifespan_started = False
+            # Release a waiter even when lifespan startup itself fails.
+            ready_event.set()
+
+    async def _ensure_lifespan_ready() -> None:
+        nonlocal lifespan_task, lifespan_ready_event, lifespan_shutdown_event
         async with lifespan_lock:
-            if lifespan_started:
-                return
-            await lifespan_context.__aenter__()
-            lifespan_started = True
+            if lifespan_task is None:
+                lifespan_ready_event = asyncio.Event()
+                lifespan_shutdown_event = asyncio.Event()
+                lifespan_task = asyncio.create_task(
+                    _run_lifespan(lifespan_ready_event, lifespan_shutdown_event),
+                    name="ncs-vercel-mcp-lifespan",
+                )
+            task = lifespan_task
+            ready_event = lifespan_ready_event
+        assert ready_event is not None
+        await ready_event.wait()
+        if not lifespan_started:
+            await task
 
     async def _shutdown_lifespan() -> None:
-        """Close a manually started lifespan in the task that opened it.
+        """Ask the dedicated lifespan task to close and wait for it.
 
         Vercel keeps the function process alive between requests, so normal
-        request handling intentionally leaves this lifespan running.  Local
-        ASGI contract tests can call this hook before their event loop exits;
-        otherwise Python may finalize the SDK async generator from a different
-        task and AnyIO rejects the cross-task cancel-scope exit.
+        request handling intentionally leaves this task running.  The dedicated
+        owner guarantees that the AnyIO cancel scope is entered and exited by
+        the same asyncio task on Python 3.11 as well as newer runtimes.
         """
 
-        nonlocal lifespan_started
+        nonlocal lifespan_task, lifespan_ready_event, lifespan_shutdown_event
         async with lifespan_lock:
-            if not lifespan_started:
+            task = lifespan_task
+            shutdown_event = lifespan_shutdown_event
+            if task is None:
                 return
-            await lifespan_context.__aexit__(None, None, None)
-            lifespan_started = False
+            assert shutdown_event is not None
+            shutdown_event.set()
+        try:
+            await task
+        finally:
+            async with lifespan_lock:
+                if lifespan_task is task:
+                    lifespan_task = None
+                    lifespan_ready_event = None
+                    lifespan_shutdown_event = None
 
     async def app(scope, receive, send) -> None:
         if scope.get("type") == "http":
