@@ -80,6 +80,9 @@ AI의 검색과 결과물 작성을 뒷받침합니다.
 
 ### 변경 이력
 
+- **2026-09-11**: NCS DB 업데이트 빌더에 **Gold LPG 생성·Neo4j 적재·시맨틱 임베딩·MCP 상태 확인** 경로를 연결했습니다. 검증된 Builder 기준 `882,394`개 노드와 `4,465,577`개 관계를 적재했고, 수행준거·능력단위요소·KSA 개념 `778,187`건의 1,024차원 임베딩을 79개 재개 가능 shard로 반영했습니다. SQLite는 계속 원본 권위 데이터이며 Neo4j는 1~2홉 탐색과 벡터 검색을 위한 선택형 read model입니다.
+- **2026-09-11**: MCP에 Gold 스키마·상태 Resource와 `ncs_analysis`의 `internal_role`·`semantic` 모드를 추가했습니다. Neo4j가 비활성·장애 상태이면 승인되지 않은 결과를 만들지 않고 bounded unavailable 응답을 반환하며, 기존 SQLite MCP 검색·추천 경로는 그대로 유지됩니다. 사내 직무 매핑은 개인정보를 받지 않는 tenant-scoped 후보 overlay이고 사람의 승인 상태를 자동으로 부여하지 않습니다.
+- **2026-09-11**: merge commit `6ecc45d49d3a8b945d506078ec0788c139573681`을 Vercel production에 반영했습니다. 기준 URL은 변경 없이 `https://ncs-mcp-bridge-mini2.vercel.app/api/mcp`이며, 배포 후 `initialize`, 공개 도구 7/7개, 실제 도구 호출 12건, 분석 모드 4종, `/api/health`, `/api/ready`를 다시 검증했습니다.
 - **2026-09-09**: [Windows NCS DB 업데이트 빌더](docs/NCS_DATA_BUILDER.md)를 추가했습니다. `run_ncs_builder.bat`를 실행하면 **① 원본 변경분·온톨로지 → ② API 갱신 → ③ 경량 DB 생성 → ④ Vercel 반영**을 각각 별도 버튼으로 실행할 수 있습니다. 현재 작업은 처리 바이트·DB 페이지·API 페이지·능력단위 건수로 진행률을 표시하고, 하단 전체 진행률은 완료한 단계 수(`25% = 1/4단계`)를 표시합니다. 전체량이 알려지지 않은 계산은 임의 퍼센트 대신 작업명·경과시간을 표시합니다.
 - **2026-09-09**: Builder의 원본 DB 검사에서 선택적 SQLite `dbstat` 진단 모듈이 없는 환경을 처리하고, API 갱신 오류에 실패 단계·원인을 표시하도록 수정했습니다. 원본과 이전 DB를 보존하고 검증된 별도 후보만 패키징·배포합니다.
 - **2026-08-30**: 공개 MCP 기준 URL을 `https://ncs-mcp-bridge-mini2.vercel.app/api/mcp`로 일원화했습니다. 이전 구버전 엔드포인트 `https://ncs-mcp-bridge.vercel.app/api/mcp`는 현재 `404`로 종료되며 신규 연결에 사용하지 않습니다.
@@ -102,7 +105,7 @@ AI의 검색과 결과물 작성을 뒷받침합니다.
 
 ---
 
-## 📊 검색 성능·배포 상태 (2026-08-30)
+## 📊 검색 성능·배포 상태 (2026-09-11)
 
 공개 서비스는 DB 용량을 늘리는 FTS 인덱스 대신, 질의를 토큰으로 분해해 단계적으로 완화하는 검색 경로를
 사용합니다. 검색 순서는 `문구 일치 → 토큰 AND → 토큰 OR`이며, 결과 유형별로 필요한 단계만 실행합니다.
@@ -117,7 +120,7 @@ AI의 검색과 결과물 작성을 뒷받침합니다.
 | 원격 readiness warm p50 | `1,434.019 ms → 235.134 ms` (`83.6%` 단축) |
 | 새 preview 3회 첫 요청 p50 | `5,186.377 ms` |
 | 첫 요청 중 snapshot bootstrap p50 | `4,554.211 ms` |
-| 전체 단위 테스트 | `1,828개 통과`, `1개 skip` |
+| 전체 단위 테스트(로컬) | 총 `2,108개` 실행: `2,105개 통과`, `3개 skip` |
 
 `ncs_search`는 `offset`과 `next_offset`을 제공해 5건 이후 결과에도 접근할 수 있습니다.
 `scope="all"`은 능력단위, 능력단위요소, 수행준거, KSA가 한 유형에 선점되지 않도록 유형별 결과를
@@ -125,7 +128,7 @@ AI의 검색과 결과물 작성을 뒷받침합니다.
 이를 근거로 Recall, MRR, nDCG가 개선됐다고 주장하지 않습니다.
 
 Vercel에는 전체 원본 DB가 아니라 검증된 compact SQLite snapshot을 배포합니다. 현재 snapshot은
-`425,758,720 bytes`, 압축 ZIP은 `120,785,873 bytes`이며, 빌드 하드 캡은 `480 MB`, 소프트 캡은
+`446,017,536 bytes`, 압축 ZIP은 `125,839,523 bytes`이며, 빌드 하드 캡은 `480 MB`, 소프트 캡은
 `460 MB`입니다. FTS5 인덱스는 배포 시 `/tmp` 여유와 콜드스타트 안정성을 해칠 수 있어 현재 릴리스에는
 포함하지 않았습니다. 무결성 확인을 위한 SHA-256과 `fsync`는 유지합니다.
 
@@ -405,16 +408,18 @@ ChatGPT 연결은 주소 한 줄(`/api/mcp`)만 넣으면 됩니다. 전체 배�
 `docs/README_VERCEL_HTTPS.md`를 참고하세요.
 
 - 기준 입력은 운영자가 준비한 단일 canonical DB `data/processed/ncs.db`
-  (12,648,931,328 bytes)입니다. Publisher가 이를 stage·verify한 뒤 compact SQLite
-  (425,758,720 bytes)와 `api/ncs_ontology_compact.zip`(120,785,873 bytes), manifest
+  (12,680,593,408 bytes)입니다. Publisher가 이를 stage·verify한 뒤 compact SQLite
+  (446,017,536 bytes)와 `api/ncs_ontology_compact.zip`(125,839,523 bytes), manifest
   쌍을 원자적으로 publish합니다. 실패하면 기존 쌍을 rollback합니다.
 - `deploy/vercel_mcp_app/vercel.json`은 함수 진입점(`api/index.py`)과 ZIP/manifest
-  포함 규칙을 정의합니다. 측정된 production function bundle은 131.54MB입니다.
+  포함 규칙을 정의합니다. 측정된 production function file mapping은 175,195,865 bytes,
+  1,836개 파일이며 500,000,000 bytes 상한 검사를 통과했습니다.
 - `api/mcp.py`는 시작 시 ZIP과 manifest를 검증한 뒤 `/tmp/ncs_ontology_compact.db`에
   DB를 materialize하여 read-only로 엽니다. 요청 시 NCS API를 수집하거나 AI 모델을
   호출하지 않습니다. `NCS_DB_URL`은 표준 배포 의존성이 아닙니다.
 - 현재 production MCP URL은 `https://ncs-mcp-bridge-mini2.vercel.app/api/mcp`이고,
-  배포 식별자는 `dpl_94usxf3AP6AjSdN8cySr1bu9fJK7`입니다.
+  배포 식별자는 `dpl_AdRVzdP3bJf1dJHLL8jXj8DYy6KP`, 서버 빌드 식별자는
+  `0.1.0+git.6ecc45d49d3a8b945d506078ec0788c139573681`입니다.
 
 Vercel 런타임 설정은 `deploy/vercel_mcp_app/vercel.json`에 포함되어 있습니다.
 
@@ -546,6 +551,23 @@ ID를 한 행의 압축 목록(posting)에 묶어 저장하므로, SQLite의 물
 다릅니다.
 건수는 현재 검증된 배포 데이터 기준이며, 원 NCS 데이터와 API 자료가 갱신되면 달라질 수 있습니다.
 
+### Gold LPG·Neo4j 운영 경계
+
+Gold LPG는 SQLite의 NCS·온톨로지 근거를 LLM/MCP가 짧은 탐색으로 회수할 수 있게 만든 **선택형
+read model**입니다. 현재 Builder에서 검증한 `serving_core`는 `882,394`개 노드와 `4,465,577`개
+관계이며, 수행준거·능력단위요소·KSA 개념 `778,187`건에 동일한 1,024차원 임베딩을 적용했습니다.
+79개 shard는 모두 재개 가능한 방식으로 적재됐고 cosine vector index 3개를 생성했습니다.
+
+| 계층 | 역할과 현재 운영 상태 |
+| --- | --- |
+| **SQLite canonical DB** | Bronze/Silver 전처리와 전체 온톨로지·추천 근거의 권위 데이터. 원천 KSA와 사람 검토 상태를 보존합니다. |
+| **Neo4j Gold LPG** | 직무→KSA, 사내 직무→NCS 직무→KSA 같은 1~2홉 탐색과 시맨틱 벡터 검색을 위한 로컬/엔터프라이즈 선택 경로입니다. 실패하면 폐기·재생성할 수 있습니다. |
+| **공개 Vercel MCP** | 현재는 Neo4j 접속정보 없이 compact SQLite를 읽기 전용으로 서비스합니다. 따라서 Gold가 꺼져 있어도 기존 URL과 검색·추천 도구가 중단되지 않습니다. |
+| **InternalJobRole overlay** | 조직이 제공한 비개인 역할만 후보로 매핑합니다. 현재 검증 실행에는 승인된 사내 역할 데이터가 없어 overlay가 비활성이고, 매핑 결과를 자동 승인하지 않습니다. |
+
+Gold의 고정 스키마, 안전한 dry-run/apply, 임베딩·vector index, Builder와 MCP 연결 방법은
+[Neo4j Gold LPG 운영 가이드](docs/NEO4J_GOLD_LPG.md)에 정리했습니다.
+
 ### HR에서 달라지는 6가지 활용
 
 | HR 업무 | 온톨로지가 지원하는 작업 |
@@ -586,8 +608,8 @@ Vercel에는 전체 운영 DB 대신 온톨로지와 교육 추천에 필요한 
 처리합니다.
 
 릴리스는 추적된 파일만 복사한 clean staging에서 조립하며, 실제 Vercel `filePathMap`에서 원본 DB가
-0건인지 확인합니다. 현재 검증된 함수 매핑 총량은 169,354,715 bytes이고, 런타임에 펼쳐지는
-SQLite는 425,758,720 bytes입니다. 압축 해제 공간의 여유가 크지 않으므로 DB가 증가하면 Builder의
+0건인지 확인합니다. 현재 검증된 함수 매핑 총량은 175,195,865 bytes이고, 런타임에 펼쳐지는
+SQLite는 446,017,536 bytes입니다. 압축 해제 공간의 여유가 크지 않으므로 DB가 증가하면 Builder의
 축소 기준과 `/tmp` 사용량을 다시 점검해야 합니다.
 
 - [경량 DB Builder·Refresh Builder·Vercel 배포 절차](docs/VERCEL_SNAPSHOT_BUILDER.md)
