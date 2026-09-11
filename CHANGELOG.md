@@ -45,3 +45,9 @@
 - Documented the open-source release quick start, runtime scope, and API key
   handling expectations.
 - Added a release-readable README for the NCS-centered MCP surface.
+## 2026-09-11
+
+- Increased fallback search weighting for `competency_units.api_definition` so
+  concrete task evidence can outrank a name-only candidate while keeping unit
+  names as the strongest field. Added a regression test and kept the source and
+  Vercel mirror byte-identical.

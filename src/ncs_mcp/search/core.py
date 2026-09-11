@@ -133,6 +133,10 @@ _NCS_SEARCH_GENERIC_TOKEN_FACTOR = 0.3
 # measured over unit names, the highest weighted field, and normalized to
 # (0, 1] so score magnitudes stay in the range the tiers already assume.
 _NCS_SEARCH_IDF_FLOOR = 0.05
+# Definitions describe the work performed by a unit.  Give them enough weight
+# to beat a name-only candidate when the query contains concrete task terms,
+# while keeping the unit name as the strongest single field.
+_NCS_SEARCH_DEFINITION_WEIGHT = 2.0
 # Public-search recall equivalences bridge practitioner language to official NCS
 # names.  They are candidate-only expansions, not source evidence or DB writes.
 _NCS_SEARCH_QUERY_EQUIVALENTS = {
@@ -858,7 +862,7 @@ def search_ncs(
                 ("c.small_name", 2.0),
                 ("c.middle_name", 1.0),
                 ("c.major_name", 1.0),
-                ("cu.api_definition", 1.0),
+                ("cu.api_definition", _NCS_SEARCH_DEFINITION_WEIGHT),
             )
             tiers = _active_tier_predicates()(
                 columns,

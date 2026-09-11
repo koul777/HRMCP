@@ -178,6 +178,11 @@ class NcsSearchRecallTests(unittest.TestCase):
             ("U_HEAT_2", "퀜칭열처리", "금속을 열처리한다", "3", 6),
             ("U_HEAT_3", "진공열처리", "진공에서 열처리한다", "3", 6),
             ("U_SEVERANCE", "퇴직정산지원", "퇴직 정산 업무를 지원한다", "4", 1),
+            # The expected unit has concrete task terms in its definition,
+            # while the competing name shares more query words. Definition
+            # weighting should make the evidence-rich unit win.
+            ("U_DEFINITION_RICH", "핵심인재관리", "인재를 선발하고 육성하는 기준을 운영한다", "5", 1),
+            ("U_NAME_HEAVY", "인재 선발 전략", "인재 관련 교육을 지원한다", "5", 1),
         )
         conn.executemany("INSERT INTO competency_units VALUES (?, ?, ?, ?, ?)", units)
         conn.execute(
@@ -304,6 +309,12 @@ class NcsSearchRecallTests(unittest.TestCase):
         result = server.search_ncs("퇴직정산 처리", scope="unit", limit=5)
 
         self.assertEqual(result["results"][0]["id"], "U_SEVERANCE")
+
+    def test_definition_evidence_can_beat_name_only_candidate(self) -> None:
+        result = server.search_ncs("인재 선발 육성", scope="unit", limit=5)
+
+        self.assertEqual(result["match_mode"], "token_and")
+        self.assertEqual(result["results"][0]["id"], "U_DEFINITION_RICH")
 
     def test_token_idf_weights_scan_the_corpus_once(self) -> None:
         from ncs_mcp.search import core as search_core
