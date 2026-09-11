@@ -51,3 +51,9 @@
   concrete task evidence can outrank a name-only candidate while keeping unit
   names as the strongest field. Added a regression test and kept the source and
   Vercel mirror byte-identical.
+- Added a bounded second-stage task/KSA evidence reranker for the weakest
+  `token_or` unit fallback. It only inspects already retrieved candidates and
+  applies a boost when at least two independent query tokens occur in attached
+  criteria/KSA evidence, avoiding full-corpus scans and single-word noise.
+  Canonical holdout Hit@3 improved from `0.5490` to `0.5882` (28 -> 30 of 51)
+  while the 40-query development Hit@1 stayed at `0.7750`.

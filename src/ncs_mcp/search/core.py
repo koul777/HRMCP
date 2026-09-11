@@ -137,6 +137,10 @@ _NCS_SEARCH_IDF_FLOOR = 0.05
 # to beat a name-only candidate when the query contains concrete task terms,
 # while keeping the unit name as the strongest single field.
 _NCS_SEARCH_DEFINITION_WEIGHT = 2.0
+# Task/KSA evidence is a supporting signal for the weakest lexical fallback.
+# It is deliberately below the unit-name/definition weights so that broad
+# evidence cannot override an exact or token-AND match.
+_NCS_SEARCH_TASK_KSA_WEIGHT = 0.5
 # Public-search recall equivalences bridge practitioner language to official NCS
 # names.  They are candidate-only expansions, not source evidence or DB writes.
 _NCS_SEARCH_QUERY_EQUIVALENTS = {
@@ -518,6 +522,153 @@ def _ncs_search_fallback_ranking(
     return score_clause, meaningful_clause, rank_params
 
 
+def _ncs_search_unit_task_ksa_scores(
+    conn: Any,
+    unit_codes: list[str],
+    fallback_tokens: list[str],
+    token_weights: dict[str, float] | None = None,
+) -> dict[str, float]:
+    """Score task/KSA evidence for an already retrieved unit candidate set.
+
+    This is intentionally a second-stage lookup.  It never scans the full
+    criteria/KSA corpus for every query: only unit codes already returned by
+    the lexical fallback are fetched through the element indexes.  Evidence
+    contributes once per matched query token, avoiding a verbosity bias toward
+    units with more criteria rows.
+    """
+    candidates = list(dict.fromkeys(str(code) for code in unit_codes if code))
+    tokens = list(dict.fromkeys(token for token in fallback_tokens if token))
+    if not candidates or not tokens:
+        return {}
+    parameters = {
+        f"task_ksa_unit_{index}": code
+        for index, code in enumerate(candidates)
+    }
+    placeholders = ", ".join(f":{name}" for name in parameters)
+    rows = conn.execute(
+        f"""
+        SELECT ce.unit_code, pc.criteria_text_raw AS evidence_text
+        FROM competency_elements ce
+        JOIN performance_criteria pc ON pc.element_id = ce.element_id
+        WHERE ce.unit_code IN ({placeholders})
+          AND pc.criteria_text_raw IS NOT NULL
+        UNION ALL
+        SELECT ce.unit_code, pc.criteria_text_refined AS evidence_text
+        FROM competency_elements ce
+        JOIN performance_criteria pc ON pc.element_id = ce.element_id
+        WHERE ce.unit_code IN ({placeholders})
+          AND pc.criteria_text_refined IS NOT NULL
+        UNION ALL
+        SELECT ce.unit_code, ki.ksa_text_raw AS evidence_text
+        FROM competency_elements ce
+        JOIN ksa_items ki ON ki.element_id = ce.element_id
+        WHERE ce.unit_code IN ({placeholders})
+          AND ki.ksa_text_raw IS NOT NULL
+        UNION ALL
+        SELECT ce.unit_code, ki.ksa_text_refined AS evidence_text
+        FROM competency_elements ce
+        JOIN ksa_items ki ON ki.element_id = ce.element_id
+        WHERE ce.unit_code IN ({placeholders})
+          AND ki.ksa_text_refined IS NOT NULL
+        """,
+        parameters,
+    ).fetchall()
+    evidence_by_unit: dict[str, list[str]] = {code: [] for code in candidates}
+    for row in rows:
+        evidence_by_unit.setdefault(str(row["unit_code"]), []).append(
+            str(row["evidence_text"] or "")
+        )
+    weights = token_weights or {}
+    scores: dict[str, float] = {}
+    for code, evidence_rows in evidence_by_unit.items():
+        score = 0.0
+        matched_token_count = 0
+        for token in tokens:
+            if any(
+                _ncs_search_boundary_match(evidence, token) == 1
+                for evidence in evidence_rows
+            ):
+                matched_token_count += 1
+                token_factor = weights.get(
+                    token,
+                    _NCS_SEARCH_GENERIC_TOKEN_FACTOR
+                    if token.casefold() in _NCS_SEARCH_GENERIC_TOKENS
+                    else 1.0,
+                )
+                score += _NCS_SEARCH_TASK_KSA_WEIGHT * token_factor
+        # One generic task/KSA word is too weak to overturn a lexical result;
+        # require two independent query tokens before enabling the boost.
+        scores[code] = score if matched_token_count >= 2 else 0.0
+    return scores
+
+
+def _ncs_search_unit_fallback_score(
+    item: dict[str, Any],
+    fallback_tokens: list[str],
+    token_expansions: dict[str, list[str]] | None,
+    token_weights: dict[str, float] | None,
+) -> float:
+    """Reconstruct the lexical fallback score for stable second-stage sorting."""
+    fields = item.get("_search_fields") or {}
+    weighted_fields = (
+        ("unit_name", 3.0),
+        ("alias", 3.0),
+        ("classification", 1.5),
+        ("definition", _NCS_SEARCH_DEFINITION_WEIGHT),
+    )
+    expansions = token_expansions or {}
+    weights = token_weights or {}
+    score = 0.0
+    for token in fallback_tokens:
+        token_factor = weights.get(
+            token,
+            _NCS_SEARCH_GENERIC_TOKEN_FACTOR
+            if token.casefold() in _NCS_SEARCH_GENERIC_TOKENS
+            else 1.0,
+        )
+        terms = [token, *expansions.get(token, [])]
+        for field_name, field_weight in weighted_fields:
+            field_value = fields.get(field_name)
+            if any(
+                _ncs_search_boundary_match(field_value, term) == 1
+                for term in terms
+            ):
+                score += field_weight * token_factor
+    return score
+
+
+def _rerank_ncs_unit_task_ksa_candidates(
+    candidates: list[dict[str, Any]],
+    task_ksa_scores: dict[str, float],
+    fallback_tokens: list[str],
+    token_expansions: dict[str, list[str]] | None,
+    token_weights: dict[str, float] | None,
+) -> list[dict[str, Any]]:
+    """Apply supporting task/KSA evidence only within the OR fallback tier."""
+    if not candidates or not task_ksa_scores:
+        return candidates
+    scored = []
+    for index, item in enumerate(candidates):
+        code = str(item.get("id") or "")
+        lexical_score = _ncs_search_unit_fallback_score(
+            item,
+            fallback_tokens,
+            token_expansions,
+            token_weights,
+        )
+        scored.append(
+            (
+                lexical_score + task_ksa_scores.get(code, 0.0),
+                -index,
+                item,
+            )
+        )
+    return [
+        item
+        for _, _, item in sorted(scored, key=lambda row: (-row[0], -row[1]))
+    ]
+
+
 def _ncs_search_tier_predicates(
     columns: tuple[str, ...],
     phrase: str,
@@ -833,6 +984,7 @@ def search_ncs(
     raw_candidates: dict[str, list[dict[str, Any]]] = {
         item_type: [] for item_type in requested_types
     }
+    unit_task_ksa_scores: dict[str, float] = {}
     with _required_runtime_helper("open_db", _OPEN_DB_FACTORY)() as conn:
         _register_ncs_search_udfs(conn)
         token_expansions = _active_token_expander()(
@@ -963,6 +1115,17 @@ def search_ncs(
                             "alias": row["alias_search_text"],
                         },
                     }
+                )
+            selected_unit_tier = min(
+                (item["_match_tier"] for item in raw_candidates["unit"]),
+                default=None,
+            )
+            if selected_unit_tier == 3:
+                unit_task_ksa_scores = _ncs_search_unit_task_ksa_scores(
+                    conn,
+                    [item["id"] for item in raw_candidates["unit"]],
+                    fallback_tokens,
+                    token_weights,
                 )
 
         if "element" in requested_types:
@@ -1157,6 +1320,14 @@ def search_ncs(
         ]
         for item_type in requested_types
     }
+    if selected_tier_by_type.get("unit") == 3 and unit_task_ksa_scores:
+        candidates_by_type["unit"] = _rerank_ncs_unit_task_ksa_candidates(
+            candidates_by_type["unit"],
+            unit_task_ksa_scores,
+            fallback_tokens,
+            token_expansions,
+            token_weights,
+        )
     merged = _round_robin_ncs_search_results(candidates_by_type, requested_types)
     page_end = applied_offset + max_rows
     page = merged[applied_offset:page_end]

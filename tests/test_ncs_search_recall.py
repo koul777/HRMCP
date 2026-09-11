@@ -183,6 +183,8 @@ class NcsSearchRecallTests(unittest.TestCase):
             # weighting should make the evidence-rich unit win.
             ("U_DEFINITION_RICH", "핵심인재관리", "인재를 선발하고 육성하는 기준을 운영한다", "5", 1),
             ("U_NAME_HEAVY", "인재 선발 전략", "인재 관련 교육을 지원한다", "5", 1),
+            ("U_TASK_SIGNAL", "project planning", "", "5", 1),
+            ("U_NAME_ONLY", "project management", "", "5", 1),
         )
         conn.executemany("INSERT INTO competency_units VALUES (?, ?, ?, ?, ?)", units)
         conn.execute(
@@ -196,6 +198,8 @@ class NcsSearchRecallTests(unittest.TestCase):
             (2, "급여 운영", "U_HIRE_2"),
             (3, "분석 방법", "U_EXACT"),
             (4, "data workflow analysis", "U_ASCII"),
+            (5, "project planning", "U_TASK_SIGNAL"),
+            (6, "project management", "U_NAME_ONLY"),
         )
         conn.executemany("INSERT INTO competency_elements VALUES (?, ?, ?)", elements)
         criteria = (
@@ -203,6 +207,8 @@ class NcsSearchRecallTests(unittest.TestCase):
             (2, "채용 운영 계획을 검토한다", None, 1),
             (3, "급여 운영 계획을 검토한다", None, 2),
             (4, "data workflow analysis", None, 4),
+            (5, "project planning uses a rare deliverable roadmap", None, 5),
+            (6, "common project administration", None, 6),
         )
         conn.executemany("INSERT INTO performance_criteria VALUES (?, ?, ?, ?)", criteria)
         ksa = (
@@ -210,6 +216,8 @@ class NcsSearchRecallTests(unittest.TestCase):
             (2, "skill", "급여 운영 도구 활용 기술", None, 2),
             (3, "skill", "데이터 품질 점검 기술", None, 3),
             (4, "skill", "data workflow analysis", None, 4),
+            (5, "skill", "rare deliverable roadmap", None, 5),
+            (6, "skill", "common project administration", None, 6),
         )
         conn.executemany("INSERT INTO ksa_items VALUES (?, ?, ?, ?, ?)", ksa)
 
@@ -315,6 +323,12 @@ class NcsSearchRecallTests(unittest.TestCase):
 
         self.assertEqual(result["match_mode"], "token_and")
         self.assertEqual(result["results"][0]["id"], "U_DEFINITION_RICH")
+
+    def test_task_ksa_evidence_reranks_or_fallback_candidates(self) -> None:
+        result = server.search_ncs("project rare roadmap", scope="unit", limit=5)
+
+        self.assertEqual(result["match_mode"], "token_or")
+        self.assertEqual(result["results"][0]["id"], "U_TASK_SIGNAL")
 
     def test_token_idf_weights_scan_the_corpus_once(self) -> None:
         from ncs_mcp.search import core as search_core
@@ -446,7 +460,11 @@ class NcsSearchRecallTests(unittest.TestCase):
             "performance_criteria pc",
             "ksa_items ki",
         ):
-            statements = [sql for sql in self.sql_statements if f"FROM {table}" in sql]
+            statements = [
+                sql
+                for sql in self.sql_statements
+                if f"FROM {table}" in sql and "evidence_text" not in sql
+            ]
             self.assertEqual(len(statements), 3, table)
 
     def test_all_scope_keeps_each_types_best_available_match_tier(self) -> None:
