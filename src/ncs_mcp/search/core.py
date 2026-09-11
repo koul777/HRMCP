@@ -317,7 +317,11 @@ def _ncs_search_like_any(columns: tuple[str, ...], parameter: str) -> str:
 def _ncs_search_boundary_any(columns: tuple[str, ...], parameter: str) -> str:
     """Build a parameter-bound lexical-boundary predicate for SQL search."""
     return "(" + " OR ".join(
-        f"ncs_search_match(COALESCE({column}, ''), :{parameter}) = 1"
+        # Keep the cheap SQLite LIKE prefilter ahead of the Python UDF.  The
+        # UDF preserves lexical-boundary semantics, while LIKE avoids calling
+        # it for the vast majority of rows in the large criteria/KSA tables.
+        f"(COALESCE({column}, '') LIKE '%' || :{parameter} || '%' "
+        f"AND ncs_search_match(COALESCE({column}, ''), :{parameter}) = 1)"
         for column in columns
     ) + ")"
 
