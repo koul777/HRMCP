@@ -733,6 +733,28 @@ class PublicMcpPayloadContractTests(unittest.TestCase):
         self.assertLessEqual(len(content_text), 2_000, len(content_text))
         self.assertIn(SOURCE_FOOTER, content_text)
 
+    def test_discover_tools_has_one_compact_structured_route(self) -> None:
+        wire, text = self._call_tool_wire(
+            "ncs_discover_tools",
+            {"intent": "인사담당자 채용 직무 능력단위 찾기"},
+        )
+
+        structured = wire.get("structuredContent")
+        self.assertIsInstance(structured, dict)
+        self.assertEqual(
+            structured["response_schema_version"],
+            "ncs_discover_tools_v2",
+        )
+        self.assertNotIn("data", structured)
+        self.assertEqual(structured["query_route"]["tool"], "ncs_search")
+        self.assertEqual(
+            json.dumps(wire, ensure_ascii=False).count('"query_route"'),
+            1,
+        )
+        self.assertLessEqual(len(json.dumps(wire, ensure_ascii=False).encode("utf-8")), 8_000)
+        self.assertLessEqual(len(text), 800)
+        self.assertIn("`ncs_search`", text)
+
     def test_ncs_search_markdown_stays_under_budget_and_preserves_ids(self) -> None:
         search_wire, search_text = self._call_tool_wire(
             "ncs_search",

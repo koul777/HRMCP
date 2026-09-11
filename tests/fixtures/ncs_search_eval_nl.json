@@ -1,0 +1,202 @@
+[
+  {
+    "query": "연봉 협상",
+    "expected_unit_codes": ["0202020108_23v4"],
+    "category": "인사"
+  },
+  {
+    "query": "퇴직금 정산",
+    "expected_unit_codes": ["0202020114_23v5", "0202020109_23v5"],
+    "category": "인사"
+  },
+  {
+    "query": "신입사원 온보딩",
+    "expected_unit_codes": ["0202020103_23v4", "0202020107_23v4"],
+    "category": "인사"
+  },
+  {
+    "query": "직무 분석",
+    "expected_unit_codes": ["0202020102_23v3", "0403010313_22v3", "0403010314_22v3"],
+    "category": "인사"
+  },
+  {
+    "query": "근태 관리",
+    "expected_unit_codes": ["0202020109_23v5"],
+    "category": "인사"
+  },
+  {
+    "query": "승진 심사",
+    "expected_unit_codes": ["0202020104_23v4"],
+    "category": "인사"
+  },
+  {
+    "query": "인력 수급 계획",
+    "expected_unit_codes": ["0202020101_23v3", "0202020104_23v4"],
+    "category": "인사"
+  },
+  {
+    "query": "성과평가 제도 설계",
+    "expected_unit_codes": ["0202020105_23v3"],
+    "category": "인사"
+  },
+  {
+    "query": "노사 협의",
+    "expected_unit_codes": ["0202020207_23v3"],
+    "category": "노무"
+  },
+  {
+    "query": "노동조합 교섭 준비",
+    "expected_unit_codes": ["0202020203_23v3"],
+    "category": "노무"
+  },
+  {
+    "query": "단체협약 체결",
+    "expected_unit_codes": ["0202020204_19v2"],
+    "category": "노무"
+  },
+  {
+    "query": "취업규칙 개정",
+    "expected_unit_codes": ["0202020205_19v2"],
+    "category": "노무"
+  },
+  {
+    "query": "노동쟁의 파업 대응",
+    "expected_unit_codes": ["0202020206_19v2"],
+    "category": "노무"
+  },
+  {
+    "query": "직원 고충 처리",
+    "expected_unit_codes": ["0202020209_23v3"],
+    "category": "노무"
+  },
+  {
+    "query": "노사관계 성과 평가",
+    "expected_unit_codes": ["0202020210_19v2"],
+    "category": "노무"
+  },
+  {
+    "query": "노사 교육 계획",
+    "expected_unit_codes": ["0202020202_19v2"],
+    "category": "노무"
+  },
+  {
+    "query": "직원 교육훈련 계획 수립",
+    "expected_unit_codes": ["0202020107_23v4"],
+    "category": "교육"
+  },
+  {
+    "query": "교육 수요 조사",
+    "expected_unit_codes": ["0403010202_22v2", "0403010209_22v3"],
+    "category": "교육"
+  },
+  {
+    "query": "사내 교육과정 설계",
+    "expected_unit_codes": ["0403010209_22v3"],
+    "category": "교육"
+  },
+  {
+    "query": "교육과정 운영 준비",
+    "expected_unit_codes": ["0403010204_16v2"],
+    "category": "교육"
+  },
+  {
+    "query": "교육 성과 측정",
+    "expected_unit_codes": ["0403010206_22v3"],
+    "category": "교육"
+  },
+  {
+    "query": "교육 사후 현업 적용",
+    "expected_unit_codes": ["0403010207_16v2"],
+    "category": "교육"
+  },
+  {
+    "query": "역량 모델 개발",
+    "expected_unit_codes": ["0403010215_22v2"],
+    "category": "교육"
+  },
+  {
+    "query": "교육비 환급 신청",
+    "expected_unit_codes": ["0403010214_22v2"],
+    "category": "교육"
+  },
+  {
+    "query": "사내 행사 기획",
+    "expected_unit_codes": ["0202010102_25v3"],
+    "category": "총무"
+  },
+  {
+    "query": "사무용품 구매",
+    "expected_unit_codes": ["0202010104_25v3"],
+    "category": "총무"
+  },
+  {
+    "query": "법인 차량 운영",
+    "expected_unit_codes": ["0202010105_25v3"],
+    "category": "총무"
+  },
+  {
+    "query": "외주 용역 업체 선정",
+    "expected_unit_codes": ["0202010106_25v3"],
+    "category": "총무"
+  },
+  {
+    "query": "출장 증명서 발급 지원",
+    "expected_unit_codes": ["0202010107_25v3"],
+    "category": "총무"
+  },
+  {
+    "query": "문서 보관 폐기",
+    "expected_unit_codes": ["0202010108_25v3"],
+    "category": "총무"
+  },
+  {
+    "query": "사내 복지 시설 운영",
+    "expected_unit_codes": ["0202010109_25v3"],
+    "category": "총무"
+  },
+  {
+    "query": "사옥 보안 사고 예방",
+    "expected_unit_codes": ["0202010110_25v3"],
+    "category": "총무"
+  },
+  {
+    "query": "회계 전표 처리",
+    "expected_unit_codes": ["0203020101_20v4"],
+    "category": "회계"
+  },
+  {
+    "query": "제조 원가 계산",
+    "expected_unit_codes": ["0203020103_20v4"],
+    "category": "회계"
+  },
+  {
+    "query": "월말 결산 마감",
+    "expected_unit_codes": ["0203020104_23v5"],
+    "category": "회계"
+  },
+  {
+    "query": "재무제표 작성",
+    "expected_unit_codes": ["0203020112_23v5"],
+    "category": "회계"
+  },
+  {
+    "query": "원천세 신고",
+    "expected_unit_codes": ["0203020204_23v6"],
+    "category": "회계"
+  },
+  {
+    "query": "부가세 신고",
+    "expected_unit_codes": ["0203020205_23v6"],
+    "category": "회계"
+  },
+  {
+    "query": "법인세 신고",
+    "expected_unit_codes": ["0203020214_23v6"],
+    "category": "회계"
+  },
+  {
+    "query": "절세 방안 검토",
+    "expected_unit_codes": ["0203020212_23v5"],
+    "category": "회계"
+  }
+]

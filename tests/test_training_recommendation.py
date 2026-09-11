@@ -8300,7 +8300,7 @@ class TrainingRecommendationTests(unittest.TestCase):
 
         discovered_names = [
             tool["name"]
-            for category in discovery["data"]["matched_categories"]
+            for category in discovery["matched_categories"]
             for tool in category["tools"]
         ]
         # Advanced ontology/transition tools are hidden by default, so discovery
@@ -8308,8 +8308,10 @@ class TrainingRecommendationTests(unittest.TestCase):
         self.assertIn("recommend_training_for_task", discovered_names)
         self.assertNotIn("recommend_training_transition", discovered_names)
         self.assertNotIn("plan_ncs_education_path", discovered_names)
-        self.assertIn("route_fingerprint", discovery["data"]["query_route"])
-        self.assertIn("guard_flags", discovery["data"]["query_route"])
+        self.assertEqual(discovery["response_schema_version"], "ncs_discover_tools_v2")
+        self.assertNotIn("data", discovery)
+        self.assertIn("route_fingerprint", discovery["query_route"])
+        self.assertIn("guard_flags", discovery["query_route"])
         self.assertTrue(execute_result["ok"])
         self.assertEqual(execute_result["meta_execution"]["tool_name"], "ncs_search")
         self.assertEqual(execute_result["meta_execution"]["query_route"]["tool"], "ncs_search")

@@ -44,7 +44,7 @@ jobs:
           python -m pip check
 
       - name: Compile key modules
-        run: python -m py_compile src\ncs_mcp\server.py src\ncs_mcp\institutional_chat.py src\ncs_mcp\tool_registry.py src\ncs_mcp\error_codes.py src\ncs_mcp\helpers.py src\ncs_mcp\smoke_data.py scripts\ncs_harness.py scripts\mcp_stdio_smoke.py scripts\mcp_http_health_smoke.py scripts\institutional_chat_smoke.py scripts\package_install_smoke.py scripts\prepare_serving_database.py scripts\benchmark_chatbot_readiness.py scripts\institutional_chatbot_readiness_report.py scripts\export_mcp_tool_contract.py scripts\check_text_encoding.py scripts\check_deployment_source_boundary.py scripts\build_deployment_source_manifest.py scripts\summarize_preview_release_evidence.py scripts\release_readiness_report.py
+        run: python -m py_compile src\ncs_mcp\server.py src\ncs_mcp\institutional_chat.py src\ncs_mcp\tool_registry.py src\ncs_mcp\error_codes.py src\ncs_mcp\helpers.py src\ncs_mcp\smoke_data.py scripts\ncs_harness.py scripts\mcp_stdio_smoke.py scripts\mcp_http_health_smoke.py scripts\institutional_chat_smoke.py scripts\package_install_smoke.py scripts\prepare_serving_database.py scripts\benchmark_chatbot_readiness.py scripts\institutional_chatbot_readiness_report.py scripts\audit_ncs_search_precision.py scripts\export_mcp_tool_contract.py scripts\check_text_encoding.py scripts\check_deployment_source_boundary.py scripts\build_deployment_source_manifest.py scripts\summarize_preview_release_evidence.py scripts\release_readiness_report.py
 
       - name: Check MCP tool contract
         run: python scripts\export_mcp_tool_contract.py --check --out mcp\ncs-tool-contract.json
@@ -61,6 +61,13 @@ jobs:
         run: python -m unittest discover -s tests -v
         env:
           NCS_DB_PATH: ci-smoke\ncs.db
+
+      - name: Run natural-language search Hit@3 gate
+        run: python scripts\audit_ncs_search_precision.py --nl-eval --compare-stage1-baseline --input tests\fixtures\ncs_search_eval_nl.json --db data\processed\ncs.db --limit 10 --hit3-threshold 0.7 --out ci-artifacts\ncs_search_eval_nl.json --markdown-out ci-artifacts\ncs_search_eval_nl.md
+        env:
+          # Initial rollout is warning-only. Set true when CI has the full SQLite DB
+          # and the reviewed Hit@3 threshold is ready to block merges.
+          NCS_SEARCH_EVAL_ENFORCE: "false"
 
       - name: Run repository lint guard
         run: python scripts\ncs_harness.py lint

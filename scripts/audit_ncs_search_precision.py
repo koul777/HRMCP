@@ -5,6 +5,7 @@ import json
 import math
 import os
 import re
+import sqlite3
 import sys
 import unicodedata
 from collections import Counter, defaultdict
@@ -22,14 +23,26 @@ if str(SRC) not in sys.path:
 
 
 SCHEMA = "ncs_search_precision_risk_audit_v1"
+NL_SCHEMA = "ncs_search_nl_evaluation_v1"
 DEFAULT_INPUT = ROOT / "reports" / "ncs_search_eval_candidates_20260830.json"
+DEFAULT_NL_INPUT = ROOT / "tests" / "fixtures" / "ncs_search_eval_nl.json"
 DEFAULT_DB = ROOT / "data" / "processed" / "ncs.db"
 DEFAULT_OUT = ROOT / "reports" / "ncs_search_precision_risk_20260830.json"
 DEFAULT_MARKDOWN_OUT = ROOT / "reports" / "ncs_search_precision_risk_20260830.md"
 RESULT_TYPES = ("unit", "element", "criteria", "ksa")
+NL_CATEGORIES = ("인사", "노무", "교육", "총무", "회계")
+MIN_NL_CASES = 30
 NEAR_DUPLICATE_THRESHOLD = 0.92
 
 SearchFunction = Callable[[str, str, int], dict[str, Any]]
+
+
+class EvaluationDatabaseUnavailable(RuntimeError):
+    """Raised when the full evaluation database cannot be opened in read-only mode."""
+
+
+class ExpectedUnitCodeMissing(ValueError):
+    """Raised when a checked-in expectation no longer exists in the source database."""
 
 
 def generated_at() -> str:
@@ -152,6 +165,453 @@ def load_runtime_search(db_path: Path) -> SearchFunction:
     from ncs_mcp.server import search_ncs
 
     return search_ncs
+
+
+def load_stage1_baseline_search(db_path: Path) -> SearchFunction:
+    """Reproduce the pre-stage-1 length-sorted fallback for audit comparison.
+
+    This temporary, single-threaded wrapper changes no source file or database.
+    It disables only the stage-1 static equivalence and fallback score/filter,
+    while preserving the alias-validated compound expansion that existed before
+    stage 1.
+    """
+    os.environ["NCS_DB_PATH"] = str(db_path.resolve())
+    os.environ["NCS_MCP_READ_ONLY_MODE"] = "true"
+    os.environ["NCS_MCP_OPERATOR_TOOLS"] = "false"
+    from ncs_mcp import server
+
+    def legacy_tiers(
+        columns: tuple[str, ...],
+        phrase: str,
+        fallback_tokens: list[str],
+        token_expansions: dict[str, list[str]] | None = None,
+        weighted_columns: tuple[tuple[str, float], ...] | None = None,
+    ) -> list[tuple[int, str, dict[str, Any], str, str]]:
+        del weighted_columns
+        params: dict[str, Any] = {
+            "phrase_pattern": f"%{server._escape_ncs_search_like(phrase)}%",
+        }
+        phrase_clause = server._ncs_search_like_any(columns, "phrase_pattern")
+        token_clauses: list[str] = []
+        for index, token in enumerate(fallback_tokens):
+            parameter = f"token_{index}"
+            params[parameter] = f"%{server._escape_ncs_search_like(token)}%"
+            token_clauses.append(server._ncs_search_like_any(columns, parameter))
+        if not token_clauses:
+            return [(0, phrase_clause, params, "", "")]
+        token_and = "(" + " AND ".join(token_clauses) + ")"
+        token_or = "(" + " OR ".join(token_clauses) + ")"
+        tiers = [
+            (0, phrase_clause, dict(params), "", ""),
+            (1, token_and, dict(params), "", ""),
+        ]
+        expansion_map = token_expansions or {}
+        if any(expansion_map.get(token) for token in fallback_tokens):
+            expanded_groups: list[str] = []
+            for token_index, token in enumerate(fallback_tokens):
+                alternatives = [token, *expansion_map.get(token, [])]
+                alternative_clauses: list[str] = []
+                for alternative_index, alternative in enumerate(alternatives):
+                    parameter = f"expanded_{token_index}_{alternative_index}"
+                    params[parameter] = (
+                        f"%{server._escape_ncs_search_like(alternative)}%"
+                    )
+                    alternative_clauses.append(
+                        server._ncs_search_like_any(columns, parameter)
+                    )
+                expanded_groups.append(
+                    "(" + " OR ".join(alternative_clauses) + ")"
+                )
+            tiers.append(
+                (
+                    2,
+                    "(" + " AND ".join(expanded_groups) + ")",
+                    dict(params),
+                    "",
+                    "",
+                )
+            )
+        tiers.append((3, token_or, dict(params), "", ""))
+        return tiers
+
+    def baseline_search(query: str, scope: str, limit: int) -> dict[str, Any]:
+        original_equivalents = server._NCS_SEARCH_QUERY_EQUIVALENTS
+        original_tier_builder = server._ncs_search_tier_predicates
+        try:
+            server._NCS_SEARCH_QUERY_EQUIVALENTS = {}
+            server._ncs_search_tier_predicates = legacy_tiers
+            return server.search_ncs(query, scope=scope, limit=limit)
+        finally:
+            server._NCS_SEARCH_QUERY_EQUIVALENTS = original_equivalents
+            server._ncs_search_tier_predicates = original_tier_builder
+
+    return baseline_search
+
+
+def load_nl_evaluation_cases(input_path: Path) -> list[dict[str, Any]]:
+    payload = json.loads(input_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, list):
+        raise ValueError("natural-language evaluation fixture must be a JSON list")
+    if len(payload) < MIN_NL_CASES:
+        raise ValueError(
+            f"natural-language evaluation fixture requires at least {MIN_NL_CASES} cases"
+        )
+
+    required_keys = {"query", "expected_unit_codes", "category"}
+    cases: list[dict[str, Any]] = []
+    seen_queries: set[str] = set()
+    for index, raw_case in enumerate(payload, start=1):
+        if not isinstance(raw_case, dict) or set(raw_case) != required_keys:
+            raise ValueError(
+                f"case {index} must contain exactly query, expected_unit_codes, category"
+            )
+        query = str(raw_case["query"] or "").strip()
+        category = str(raw_case["category"] or "").strip()
+        expected_raw = raw_case["expected_unit_codes"]
+        if not query or query in seen_queries:
+            raise ValueError(f"case {index} has a blank or duplicate query")
+        if category not in NL_CATEGORIES:
+            raise ValueError(f"case {index} has unsupported category: {category}")
+        if not isinstance(expected_raw, list) or not expected_raw:
+            raise ValueError(f"case {index} requires expected_unit_codes")
+        expected_codes = [str(code or "").strip() for code in expected_raw]
+        if any(not code for code in expected_codes) or len(set(expected_codes)) != len(
+            expected_codes
+        ):
+            raise ValueError(f"case {index} has blank or duplicate expected codes")
+        seen_queries.add(query)
+        cases.append(
+            {
+                "case_id": f"NL-{index:03d}",
+                "query": query,
+                "expected_unit_codes": expected_codes,
+                "category": category,
+            }
+        )
+
+    missing_categories = sorted(set(NL_CATEGORIES) - {case["category"] for case in cases})
+    if missing_categories:
+        raise ValueError(
+            "natural-language evaluation fixture is missing categories: "
+            + ", ".join(missing_categories)
+        )
+    return cases
+
+
+def validate_nl_expected_units(
+    db_path: Path,
+    cases: list[dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], int]:
+    resolved_db = db_path.resolve()
+    if not resolved_db.is_file():
+        raise EvaluationDatabaseUnavailable("evaluation database file is missing")
+    try:
+        with resolved_db.open("rb") as handle:
+            header = handle.read(16)
+    except OSError as exc:
+        raise EvaluationDatabaseUnavailable(
+            "evaluation database header cannot be read"
+        ) from exc
+    if header != b"SQLite format 3\x00":
+        raise EvaluationDatabaseUnavailable(
+            "evaluation database is not a materialized SQLite file"
+        )
+
+    expected_codes = sorted(
+        {
+            code
+            for case in cases
+            for code in case["expected_unit_codes"]
+        }
+    )
+    placeholders = ", ".join("?" for _ in expected_codes)
+    uri = resolved_db.as_uri() + "?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only = ON")
+        rows = conn.execute(
+            f"""
+            SELECT cu.unit_code, cu.unit_name_raw,
+                   c.major_name, c.middle_name, c.small_name, c.sub_name
+            FROM competency_units cu
+            JOIN classifications c ON c.classification_id = cu.classification_id
+            WHERE cu.unit_code IN ({placeholders})
+            """,
+            expected_codes,
+        ).fetchall()
+        unit_count = int(
+            conn.execute("SELECT COUNT(*) FROM competency_units").fetchone()[0]
+        )
+    except sqlite3.DatabaseError as exc:
+        raise EvaluationDatabaseUnavailable(
+            "evaluation database could not be queried read-only"
+        ) from exc
+    finally:
+        if "conn" in locals():
+            conn.close()
+
+    lookup = {
+        str(row["unit_code"]): {
+            "unit_code": str(row["unit_code"]),
+            "unit_name": row["unit_name_raw"],
+            "classification": [
+                row["major_name"],
+                row["middle_name"],
+                row["small_name"],
+                row["sub_name"],
+            ],
+        }
+        for row in rows
+    }
+    missing_codes = sorted(set(expected_codes) - set(lookup))
+    if missing_codes:
+        raise ExpectedUnitCodeMissing(
+            "expected unit codes are missing from the evaluation database: "
+            + ", ".join(missing_codes)
+        )
+    return lookup, unit_count
+
+
+def _nl_metric_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
+    case_count = len(records)
+    hit_at_1_count = sum(bool(record["hit_at_1"]) for record in records)
+    hit_at_3_count = sum(bool(record["hit_at_3"]) for record in records)
+    return {
+        "case_count": case_count,
+        "search_error_count": sum(record["error"] is not None for record in records),
+        "hit_at_1": safe_rate(hit_at_1_count, case_count),
+        "hit_at_1_count": hit_at_1_count,
+        "hit_at_3": safe_rate(hit_at_3_count, case_count),
+        "hit_at_3_count": hit_at_3_count,
+        "mrr": round(
+            sum(float(record["reciprocal_rank"]) for record in records) / case_count,
+            4,
+        )
+        if case_count
+        else None,
+    }
+
+
+def evaluate_nl_cases(
+    cases: list[dict[str, Any]],
+    search_fn: SearchFunction,
+    *,
+    limit: int,
+) -> dict[str, Any]:
+    if limit < 3:
+        raise ValueError("natural-language evaluation limit must be at least 3")
+    records: list[dict[str, Any]] = []
+    for case in cases:
+        results: list[dict[str, Any]] = []
+        error: dict[str, str] | None = None
+        try:
+            payload = search_fn(case["query"], "unit", limit)
+            raw_results = payload.get("results") if isinstance(payload, dict) else None
+            if not isinstance(raw_results, list):
+                raise TypeError("search response results must be a list")
+            results = [
+                result
+                for result in raw_results
+                if isinstance(result, dict) and result.get("type") == "unit"
+            ]
+        except Exception as exc:  # Preserve bounded error type, not traceback text.
+            error = {"type": type(exc).__name__, "message": "search execution failed"}
+
+        ranked_codes = [str(result.get("id")) for result in results]
+        expected = set(case["expected_unit_codes"])
+        first_rank = next(
+            (
+                rank
+                for rank, unit_code in enumerate(ranked_codes, start=1)
+                if unit_code in expected
+            ),
+            None,
+        )
+        records.append(
+            {
+                **case,
+                "first_expected_rank": first_rank,
+                "hit_at_1": first_rank == 1,
+                "hit_at_3": first_rank is not None and first_rank <= 3,
+                "reciprocal_rank": round(1.0 / first_rank, 4) if first_rank else 0.0,
+                "error": error,
+                "top_results": [
+                    {
+                        "rank": index,
+                        "unit_code": result.get("id"),
+                        "unit_name": result.get("text"),
+                    }
+                    for index, result in enumerate(results[:limit], start=1)
+                ],
+            }
+        )
+
+    by_category = {
+        category: _nl_metric_summary(
+            [record for record in records if record["category"] == category]
+        )
+        for category in NL_CATEGORIES
+    }
+    return {
+        "overall": _nl_metric_summary(records),
+        "by_category": by_category,
+        "cases": records,
+    }
+
+
+def _nl_metric_delta(
+    current: dict[str, Any],
+    baseline: dict[str, Any] | None,
+) -> dict[str, float | None]:
+    metrics = ("hit_at_1", "hit_at_3", "mrr")
+    if baseline is None:
+        return {metric: None for metric in metrics}
+    return {
+        metric: round(float(current[metric]) - float(baseline[metric]), 4)
+        if current.get(metric) is not None and baseline.get(metric) is not None
+        else None
+        for metric in metrics
+    }
+
+
+def build_nl_evaluation_report(
+    *,
+    input_path: Path,
+    db_path: Path,
+    limit: int,
+    hit3_threshold: float,
+    enforce_hit3: bool,
+    compare_stage1_baseline: bool,
+    search_fn: SearchFunction | None = None,
+    baseline_search_fn: SearchFunction | None = None,
+    expected_unit_lookup: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    cases = load_nl_evaluation_cases(input_path)
+    if not 0.0 <= hit3_threshold <= 1.0:
+        raise ValueError("hit3 threshold must be between 0 and 1")
+    if expected_unit_lookup is None:
+        unit_lookup, database_unit_count = validate_nl_expected_units(db_path, cases)
+    else:
+        unit_lookup = expected_unit_lookup
+        database_unit_count = None
+
+    runtime_search = search_fn or load_runtime_search(db_path)
+    current = evaluate_nl_cases(cases, runtime_search, limit=limit)
+    baseline: dict[str, Any] | None = None
+    if compare_stage1_baseline:
+        legacy_search = baseline_search_fn or load_stage1_baseline_search(db_path)
+        baseline = evaluate_nl_cases(cases, legacy_search, limit=limit)
+
+    hit3 = current["overall"]["hit_at_3"]
+    threshold_met = hit3 is not None and float(hit3) >= hit3_threshold
+    gate_status = "pass" if threshold_met else ("fail" if enforce_hit3 else "warn")
+    category_deltas = {
+        category: _nl_metric_delta(
+            current["by_category"][category],
+            baseline["by_category"][category] if baseline else None,
+        )
+        for category in NL_CATEGORIES
+    }
+    return {
+        "schema": NL_SCHEMA,
+        "version": 1,
+        "generated_at": generated_at(),
+        "mode": "read_only_code_reviewed_regression_evaluation",
+        "source": {
+            "fixture_path": str(input_path),
+            "database_path": str(db_path),
+            "database_unit_count": database_unit_count,
+            "case_count": len(cases),
+            "category_counts": dict(
+                sorted(Counter(case["category"] for case in cases).items())
+            ),
+            "expected_unit_code_count": len(unit_lookup),
+            "expected_unit_codes_verified_in_db": True,
+            "result_limit": limit,
+        },
+        "interpretation_contract": {
+            "expectation_kind": "code_reviewed_regression_expectation",
+            "human_relevance_labels_used": False,
+            "human_review_or_approval_claim": False,
+            "metrics": ["Hit@1", "Hit@3", f"MRR@{limit}"],
+            "allowed_claim": "Regression retrieval quality against checked-in expected unit codes.",
+            "prohibited_claim": "Human-validated production relevance or official approval.",
+        },
+        "expected_units": {
+            code: unit_lookup[code] for code in sorted(unit_lookup)
+        },
+        "stage1_baseline": baseline,
+        "current": current,
+        "delta": {
+            "overall": _nl_metric_delta(
+                current["overall"], baseline["overall"] if baseline else None
+            ),
+            "by_category": category_deltas,
+        },
+        "gate": {
+            "metric": "Hit@3",
+            "threshold": hit3_threshold,
+            "observed": hit3,
+            "threshold_met": threshold_met,
+            "enforced": enforce_hit3,
+            "status": gate_status,
+        },
+        "safety": {
+            "database_open_mode": "read_only",
+            "database_writes": False,
+            "raw_ksa_mutation": False,
+            "status_updates": False,
+            "human_reviewed_written": False,
+            "accepted_written": False,
+            "reviewed_written": False,
+        },
+    }
+
+
+def build_unavailable_nl_report(
+    *,
+    input_path: Path,
+    db_path: Path,
+    limit: int,
+    hit3_threshold: float,
+    enforce_hit3: bool,
+) -> dict[str, Any]:
+    cases = load_nl_evaluation_cases(input_path)
+    return {
+        "schema": NL_SCHEMA,
+        "version": 1,
+        "generated_at": generated_at(),
+        "mode": "evaluation_database_unavailable",
+        "source": {
+            "fixture_path": str(input_path),
+            "database_path": str(db_path),
+            "case_count": len(cases),
+            "result_limit": limit,
+            "expected_unit_codes_verified_in_db": False,
+        },
+        "current": None,
+        "stage1_baseline": None,
+        "delta": None,
+        "gate": {
+            "metric": "Hit@3",
+            "threshold": hit3_threshold,
+            "observed": None,
+            "threshold_met": False,
+            "enforced": enforce_hit3,
+            "status": "fail" if enforce_hit3 else "warn",
+            "reason": "full_evaluation_database_unavailable",
+        },
+        "safety": {
+            "database_open_mode": "not_opened",
+            "database_writes": False,
+            "raw_ksa_mutation": False,
+            "status_updates": False,
+            "human_reviewed_written": False,
+            "accepted_written": False,
+            "reviewed_written": False,
+        },
+    }
 
 
 def _entropy(counter: Counter[str], *, domain_size: int | None = None) -> float | None:
@@ -758,6 +1218,122 @@ def render_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _fmt_metric(value: Any) -> str:
+    return "n/a" if value is None else f"{float(value):.4f}"
+
+
+def render_nl_markdown(report: dict[str, Any]) -> str:
+    gate = report["gate"]
+    lines = [
+        "# NCS 자연어 검색 품질 평가",
+        "",
+        f"- Schema: `{report['schema']}`",
+        f"- 상태: `{gate['status']}`",
+        f"- Hit@3 게이트: `{_fmt_metric(gate['observed'])} >= {gate['threshold']}`",
+        f"- 강제 여부: `{str(gate['enforced']).lower()}`",
+        "- 기대값 성격: 코드 검토 회귀 기준이며 사람 승인 또는 공식 적합성 판정이 아님",
+        "",
+    ]
+    current = report.get("current")
+    if not isinstance(current, dict):
+        lines.extend(
+            [
+                "## 평가 불가",
+                "",
+                "전체 평가 SQLite DB를 사용할 수 없어 지표를 계산하지 않았다.",
+                "경고 모드에서는 CI를 통과하지만 강제 모드에서는 실패한다.",
+                "",
+            ]
+        )
+        return "\n".join(lines)
+
+    baseline = report.get("stage1_baseline")
+    lines.extend(
+        [
+            "## 전체 지표",
+            "",
+            "| 버전 | Hit@1 | Hit@3 | MRR | 검색 오류 |",
+            "| --- | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    if isinstance(baseline, dict):
+        base = baseline["overall"]
+        lines.append(
+            f"| 1단계 수정 전 | {_fmt_metric(base['hit_at_1'])} | "
+            f"{_fmt_metric(base['hit_at_3'])} | {_fmt_metric(base['mrr'])} | "
+            f"{base['search_error_count']} |"
+        )
+    now = current["overall"]
+    lines.append(
+        f"| 현재 | {_fmt_metric(now['hit_at_1'])} | "
+        f"{_fmt_metric(now['hit_at_3'])} | {_fmt_metric(now['mrr'])} | "
+        f"{now['search_error_count']} |"
+    )
+
+    lines.extend(
+        [
+            "",
+            "## 카테고리별 지표",
+            "",
+            "| 카테고리 | 건수 | 수정 전 Hit@3 | 현재 Hit@1 | 현재 Hit@3 | 현재 MRR |",
+            "| --- | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for category in NL_CATEGORIES:
+        category_now = current["by_category"][category]
+        category_before = (
+            baseline["by_category"][category] if isinstance(baseline, dict) else {}
+        )
+        lines.append(
+            f"| {category} | {category_now['case_count']} | "
+            f"{_fmt_metric(category_before.get('hit_at_3'))} | "
+            f"{_fmt_metric(category_now['hit_at_1'])} | "
+            f"{_fmt_metric(category_now['hit_at_3'])} | "
+            f"{_fmt_metric(category_now['mrr'])} |"
+        )
+
+    misses = [case for case in current["cases"] if not case["hit_at_3"]]
+    lines.extend(
+        [
+            "",
+            "## 현재 Top 3 미적중 질의",
+            "",
+        ]
+    )
+    if misses:
+        for case in misses:
+            expected = ", ".join(case["expected_unit_codes"])
+            top3 = ", ".join(
+                str(item["unit_code"]) for item in case["top_results"][:3]
+            ) or "결과 없음"
+            lines.append(
+                f"- `{case['case_id']}` {case['query']} ({case['category']}): "
+                f"expected={expected}; top3={top3}"
+            )
+    else:
+        lines.append("- 없음")
+
+    lines.extend(
+        [
+            "",
+            "## 검증 계약",
+            "",
+            f"- 실제 DB에서 검증한 기대 능력단위 코드: {report['source']['expected_unit_code_count']}개",
+            f"- 평가 질의: {report['source']['case_count']}개",
+            "- DB 쓰기 및 사람 검토 상태 변경: 없음",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _environment_flag(name: str, *, default: bool = False) -> bool:
+    raw = str(os.environ.get(name, "")).strip().casefold()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Audit NCS search precision-risk proxies.")
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
@@ -765,6 +1341,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--markdown-out", type=Path, default=DEFAULT_MARKDOWN_OUT)
+    parser.add_argument(
+        "--nl-eval",
+        action="store_true",
+        help="Compute Hit@1, Hit@3, and MRR for the natural-language fixture.",
+    )
+    parser.add_argument(
+        "--compare-stage1-baseline",
+        action="store_true",
+        help="Also reproduce the pre-stage-1 length-sorted fallback.",
+    )
+    parser.add_argument("--hit3-threshold", type=float, default=0.7)
+    parser.add_argument(
+        "--enforce-hit3",
+        action=argparse.BooleanOptionalAction,
+        default=_environment_flag("NCS_SEARCH_EVAL_ENFORCE", default=False),
+        help="Fail below the Hit@3 threshold; defaults from NCS_SEARCH_EVAL_ENFORCE.",
+    )
     return parser.parse_args()
 
 
@@ -772,6 +1365,60 @@ def main() -> int:
     args = parse_args()
     if args.limit <= 0:
         raise ValueError("limit must be positive")
+    if args.nl_eval:
+        input_path = (
+            DEFAULT_NL_INPUT.resolve()
+            if args.input == DEFAULT_INPUT
+            else args.input.resolve()
+        )
+        try:
+            report = build_nl_evaluation_report(
+                input_path=input_path,
+                db_path=args.db.resolve(),
+                limit=args.limit,
+                hit3_threshold=args.hit3_threshold,
+                enforce_hit3=args.enforce_hit3,
+                compare_stage1_baseline=args.compare_stage1_baseline,
+            )
+        except EvaluationDatabaseUnavailable:
+            report = build_unavailable_nl_report(
+                input_path=input_path,
+                db_path=args.db.resolve(),
+                limit=args.limit,
+                hit3_threshold=args.hit3_threshold,
+                enforce_hit3=args.enforce_hit3,
+            )
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.markdown_out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        args.markdown_out.write_text(
+            render_nl_markdown(report),
+            encoding="utf-8",
+        )
+        if report["gate"]["status"] == "warn":
+            print(
+                "::warning title=NCS search Hit@3 gate::"
+                "Hit@3 is below threshold or the full evaluation DB is unavailable."
+            )
+        print(
+            json.dumps(
+                {
+                    "schema": report["schema"],
+                    "cases": report["source"]["case_count"],
+                    "hit_at_3": report["gate"]["observed"],
+                    "threshold": report["gate"]["threshold"],
+                    "gate_status": report["gate"]["status"],
+                    "out": str(args.out),
+                    "markdown_out": str(args.markdown_out),
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 1 if report["gate"]["status"] == "fail" else 0
+
     report = build_report(
         input_path=args.input.resolve(),
         db_path=args.db.resolve(),

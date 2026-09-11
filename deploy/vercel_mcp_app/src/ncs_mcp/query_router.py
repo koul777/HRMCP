@@ -342,7 +342,61 @@ DIRECT_STRUCTURE_SEARCH_SIGNALS = (
     "ncs \uc911\ubd84\ub958",
     "ncs \uc18c\ubd84\ub958",
     "\ubd84\ub958 \uae30\uc900",
+    "찾기",
+    "찾아",
+    "목록",
+    "알려줘",
 )
+
+STRUCTURE_ENTITY_SIGNALS = (
+    "ncs",
+    "classification",
+    "job code",
+    "job function",
+    "unit",
+    "element",
+    "task",
+    "criterion",
+    "ksa",
+    "분류",
+    "직무",
+    "직무코드",
+    "직무기능",
+    "주요업무",
+    "능력단위",
+    "능력단위요소",
+    "과업",
+    "수행준거",
+    "지식",
+    "기술",
+    "태도",
+)
+
+EXPLICIT_TRAINING_INTENT_SIGNALS = (
+    "training",
+    "education",
+    "course",
+    "recommend",
+    "curriculum",
+    "교육",
+    "훈련",
+    "과정",
+    "추천",
+    "커리큘럼",
+    "교육체계",
+    "훈련체계",
+)
+
+TASK_TRAINING_CONTEXT_ONLY_SIGNALS = {
+    "ksa",
+    "과업",
+    "수행준거",
+    "능력단위",
+    "지식",
+    "기술",
+    "태도",
+    "요구 수준",
+}
 
 DIRECT_TASK_TRANSITION_SIGNALS = (
     "similar task",
@@ -679,7 +733,27 @@ def _score_pattern(pattern: RoutePattern, normalized: str) -> int:
     if not normalized:
         return 0
     direct_structure_search = _has_direct_structure_search_intent(normalized)
-    score = pattern.priority if _matched_signals(pattern, normalized) else 0
+    structure_entity = _has_structure_entity_intent(normalized)
+    explicit_training = _has_explicit_training_intent(normalized)
+    explicit_evidence = bool(
+        _matched_signals(_pattern_by_scenario(EVIDENCE_ANALYSIS), normalized)
+    )
+    prefer_structure_search = (
+        direct_structure_search
+        and structure_entity
+        and not explicit_training
+        and not explicit_evidence
+    )
+    matched_signals = _matched_signals(pattern, normalized)
+    score = pattern.priority if matched_signals else 0
+    if pattern.scenario == TASK_TRAINING and matched_signals:
+        actionable_signals = [
+            signal
+            for signal in matched_signals
+            if signal not in TASK_TRAINING_CONTEXT_ONLY_SIGNALS
+        ]
+        if not actionable_signals and not explicit_training:
+            score = 0
     operator_review_intent = _has_operator_review_intent(normalized)
     strong_operator_review_intent = _has_operator_review_surface_intent(normalized)
     if pattern.scenario == OPERATOR_REVIEW and strong_operator_review_intent:
@@ -693,8 +767,8 @@ def _score_pattern(pattern: RoutePattern, normalized: str) -> int:
         TASK_TRANSITION,
     }:
         score -= 35
-    if pattern.scenario == STRUCTURE_SEARCH and direct_structure_search:
-        score += 40
+    if pattern.scenario == STRUCTURE_SEARCH and prefer_structure_search:
+        score += 60
     if pattern.scenario == TASK_TRANSITION and any(
         signal in normalized for signal in DIRECT_TASK_TRANSITION_SIGNALS
     ):
@@ -704,7 +778,7 @@ def _score_pattern(pattern: RoutePattern, normalized: str) -> int:
         tool=pattern.tool,
         scenario=pattern.scenario,
     )
-    if guide_match and not (direct_structure_search and pattern.scenario != STRUCTURE_SEARCH):
+    if guide_match and not (prefer_structure_search and pattern.scenario != STRUCTURE_SEARCH):
         score += 20 + min(20, int(guide_match.get("match_score") or 0))
     if pattern.scenario in {EDUCATION_SYSTEM, TRAINING_TRANSITION} and _extract_transition_terms(normalized):
         score += 15
@@ -770,6 +844,14 @@ def _matched_signals(pattern: RoutePattern, normalized: str) -> list[str]:
 
 def _has_direct_structure_search_intent(normalized: str) -> bool:
     return any(signal in normalized for signal in DIRECT_STRUCTURE_SEARCH_SIGNALS)
+
+
+def _has_structure_entity_intent(normalized: str) -> bool:
+    return any(signal in normalized for signal in STRUCTURE_ENTITY_SIGNALS)
+
+
+def _has_explicit_training_intent(normalized: str) -> bool:
+    return any(signal in normalized for signal in EXPLICIT_TRAINING_INTENT_SIGNALS)
 
 
 def _has_operator_review_intent(normalized: str) -> bool:

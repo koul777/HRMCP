@@ -150,6 +150,34 @@ class NcsQueryRouterTests(unittest.TestCase):
         self.assertEqual(route["tool"], "ncs_search")
         self.assertEqual(route["params"]["query"], "HR planning")
 
+    def test_routes_korean_unit_lookup_to_structure_search(self) -> None:
+        cases = (
+            "인사담당자 채용 직무 능력단위 찾기",
+            "능력단위 검색",
+            "능력단위 조회",
+            "능력단위 목록 알려줘",
+        )
+
+        for query in cases:
+            with self.subTest(query=query):
+                route = route_ncs_query(query)
+                self.assertEqual(route["scenario"], "structure_search")
+                self.assertEqual(route["tool"], "ncs_search")
+                self.assertGreater(route["score"], 60)
+
+    def test_explicit_training_intent_overrides_lookup_verb(self) -> None:
+        cases = (
+            "능력단위 기반 교육 추천",
+            "능력단위 찾아서 교육 추천해줘",
+            "이 과업의 능력단위에 맞는 훈련과정 추천",
+        )
+
+        for query in cases:
+            with self.subTest(query=query):
+                route = route_ncs_query(query)
+                self.assertEqual(route["scenario"], "task_training")
+                self.assertEqual(route["tool"], "recommend_training_for_task")
+
     def test_routes_guide_job_structure_prompt_to_ncs_search(self) -> None:
         route = route_ncs_query(
             "\uc9c1\ubb34\uae30\ub2a5\uacfc \uc8fc\uc694\uc5c5\ubb34\ub97c "

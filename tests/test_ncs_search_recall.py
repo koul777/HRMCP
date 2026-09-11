@@ -103,7 +103,7 @@ class NcsSearchRecallTests(unittest.TestCase):
             INSERT INTO classifications VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                (1, "02", "경영", "02", "인사", "02", "인사관리", "01", "채용", "1"),
+                (1, "02", "경영", "02", "인사", "02", "인사관리", "01", "인사조직", "1"),
                 (2, "99", "기타", "99", "기타", "99", "기타", "99", "데이터분석 직무", "2"),
             ),
         )
@@ -115,11 +115,19 @@ class NcsSearchRecallTests(unittest.TestCase):
             ("U_DEFINITION", "정의 검색", "데이터분석 업무를 수행한다", "5", 1),
             ("U_HIRE_1", "채용 운영", "신입사원 선발", "4", 1),
             ("U_HIRE_2", "급여 운영", "급여 업무", "4", 1),
+            ("U_ASSET", "자산관리", "자산 취득과 처분을 관리한다", "4", 1),
+            ("U_QUALITY", "품질관리", "품질 기준을 관리한다", "4", 1),
+            ("U_PERFORMANCE", "성과관리", "성과 목표를 관리한다", "4", 1),
+            ("U_HR_MANAGEMENT", "인사관리", "인사 운영을 관리한다", "4", 1),
+            ("U_LABOR", "노무관리", "노무 업무를 관리한다", "4", 1),
             ("U_ASCII", "data workflow analysis", "data operations", "4", 1),
         )
         conn.executemany("INSERT INTO competency_units VALUES (?, ?, ?, ?, ?)", units)
         conn.execute(
             "INSERT INTO ncs_query_aliases VALUES ('U_HIRE_1', 'recruiting', 'recruiting')"
+        )
+        conn.execute(
+            "INSERT INTO ncs_query_aliases VALUES ('U_HIRE_1', '채용', '인력채용')"
         )
         elements = (
             (1, "채용 운영", "U_HIRE_1"),
@@ -168,6 +176,37 @@ class NcsSearchRecallTests(unittest.TestCase):
         self.assertIn(1, [row["id"] for row in token_and["results"] if row["type"] == "criteria"])
         self.assertIn(token_or["match_mode"], {"token_or", "mixed"})
         self.assertGreater(token_or["returned"], 0)
+
+    def test_alias_validated_compound_expansion_preserves_and_semantics(self) -> None:
+        result = server.search_ncs("인사 채용관리", scope="unit", limit=5)
+
+        self.assertEqual(result["match_mode"], "expanded_token_and")
+        self.assertEqual(result["results"][0]["id"], "U_HIRE_1")
+        self.assertEqual(
+            result["query_expansions"]["채용관리"],
+            ["채용", "인력채용"],
+        )
+        self.assertEqual(result["results"][0]["matched_tokens"], ["인사", "채용관리"])
+        self.assertEqual(
+            result["results"][0]["matched_expansions"][0]["matched_as"],
+            "채용",
+        )
+
+    def test_exact_management_terms_outrank_compound_expansion(self) -> None:
+        expectations = {
+            "자산관리": "U_ASSET",
+            "품질관리": "U_QUALITY",
+            "성과관리": "U_PERFORMANCE",
+            "인사관리": "U_HR_MANAGEMENT",
+            "노무관리": "U_LABOR",
+        }
+
+        for query, expected_id in expectations.items():
+            with self.subTest(query=query):
+                result = server.search_ncs(query, scope="unit", limit=5)
+                self.assertEqual(result["match_mode"], "phrase")
+                self.assertEqual(result["results"][0]["id"], expected_id)
+                self.assertEqual(result["query_expansions"], {})
 
     def test_phrase_hit_skips_lower_tier_sql_for_each_type(self) -> None:
         result = server.search_ncs("data workflow", scope="all", limit=4)
@@ -257,6 +296,133 @@ class NcsSearchRecallTests(unittest.TestCase):
         properties = search_tool.inputSchema.get("properties", {})
         self.assertIn("offset", properties)
         self.assertNotIn("offset", search_tool.inputSchema.get("required", []))
+
+    def test_hr_natural_language_queries_rank_expected_units(self) -> None:
+        conn = self._connect()
+        try:
+            conn.executescript(
+                """
+                DELETE FROM ksa_items;
+                DELETE FROM performance_criteria;
+                DELETE FROM competency_elements;
+                DELETE FROM ncs_query_aliases;
+                DELETE FROM competency_units;
+                DELETE FROM classifications;
+                """
+            )
+            conn.executemany(
+                "INSERT INTO classifications VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    (
+                        10,
+                        "02",
+                        "경영·회계·사무",
+                        "0202",
+                        "총무·인사",
+                        "020202",
+                        "인사·조직",
+                        "02020201",
+                        "인사",
+                        "1",
+                    ),
+                    (
+                        20,
+                        "08",
+                        "문화·예술·디자인·방송",
+                        "0803",
+                        "문화콘텐츠",
+                        "080304",
+                        "영상제작",
+                        "08030402",
+                        "촬영",
+                        "2",
+                    ),
+                    (
+                        30,
+                        "03",
+                        "금융·보험",
+                        "0301",
+                        "금융",
+                        "030104",
+                        "자산운용",
+                        "03010404",
+                        "투자운용",
+                        "3",
+                    ),
+                ),
+            )
+            conn.executemany(
+                "INSERT INTO competency_units VALUES (?, ?, ?, ?, ?)",
+                (
+                    (
+                        "0202020105_23v3",
+                        "인사평가",
+                        "인사평가 계획을 수립하고 조직 성과 향상을 지원한다",
+                        "5",
+                        10,
+                    ),
+                    (
+                        "0202020107_23v4",
+                        "교육훈련운영",
+                        "직원의 교육훈련 계획을 수립하고 운영한다",
+                        "4",
+                        10,
+                    ),
+                    (
+                        "0202020103_23v4",
+                        "인력채용",
+                        "인사 부문의 채용 계획을 수립한다",
+                        "4",
+                        10,
+                    ),
+                    (
+                        "0202020109_23v5",
+                        "급여지급",
+                        "직원의 급여를 계산하여 지급한다",
+                        "4",
+                        10,
+                    ),
+                    (
+                        "0301040409_14v1",
+                        "투자 성과평가",
+                        "투자 성과평가를 수행한다",
+                        "5",
+                        30,
+                    ),
+                    (
+                        "0803040207_13v1",
+                        "촬영",
+                        "직원 업무의 제도 설계와 계획 수립을 지원한다",
+                        "3",
+                        20,
+                    ),
+                ),
+            )
+            conn.execute(
+                "INSERT INTO ncs_query_aliases VALUES (?, ?, ?)",
+                ("0202020103_23v4", "채용", "인력채용"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        performance = server.search_ncs("성과평가 제도 설계", scope="unit", limit=5)
+        training = server.search_ncs("직원 교육훈련 계획 수립", scope="unit", limit=5)
+        hiring = server.search_ncs("인사 채용관리", scope="unit", limit=5)
+        exact_evaluation = server.search_ncs("인사평가", scope="unit", limit=5)
+        payroll = server.search_ncs("급여 계산", scope="unit", limit=5)
+
+        self.assertIn(
+            "0202020105_23v3",
+            [row["id"] for row in performance["results"][:3]],
+        )
+        self.assertIn(
+            "0202020107_23v4",
+            [row["id"] for row in training["results"][:3]],
+        )
+        self.assertEqual(hiring["results"][0]["id"], "0202020103_23v4")
+        self.assertEqual(exact_evaluation["results"][0]["id"], "0202020105_23v3")
+        self.assertEqual(payroll["results"][0]["id"], "0202020109_23v5")
 
     def test_local_and_vercel_server_mirrors_are_identical(self) -> None:
         local_server = ROOT / "src" / "ncs_mcp" / "server.py"
