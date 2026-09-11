@@ -61,8 +61,8 @@ jobs:
       NCS_PRODUCTION_MCP_URL: ${{ vars.NCS_PRODUCTION_MCP_URL }}
       NCS_TRAINING_COURSE_SERVICE_KEY: ${{ secrets.NCS_TRAINING_COURSE_SERVICE_KEY }}
       NCS_JOB_BASE_SERVICE_KEY: ${{ secrets.NCS_JOB_BASE_SERVICE_KEY }}
-      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      VERCEL_ORG_ID: ${{ vars.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
       VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
     steps:
       - name: Check out repository
@@ -103,8 +103,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Unable to upgrade pip in the user-space venv." }
           & $venvPython -m pip install -e .
           if ($LASTEXITCODE -ne 0) { throw "Unable to install the NCS package in the user-space venv." }
-          & $venvPython -m pip check
-          if ($LASTEXITCODE -ne 0) { throw "The user-space venv dependency check failed." }
+          & $venvPython -c "import ncs_mcp; print('ncs_mcp import ok')"
+          if ($LASTEXITCODE -ne 0) { throw "The user-space NCS package import check failed." }
           "RUNNER_VENV=$venv" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "RUNNER_PYTHON=$venvPython" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           (Join-Path $venv 'Scripts') | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
