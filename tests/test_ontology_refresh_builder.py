@@ -9,7 +9,7 @@ from contextlib import closing
 from pathlib import Path
 
 from ncs_mcp.db import connect, initialize_database
-from ncs_mcp.ontology_refresh_builder import build_ontology_refresh
+from ncs_mcp.ontology_refresh_builder import _select_strategy, build_ontology_refresh
 
 
 def _sha256(path: Path) -> str:
@@ -224,6 +224,27 @@ class OntologyRefreshBuilderTests(unittest.TestCase):
             report["publisher_source"]["sha256"], report["source"]["sha256"]
         )
         self.assertTrue(report["validation"]["ok"])
+
+    def test_legacy_state_dir_reports_no_baseline_rule_fingerprint(self) -> None:
+        candidate, baseline = self._prepared_baseline("candidate.db", "prepared.db")
+        state = self.root / "legacy-state"
+        state.mkdir()
+        shutil.copy2(baseline, state / "baseline.db")
+        self.assertFalse((state / "current.json").exists())
+
+        report = build_ontology_refresh(
+            candidate,
+            state_dir=state,
+            prepared_output=self.root / "legacy-output.db",
+            full_rebuild_change_ratio_threshold=1.0,
+            per_table_change_ratio_threshold=1.0,
+        )
+
+        # A legacy directory keeps working, and the report says outright that
+        # the baseline carries no rule fingerprint to compare against.
+        self.assertEqual(report["selected_strategy"], "no_rebuild")
+        self.assertIsNone(report["baseline_rule_fingerprint"])
+        self.assertEqual(report["rule_fingerprint"][:7], "sha256:")
 
     def test_no_change_blocks_when_managed_baseline_has_empty_derived_tables(
         self,
@@ -470,6 +491,75 @@ class OntologyRefreshBuilderTests(unittest.TestCase):
                 )
         finally:
             writer.close()
+
+
+class StrategyRuleFingerprintTests(unittest.TestCase):
+    """The rule fingerprint is the only signal that rebuilds on a rule change.
+
+    The source projection is identical in every case here, so the fingerprint
+    alone decides whether the ontology is rebuilt.
+    """
+
+    UNCHANGED_PLAN = {
+        "tables": [],
+        "full_rebuild_required": False,
+        "full_rebuild_recommended": False,
+    }
+    CURRENT_RULES = "sha256:" + "a" * 64
+    EARLIER_RULES = "sha256:" + "b" * 64
+
+    def _strategy(self, baseline_rule_fingerprint: str | None) -> tuple[str, list[str]]:
+        strategy, reasons, _ = _select_strategy(
+            self.UNCHANGED_PLAN,
+            baseline_exists=True,
+            baseline_rule_fingerprint=baseline_rule_fingerprint,
+            rule_fingerprint=self.CURRENT_RULES,
+        )
+        return strategy, reasons
+
+    def test_matching_rule_fingerprint_skips_the_rebuild(self) -> None:
+        strategy, reasons = self._strategy(self.CURRENT_RULES)
+
+        self.assertEqual(strategy, "no_rebuild")
+        self.assertEqual(reasons, ["source_projection_unchanged"])
+
+    def test_changed_rule_fingerprint_forces_a_full_rebuild(self) -> None:
+        strategy, reasons = self._strategy(self.EARLIER_RULES)
+
+        self.assertEqual(strategy, "full_rebuild_required")
+        self.assertIn("ontology_rule_fingerprint_changed", reasons)
+
+    def test_unparsable_lineage_sidecar_forces_a_full_rebuild(self) -> None:
+        strategy, reasons = self._strategy("invalid")
+
+        self.assertEqual(strategy, "full_rebuild_required")
+        self.assertIn("ontology_rule_fingerprint_changed", reasons)
+
+    def test_absent_fingerprint_does_not_force_a_rebuild(self) -> None:
+        # An absent fingerprint is deliberately not treated as a rule change.
+        # Only a promotion writes the lineage sidecar, so a baseline supplied
+        # through baseline_db never has one, and a legacy state directory keeps
+        # working without one -- see
+        # test_legacy_baseline_db_resolution_remains_supported.
+        #
+        # The cost is that a pointerless state directory cannot notice a rule
+        # change: the source projection stays equal, so this returns no_rebuild
+        # and the ontology keeps whatever rules built it.
+        strategy, reasons = self._strategy(None)
+
+        self.assertEqual(strategy, "no_rebuild")
+        self.assertEqual(reasons, ["source_projection_unchanged"])
+
+    def test_missing_baseline_still_bootstraps(self) -> None:
+        strategy, reasons, _ = _select_strategy(
+            None,
+            baseline_exists=False,
+            baseline_rule_fingerprint=None,
+            rule_fingerprint=self.CURRENT_RULES,
+        )
+
+        self.assertEqual(strategy, "bootstrap_additive_build")
+        self.assertEqual(reasons, ["managed_baseline_missing"])
 
 
 if __name__ == "__main__":
