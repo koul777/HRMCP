@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added a 51-query independent search holdout, authored from official NCS unit
+  definitions rather than the tuned alias list, and froze the existing 40-query
+  set as a regression set. The holdout puts generalization at Hit@3 0.451
+  against the in-sample 0.875, and shows the alias layer is phrase-brittle.
 - Ranked a shared competency unit's home classification above a borrowed copy,
   so `사옥 보안 점검` returns 총무보안관리 under 총무 instead of the older
   자원봉사관리 copy. Raised 40-query Hit@1 from 0.825 to 0.850 and MRR from
