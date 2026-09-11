@@ -286,23 +286,34 @@ def _ncs_search_token_idf_weights(
     fallback_tokens: list[str],
 ) -> dict[str, float]:
     """Weight each fallback token by how few unit names contain it."""
-    if not fallback_tokens:
+    tokens = list(dict.fromkeys(fallback_tokens))
+    if not tokens:
         return {}
-    total = conn.execute("SELECT COUNT(*) FROM competency_units").fetchone()[0]
-    total = int(total or 0)
+    # Count the corpus and every token in one pass.  The compact serving
+    # profile drops the unit_name_raw index, so each LIKE reads the whole
+    # table; a COUNT per token would re-scan it once per token.  Column
+    # expressions and placeholder names come from fixed server-side text and
+    # integer indexes, and query text stays bound.
+    frequency_terms = ", ".join(
+        f"SUM(CASE WHEN unit_name_raw LIKE :idf_token_{index} ESCAPE '\\' "
+        "THEN 1 ELSE 0 END)"
+        for index in range(len(tokens))
+    )
+    params = {
+        f"idf_token_{index}": f"%{_escape_ncs_search_like(token)}%"
+        for index, token in enumerate(tokens)
+    }
+    row = conn.execute(
+        f"SELECT COUNT(*), {frequency_terms} FROM competency_units",
+        params,
+    ).fetchone()
+    total = int(row[0] or 0)
     if total <= 1:
         return {}
     ceiling = math.log(total)
     weights: dict[str, float] = {}
-    for token in fallback_tokens:
-        if token in weights:
-            continue
-        row = conn.execute(
-            "SELECT COUNT(*) FROM competency_units "
-            "WHERE unit_name_raw LIKE :token ESCAPE '\\'",
-            {"token": f"%{_escape_ncs_search_like(token)}%"},
-        ).fetchone()
-        frequency = max(int(row[0] or 0), 1)
+    for index, token in enumerate(tokens):
+        frequency = max(int(row[index + 1] or 0), 1)
         weights[token] = max(
             _NCS_SEARCH_IDF_FLOOR,
             math.log(total / frequency) / ceiling,

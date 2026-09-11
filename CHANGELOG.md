@@ -5,7 +5,9 @@
 - Weighted fallback search tokens by document frequency instead of a hand kept
   generic-word list, so a token naming few units outranks one spread across the
   catalogue. Holdout Hit@3 0.451 -> 0.549 with the 40-query regression set
-  unchanged, 5 queries newly passing and none newly failing.
+  unchanged, 5 queries newly passing and none newly failing. Document
+  frequencies are counted in one pass, which halves the cost on the compact
+  serving profile that ships without the unit_name_raw index.
 - Added a 51-query independent search holdout, authored from official NCS unit
   definitions rather than the tuned alias list, and froze the existing 40-query
   set as a regression set. The holdout puts generalization at Hit@3 0.451

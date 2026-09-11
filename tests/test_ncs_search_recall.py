@@ -269,6 +269,19 @@ class NcsSearchRecallTests(unittest.TestCase):
 
         self.assertEqual(result["results"][0]["id"], "U_SEVERANCE")
 
+    def test_token_idf_weights_scan_the_corpus_once(self) -> None:
+        from ncs_mcp.search import core as search_core
+
+        with self._open_db() as conn:
+            self.sql_statements.clear()
+            search_core._ncs_search_token_idf_weights(
+                conn, ["퇴직정산", "처리", "관리", "퇴직정산"]
+            )
+
+        # The compact serving profile has no unit_name_raw index, so every LIKE
+        # reads the whole table. One statement keeps that at one scan.
+        self.assertEqual(len(self.sql_statements), 1)
+
     def test_token_idf_weights_fall_with_document_frequency(self) -> None:
         from ncs_mcp.search import core as search_core
 

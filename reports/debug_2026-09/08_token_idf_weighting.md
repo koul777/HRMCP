@@ -133,15 +133,36 @@ cold start 비용이 늘지 않는다.
 
 ## 성능
 
-실제 서빙 DB, 8개 질의 × 7회, 같은 프로세스에서 기능 ON/OFF 교차 측정했다.
+### 첫 측정은 잘못된 DB에서 했다
 
-| 항목 | 미적용 | 적용 |
+처음에는 `api/ncs_interview_serving_release.db`로 측정해 "측정 가능한 회귀 없음"이라고 기록했다.
+그러나 프로덕션이 싣는 것은 compact 프로파일이고, `export_interview_serving_db.py`의
+`_base_indexes(compact=True)`가 `idx_serving_units_name`을 의도적으로 제외한다.
+
+| DB | 질의 계획 |
+|---|---|
+| 로컬 release | `SCAN competency_units USING COVERING INDEX idx_units_name` |
+| 프로덕션 compact | `SCAN competency_units` |
+
+로컬에서는 `unit_name_raw` 컬럼만 읽는 커버링 스캔이지만, 프로덕션에서는 `api_definition`을
+포함한 15개 컬럼 전체를 읽는다. 첫 측정은 프로덕션 비용을 과소평가했다.
+
+### 토큰마다 스캔하지 않도록 고쳤다
+
+`ncs_ontology_compact.zip`에서 꺼낸 실제 프로덕션 DB로 다시 측정했다. 토큰 3~4개 질의 5종,
+각 7회 교차 측정이다.
+
+| 구현 | 프로덕션 compact | 로컬 release |
 |---|---:|---:|
-| 질의별 중앙값의 중앙값 | 175.556 ms | 161.421 ms |
-| 최댓값 | 207.419 ms | 205.063 ms |
+| 토큰마다 `COUNT(*)` | 11.40 ms | 3.91 ms |
+| 전체를 한 번에 집계 | **5.49 ms** | 3.24 ms |
+| 개선 | **2.07배 (-5.91 ms)** | 1.21배 (-0.67 ms) |
 
-질의별 편차가 -62 ms에서 +53 ms까지 흩어져 노이즈가 지배한다. **측정 가능한 회귀는 없고,
-개선이라고 주장하지도 않는다.** 추가된 `COUNT(*)`는 본 검색 대비 저렴하다.
+`COUNT(*)`와 토큰별 빈도를 하나의 `SELECT`로 합쳐 스캔을 1회로 만들었다. 반환되는 가중치가
+이전 구현과 완전히 동일함을 모든 토큰 집합에서 확인했다.
+
+검색 1회가 약 160 ms이므로 IDF 비용은 프로덕션 기준 약 3.4%다. 이 성질이 조용히 되돌아가지
+않도록 `test_token_idf_weights_scan_the_corpus_once`가 SQL 문장 수를 1로 고정한다.
 
 ## 검증 결과
 
