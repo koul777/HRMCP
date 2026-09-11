@@ -17,7 +17,7 @@
       "query": "업무용 차량 배차 관리",
       "filter": {"major_code": "02"},
       "without_filter_top_units": ["업무용 동산관리", "차량손해사정 기획 관리", "차량손해액 산정"],
-      "with_filter_top_units": ["업무용 동산관리", "차량운영관리", "업무지원"],
+      "with_filter_top_units": ["차량운영관리", "업무용 동산관리", "업무지원"],
       "filter_applied": true
     },
     {
@@ -37,5 +37,11 @@
     "lint_errors": 0,
     "lint_warnings": 0,
     "smoke": "pass"
+  },
+  "unfiltered_holdout_check": {
+    "fixture": "tests/fixtures/ncs_search_eval_nl_holdout.json",
+    "cases": 51,
+    "hit_at_3": 0.4902,
+    "interpretation": "scope-aware IDF does not affect calls without classification_filter"
   }
 }
