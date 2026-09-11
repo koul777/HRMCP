@@ -1,20 +1,23 @@
-<div align="center">
-
-<img src="docs/images/hrmcp_readme_overview.png" alt="민간 인사담당자를 위한 HRMCP 주요 기능 소개: 직무기술서, 구조화 면접, 교육훈련 추천, 경력개발·배치, 조직 역량관리" width="900">
-
-<br>
-
-**[🎬 HRMCP 소개 영상 보기](https://github.com/koul777/HRMCP/raw/main/docs/hrmcp_promo.mp4)** · **[🔌 연결 방법 바로가기](#-hrmcp-연결-방법)**
-
-</div>
-
----
-
 # HRMCP — NCS 기반 HR 실무용 MCP
 
 > **HR 실무에서 NCS를 활용하는 가장 빠른 길.**
 > 채용 직무에 맞는 NCS 분류부터 능력단위 → 능력단위요소 → 수행준거 → 지식(K)·기술(S)·태도(A)까지,
 > 사람이 일일이 찾아 정리하던 정보를 이제 AI가 구조화된 NCS 데이터베이스에서 직접 조회해 활용합니다.
+
+<div align="center">
+
+<img src="docs/hrmcp_promo.gif" alt="HRMCP 소개 영상: NCS 데이터를 조회해 직무기술서와 면접 질문을 만드는 과정" width="760">
+
+<br>
+
+**[🎬 원본 영상(MP4) 내려받기](https://github.com/koul777/HRMCP/raw/main/docs/hrmcp_promo.mp4)** · **[🔌 연결 방법 바로가기](#-hrmcp-연결-방법)**
+
+<br>
+<br>
+
+<img src="docs/images/hrmcp_readme_overview.png" alt="민간 인사담당자를 위한 HRMCP 주요 기능 소개: 직무기술서, 구조화 면접, 교육훈련 추천, 경력개발·배치, 조직 역량관리" width="900">
+
+</div>
 
 ---
 
