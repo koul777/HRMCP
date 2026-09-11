@@ -697,6 +697,15 @@ def search_ncs(
                         ELSE 5
                     END,
                     LENGTH(cu.unit_name_raw),
+                    CASE
+                        WHEN SUBSTR(cu.unit_code, 1, 8) =
+                             COALESCE(c.major_code, '')
+                             || COALESCE(c.middle_code, '')
+                             || COALESCE(c.small_code, '')
+                             || COALESCE(c.sub_code, '')
+                        THEN 0
+                        ELSE 1
+                    END,
                     cu.unit_code
                 LIMIT :candidate_limit
                 """,

@@ -106,6 +106,8 @@ class NcsSearchRecallTests(unittest.TestCase):
                 (1, "02", "경영", "02", "인사", "02", "인사관리", "01", "인사조직", "1"),
                 (2, "99", "기타", "99", "기타", "99", "기타", "99", "데이터분석 직무", "2"),
                 (3, "12", "이용·숙박·여행·오락·스포츠", "04", "스포츠", "04", "스포츠산업", "03", "스포츠구단", "3"),
+                (4, "02", "경영·회계·사무", "02", "총무·인사", "01", "총무", "02", "시설총무", "4"),
+                (5, "07", "사회복지·종교", "01", "사회복지", "02", "사회복지서비스", "05", "자원봉사관리", "5"),
             ),
         )
         units = (
@@ -127,6 +129,11 @@ class NcsSearchRecallTests(unittest.TestCase):
             ("U_SECURITY", "총무보안관리", "사옥 출입과 보안을 관리한다", "4", 1),
             ("U_VAT", "부가가치세 신고", "부가가치세 신고 업무를 수행한다", "4", 1),
             ("U_PLAYER", "선수연봉계약", "프로야구 선수의 연봉 협상을 수행한다", "4", 3),
+            # Same base code 02020102 20 shared by two 세분류: NCS lets a 세분류
+            # borrow a unit developed elsewhere. The borrowed copy keeps the
+            # older version tag, so a plain unit_code sort puts it first.
+            ("0202010220_19v2", "공용시설관리", "공용 시설을 관리한다", "4", 5),
+            ("0202010220_25v3", "공용시설관리", "공용 시설을 관리한다", "4", 4),
         )
         conn.executemany("INSERT INTO competency_units VALUES (?, ?, ?, ?, ?)", units)
         conn.execute(
@@ -248,6 +255,18 @@ class NcsSearchRecallTests(unittest.TestCase):
             search_core._ncs_search_intent_expansions("설비보수 외주 용역"),
             [],
         )
+
+    def test_shared_unit_ranks_home_classification_above_borrowed_copy(self) -> None:
+        result = server.search_ncs("공용시설관리", scope="unit", limit=5)
+
+        ids = [row["id"] for row in result["results"]]
+        self.assertEqual(ids, ["0202010220_25v3", "0202010220_19v2"])
+
+    def test_borrowing_classification_context_still_surfaces_borrowed_copy(self) -> None:
+        result = server.search_ncs("자원봉사관리 공용시설관리", scope="unit", limit=5)
+
+        ids = [row["id"] for row in result["results"]]
+        self.assertEqual(ids[0], "0202010220_19v2")
 
     def test_phrase_hit_skips_lower_tier_sql_for_each_type(self) -> None:
         result = server.search_ncs("data workflow", scope="all", limit=4)

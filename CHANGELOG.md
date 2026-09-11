@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Ranked a shared competency unit's home classification above a borrowed copy,
+  so `사옥 보안 점검` returns 총무보안관리 under 총무 instead of the older
+  자원봉사관리 copy. Raised 40-query Hit@1 from 0.825 to 0.850 and MRR from
+  0.8550 to 0.8675.
+- Played the promo video inline in the README, which GitHub had been serving as
+  a downloadable mp4, and reordered the header to title, summary, video, poster.
 - Improved Korean natural-language NCS search fallback ranking with field-aware
   token scoring, generic-term down-weighting, and HR recall regression coverage.
 - Added a 40-query HR search evaluation set, Hit@1/Hit@3/MRR audit tooling, and
