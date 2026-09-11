@@ -89,3 +89,10 @@ Hit@3 0.7 게이트는 기존과 동일하게 `warn` 상태다. 이는 4단계 �
 - 자연어 평가 Hit@3는 여전히 0.5000으로 목표 0.7에 미달한다. 특히 2단계 보고서에 기록한 총무·인사 동의어 보강이 다음 검색 품질 후보이며, 이번 동작 불변 리팩터링 범위에는 포함하지 않았다.
 - `db.py`와 `training_recommendation.py`는 위 계획만 작성했으며 구현하지 않았다.
 - 공개 API와 계약이 동일하므로 배포 호환성 영향은 없다. 새 `search` 패키지가 Vercel 미러에 함께 포함되는지는 parity 및 전체 배포 테스트로 검증했다.
+
+### Production 배포 확인
+
+- Vercel Production 배포 `dpl_C7C7gbkDWsjjf161GwULqceYdPJ9`가 READY 상태로 완료됐고 canonical alias `https://ncs-mcp-bridge-mini2.vercel.app`에 연결됐다.
+- 원격 MCP 전송 검증은 `ok=true`, `failures=[]`였으며 공개 도구 7개와 `career_path`, `qualification`, `job_base`, `ontology` 분석 모드를 모두 확인했다.
+- 원격 서버 버전은 `0.1.0+git.c93b3e2ff3ed34ce6524389631491976ca06ef98`로 이번 검색 모듈 커밋과 일치한다.
+- 원격 `ncs_search(query="인사 채용관리", scope="unit", limit=3)`는 HTTP 200으로 `인력채용(0202020103_23v4)`을 1위에 유지했다.
