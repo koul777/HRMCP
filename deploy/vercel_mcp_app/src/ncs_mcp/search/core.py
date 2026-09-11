@@ -83,6 +83,7 @@ def _ncs_search_markdown(
 
 _NCS_SEARCH_TYPES = ("unit", "element", "criteria", "ksa")
 _NCS_SEARCH_MATCH_MODES = {
+    -1: "intent_alias",
     0: "phrase",
     1: "token_and",
     2: "expanded_token_and",
@@ -117,6 +118,29 @@ _NCS_SEARCH_GENERIC_TOKEN_FACTOR = 0.3
 _NCS_SEARCH_QUERY_EQUIVALENTS = {
     "성과평가": ("인사평가",),
 }
+# High-specificity practitioner phrases whose official NCS unit terminology is
+# materially different.  Keep these as candidate-only retrieval hints: they do
+# not alter source data, review status, or ontology evidence.
+_NCS_SEARCH_QUERY_INTENT_EQUIVALENTS = {
+    "연봉 협상": ("임금관리",),
+    "퇴직금 정산": ("퇴직업무지원", "급여지급"),
+    "온보딩": ("인력채용", "교육훈련운영"),
+    "승진 심사": ("인력이동관리",),
+    "직원 고충": ("노사갈등 해결",),
+    "노사관계 성과 평가": ("노사관계 평가",),
+    "노사 교육": ("노사관계 교육훈련",),
+    "사내 행사": ("행사지원관리",),
+    "사무용품": ("비품관리",),
+    "법인 차량": ("차량운영관리",),
+    "사내 복지": ("복리후생지원",),
+    "사옥 보안": ("총무보안관리",),
+    "재무제표 작성": ("재무제표작성",),
+    "원천세": ("원천징수",),
+    "부가세": ("부가가치세 신고",),
+}
+_NCS_SEARCH_QUERY_INTENT_BLOCKERS = {
+    "연봉 협상": ("선수", "스포츠", "프로야구", "프로축구", "구단"),
+}
 
 
 def _normalize_ncs_search_text(value: Any) -> str:
@@ -136,6 +160,22 @@ def _normalize_ncs_search_query(query: str) -> tuple[str, list[str], list[str]]:
     phrase = " ".join(query_tokens)
     fallback_tokens = [token for token in query_tokens if len(token) > 1]
     return phrase, query_tokens, fallback_tokens
+
+
+def _ncs_search_intent_expansions(phrase: str) -> list[str]:
+    """Return deduplicated official terms for strong practitioner-language hints."""
+    normalized_phrase = phrase.casefold()
+    expansions: list[str] = []
+    for trigger, alternatives in _NCS_SEARCH_QUERY_INTENT_EQUIVALENTS.items():
+        if trigger.casefold() not in normalized_phrase:
+            continue
+        blockers = _NCS_SEARCH_QUERY_INTENT_BLOCKERS.get(trigger, ())
+        if any(blocker.casefold() in normalized_phrase for blocker in blockers):
+            continue
+        for alternative in alternatives:
+            if alternative not in expansions:
+                expansions.append(alternative)
+    return expansions
 
 
 def _escape_ncs_search_like(value: str) -> str:
@@ -355,6 +395,44 @@ def _ncs_search_tier_predicates(
     return tiers
 
 
+def _prepend_ncs_search_intent_tier(
+    tiers: list[tuple[int, str, dict[str, Any], str, str]],
+    *,
+    columns: tuple[str, ...],
+    weighted_columns: tuple[tuple[str, float], ...],
+    phrase: str,
+    intent_expansions: list[str],
+) -> list[tuple[int, str, dict[str, Any], str, str]]:
+    """Prepend a scored unit-only tier for high-confidence official terms."""
+    if not intent_expansions:
+        return tiers
+    params: dict[str, Any] = {
+        "phrase_pattern": f"%{_escape_ncs_search_like(phrase)}%",
+    }
+    parameter_groups: list[list[str]] = []
+    search_groups: list[str] = []
+    for index, alternative in enumerate(intent_expansions):
+        parameter = f"intent_{index}"
+        params[parameter] = f"%{_escape_ncs_search_like(alternative)}%"
+        parameter_groups.append([parameter])
+        search_groups.append(_ncs_search_like_any(columns, parameter))
+    score_clause, _, rank_params = _ncs_search_fallback_ranking(
+        weighted_columns,
+        intent_expansions,
+        parameter_groups,
+        search_groups,
+    )
+    params.update(rank_params)
+    intent_tier = (
+        -1,
+        "(" + " OR ".join(search_groups) + ")",
+        params,
+        score_clause,
+        "",
+    )
+    return [intent_tier, *tiers]
+
+
 def _execute_ncs_search_tiers(
     conn: Any,
     sql_template: str,
@@ -390,6 +468,7 @@ def _ncs_search_match_metadata(
     phrase: str,
     match_mode: str,
     token_expansions: dict[str, list[str]] | None = None,
+    intent_expansions: list[str] | None = None,
 ) -> None:
     raw_fields = item.pop("_search_fields", {})
     normalized_fields = {
@@ -405,6 +484,24 @@ def _ncs_search_match_metadata(
     matched_tokens: list[str] = []
     matched_expansions: list[dict[str, Any]] = []
     matched_terms: list[str] = []
+    if match_mode == "intent_alias":
+        for expansion in intent_expansions or []:
+            normalized_expansion = expansion.casefold()
+            expansion_fields = [
+                field_name
+                for field_name, value in normalized_fields.items()
+                if normalized_expansion and normalized_expansion in value
+            ]
+            if not expansion_fields:
+                continue
+            matched_terms.append(normalized_expansion)
+            matched_expansions.append(
+                {
+                    "query": phrase,
+                    "matched_as": expansion,
+                    "match_fields": expansion_fields,
+                }
+            )
     for token in query_tokens:
         normalized_token = token.casefold()
         direct_fields = [
@@ -490,6 +587,7 @@ def search_ncs(
         _NCS_SEARCH_TYPES if normalized_scope == "all" else (normalized_scope,)
     )
     phrase, query_tokens, fallback_tokens = _normalize_ncs_search_query(query)
+    intent_expansions = _ncs_search_intent_expansions(phrase)
     empty_counts = {item_type: 0 for item_type in requested_types}
     empty_more = {item_type: False for item_type in requested_types}
     if not phrase:
@@ -500,6 +598,7 @@ def search_ncs(
             "scope": normalized_scope,
             "match_mode": None,
             "query_expansions": {},
+            "query_intent_expansions": [],
             "counts_by_type": empty_counts,
             "has_more_by_type": empty_more,
             "returned": 0,
@@ -535,20 +634,28 @@ def search_ncs(
                 "c.sub_name",
                 "aliases.alias_search_text",
             )
+            weighted_columns = (
+                ("cu.unit_name_raw", 3.0),
+                ("aliases.alias_search_text", 3.0),
+                ("c.sub_name", 2.0),
+                ("c.small_name", 2.0),
+                ("c.middle_name", 1.0),
+                ("c.major_name", 1.0),
+                ("cu.api_definition", 1.0),
+            )
             tiers = _active_tier_predicates()(
                 columns,
                 phrase,
                 fallback_tokens,
                 token_expansions,
-                weighted_columns=(
-                    ("cu.unit_name_raw", 3.0),
-                    ("aliases.alias_search_text", 3.0),
-                    ("c.sub_name", 2.0),
-                    ("c.small_name", 2.0),
-                    ("c.middle_name", 1.0),
-                    ("c.major_name", 1.0),
-                    ("cu.api_definition", 1.0),
-                ),
+                weighted_columns=weighted_columns,
+            )
+            tiers = _prepend_ncs_search_intent_tier(
+                tiers,
+                columns=columns,
+                weighted_columns=weighted_columns,
+                phrase=phrase,
+                intent_expansions=intent_expansions,
             )
             rows = _active_tier_executor()(
                 conn,
@@ -782,6 +889,11 @@ def search_ncs(
         if "expanded_token_and" in active_match_modes
         else {}
     )
+    applied_intent_expansions = (
+        intent_expansions
+        if "intent_alias" in active_match_modes
+        else []
+    )
     match_mode = (
         next(iter(active_match_modes))
         if len(active_match_modes) == 1
@@ -825,6 +937,7 @@ def search_ncs(
             phrase=phrase,
             match_mode=str(match_mode_by_type[item["type"]]),
             token_expansions=token_expansions,
+            intent_expansions=intent_expansions,
         )
     next_offset = page_end if page and any(has_more_by_type.values()) else None
     result = {
@@ -835,6 +948,7 @@ def search_ncs(
         "match_mode": match_mode,
         "match_mode_by_type": match_mode_by_type,
         "query_expansions": applied_token_expansions,
+        "query_intent_expansions": applied_intent_expansions,
         "counts_by_type": counts_by_type,
         "has_more_by_type": has_more_by_type,
         "returned": len(page),

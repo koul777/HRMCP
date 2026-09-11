@@ -105,6 +105,7 @@ class NcsSearchRecallTests(unittest.TestCase):
             (
                 (1, "02", "경영", "02", "인사", "02", "인사관리", "01", "인사조직", "1"),
                 (2, "99", "기타", "99", "기타", "99", "기타", "99", "데이터분석 직무", "2"),
+                (3, "12", "이용·숙박·여행·오락·스포츠", "04", "스포츠", "04", "스포츠산업", "03", "스포츠구단", "3"),
             ),
         )
         units = (
@@ -121,6 +122,11 @@ class NcsSearchRecallTests(unittest.TestCase):
             ("U_HR_MANAGEMENT", "인사관리", "인사 운영을 관리한다", "4", 1),
             ("U_LABOR", "노무관리", "노무 업무를 관리한다", "4", 1),
             ("U_ASCII", "data workflow analysis", "data operations", "4", 1),
+            ("U_WAGE", "임금관리", "임금 정책과 보상 기준을 관리한다", "5", 1),
+            ("U_SUPPLIES", "비품관리", "사무 비품을 구매하고 관리한다", "4", 1),
+            ("U_SECURITY", "총무보안관리", "사옥 출입과 보안을 관리한다", "4", 1),
+            ("U_VAT", "부가가치세 신고", "부가가치세 신고 업무를 수행한다", "4", 1),
+            ("U_PLAYER", "선수연봉계약", "프로야구 선수의 연봉 협상을 수행한다", "4", 3),
         )
         conn.executemany("INSERT INTO competency_units VALUES (?, ?, ?, ?, ?)", units)
         conn.execute(
@@ -207,6 +213,41 @@ class NcsSearchRecallTests(unittest.TestCase):
                 self.assertEqual(result["match_mode"], "phrase")
                 self.assertEqual(result["results"][0]["id"], expected_id)
                 self.assertEqual(result["query_expansions"], {})
+
+    def test_high_specificity_practitioner_aliases_retrieve_official_units(self) -> None:
+        expectations = {
+            "연봉 협상 기준": ("U_WAGE", "임금관리"),
+            "사무용품 구매 요청": ("U_SUPPLIES", "비품관리"),
+            "사옥 보안 점검": ("U_SECURITY", "총무보안관리"),
+            "부가세 신고 준비": ("U_VAT", "부가가치세 신고"),
+        }
+
+        for query, (expected_id, expected_expansion) in expectations.items():
+            with self.subTest(query=query):
+                result = server.search_ncs(query, scope="unit", limit=3)
+                self.assertEqual(result["match_mode"], "intent_alias")
+                self.assertEqual(result["results"][0]["id"], expected_id)
+                self.assertIn(expected_expansion, result["query_intent_expansions"])
+                self.assertEqual(
+                    result["results"][0]["matched_expansions"][0]["matched_as"],
+                    expected_expansion,
+                )
+
+    def test_intent_aliases_do_not_override_explicit_cross_domain_qualifiers(self) -> None:
+        from ncs_mcp.search import core as search_core
+
+        sports = server.search_ncs("프로야구 선수 연봉 협상", scope="unit", limit=3)
+
+        self.assertEqual(sports["results"][0]["id"], "U_PLAYER")
+        self.assertEqual(sports["query_intent_expansions"], [])
+        self.assertEqual(
+            search_core._ncs_search_intent_expansions("자동차 제조 원가 계산"),
+            [],
+        )
+        self.assertEqual(
+            search_core._ncs_search_intent_expansions("설비보수 외주 용역"),
+            [],
+        )
 
     def test_phrase_hit_skips_lower_tier_sql_for_each_type(self) -> None:
         result = server.search_ncs("data workflow", scope="all", limit=4)
