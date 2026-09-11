@@ -76,7 +76,10 @@ Vercel 전용 패키지는 변경 전부터 수집 의존성을 포함하지 않
 - Vercel `ncs-mcp-bridge-mini2` Production 환경에 다음 config를 등록했다.
   - `NCS_MCP_ALLOWED_HOSTS=ncs-mcp-bridge-mini2.vercel.app`
   - `NCS_MCP_DISABLE_DNS_REBINDING_PROTECTION=0`
-- Production 재배포와 실제 MCP transport 검증 결과는 배포 후 아래에 추가한다.
+- Production 배포 `dpl_GjgSREpphUe6JiDZCUM1yr1irPNT`가 READY 상태로 완료됐고 canonical alias가 `https://ncs-mcp-bridge-mini2.vercel.app`에 연결됐다.
+- 원격 MCP 검증은 서버 버전 `0.1.0+git.adc3a0b4fd31f4d79fdada5de6e62193bffd80d5`를 확인했다. initialize, initialized notification, tools/list, 공개 도구 7개 및 analysis 4개 모드가 모두 통과했고 `failures=[]`, `ok=true`였다.
+- 실제 원격 `ncs_unit_detail(0202020103_23v4)` 응답에서 `-` 수준 표시를 확인했다.
+- Production과 같은 환경으로 런타임 설정을 검사한 결과 `enable_dns_rebinding_protection=true`, `allowed_hosts=['ncs-mcp-bridge-mini2.vercel.app']`였다. 임의 Host 헤더 요청은 Vercel edge에서 HTTP 404로 먼저 차단됐다. canonical MCP 요청은 정상 동작하므로 원복하지 않았다.
 
 ### 미해결 이슈
 
