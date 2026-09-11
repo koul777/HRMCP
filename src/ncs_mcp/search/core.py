@@ -412,8 +412,16 @@ def _validated_ncs_search_token_expansions(
 def _ncs_search_token_idf_weights(
     conn: Any,
     fallback_tokens: list[str],
+    classification_filter: dict[str, str] | None = None,
 ) -> dict[str, float]:
-    """Weight each fallback token by how few unit names contain it."""
+    """Weight tokens by document frequency in the active search corpus.
+
+    When callers provide a classification filter, the IDF corpus must be the
+    same filtered unit set used by the search tiers.  Otherwise a token can be
+    common in unrelated NCS majors and be underweighted inside the requested
+    scope.  The no-filter path intentionally keeps the original whole-corpus
+    query shape and behavior.
+    """
     tokens = list(dict.fromkeys(fallback_tokens))
     if not tokens:
         return {}
@@ -431,10 +439,21 @@ def _ncs_search_token_idf_weights(
         f"idf_token_{index}": f"%{_escape_ncs_search_like(token)}%"
         for index, token in enumerate(tokens)
     }
-    row = conn.execute(
-        f"SELECT COUNT(*), {frequency_terms} FROM competency_units",
-        params,
-    ).fetchone()
+    normalized_filter = classification_filter or {}
+    scope_clause, scope_params = _ncs_classification_filter_sql(
+        normalized_filter,
+        alias="c",
+    )
+    if scope_clause:
+        from_clause = (
+            "competency_units cu "
+            "JOIN classifications c ON c.classification_id = cu.classification_id"
+        )
+        sql = f"SELECT COUNT(*), {frequency_terms} FROM {from_clause} WHERE {scope_clause}"
+        params = {**params, **scope_params}
+    else:
+        sql = f"SELECT COUNT(*), {frequency_terms} FROM competency_units"
+    row = conn.execute(sql, params).fetchone()
     total = int(row[0] or 0)
     if total <= 1:
         return {}
@@ -816,7 +835,11 @@ def search_ncs(
             conn,
             fallback_tokens,
         )
-        token_weights = _ncs_search_token_idf_weights(conn, fallback_tokens)
+        token_weights = _ncs_search_token_idf_weights(
+            conn,
+            fallback_tokens,
+            normalized_classification_filter,
+        )
         if "unit" in requested_types:
             columns = (
                 "cu.unit_code",

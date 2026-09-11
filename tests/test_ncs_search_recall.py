@@ -330,6 +330,63 @@ class NcsSearchRecallTests(unittest.TestCase):
         self.assertGreaterEqual(weights["처리"], search_core._NCS_SEARCH_IDF_FLOOR)
         self.assertLessEqual(weights["퇴직정산"], 1.0)
 
+    def test_token_idf_weights_use_explicit_classification_scope(self) -> None:
+        from ncs_mcp.search import core as search_core
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE classifications (
+                    classification_id INTEGER PRIMARY KEY,
+                    major_code TEXT, major_name TEXT,
+                    middle_code TEXT, middle_name TEXT,
+                    small_code TEXT, small_name TEXT,
+                    sub_code TEXT, sub_name TEXT,
+                    duty_order TEXT
+                );
+                CREATE TABLE competency_units (
+                    unit_code TEXT PRIMARY KEY,
+                    unit_name_raw TEXT,
+                    api_definition TEXT,
+                    unit_level_raw TEXT,
+                    classification_id INTEGER
+                );
+                """
+            )
+            conn.executemany(
+                "INSERT INTO classifications VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    (1, "02", "경영", "", "", "", "", "", "", "1"),
+                    (2, "15", "기계", "", "", "", "", "", "", "2"),
+                ),
+            )
+            conn.executemany(
+                "INSERT INTO competency_units VALUES (?, ?, ?, ?, ?)",
+                (
+                    ("HR_VEHICLE", "차량운영", "", "4", 1),
+                    ("HR_ADMIN", "업무관리", "", "4", 1),
+                    ("MECH_VEHICLE", "차량제조", "", "4", 2),
+                    ("MECH_ADMIN", "업무관리", "", "4", 2),
+                ),
+            )
+            search_core._register_ncs_search_udfs(conn)
+            global_weights = search_core._ncs_search_token_idf_weights(
+                conn,
+                ["차량"],
+            )
+            scoped_weights = search_core._ncs_search_token_idf_weights(
+                conn,
+                ["차량"],
+                {"major_code": "02"},
+            )
+        finally:
+            conn.close()
+
+        self.assertGreater(scoped_weights["차량"], global_weights["차량"])
+        self.assertLessEqual(scoped_weights["차량"], 1.0)
+
     def test_shared_unit_ranks_home_classification_above_borrowed_copy(self) -> None:
         result = server.search_ncs("공용시설관리", scope="unit", limit=5)
 

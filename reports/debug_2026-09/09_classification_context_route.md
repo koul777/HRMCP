@@ -18,6 +18,9 @@
   `classification_context`와 route fingerprint를 반환한다. 따라서
   discovery 단계에서 scope를 확인한 뒤 execution 단계로 넘길 수 있다.
 - 검색 계층은 기존의 parameter-bound hard filter를 그대로 적용한다.
+- 명시적 분류 필터가 있을 때 fallback IDF도 같은 분류 범위의
+  `competency_units`만 분모로 사용해, 범위 밖의 동명 토큰 빈도가 랭킹을
+  희석하지 않게 한다. 필터가 없으면 전체 corpus 계산을 유지한다.
 - Vercel mirror와 canonical source의 query router/server 파일 parity를 유지한다.
 
 ## 실제 DB 확인

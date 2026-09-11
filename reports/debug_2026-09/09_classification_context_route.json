@@ -9,7 +9,8 @@
     "classification_filter_parameter": "classification_filter",
     "mode": "explicit_hard_filter",
     "route_fingerprint_includes_filter": true,
-    "discovery_accepts_filter": true
+    "discovery_accepts_filter": true,
+    "idf_uses_filtered_corpus": true
   },
   "examples": [
     {
