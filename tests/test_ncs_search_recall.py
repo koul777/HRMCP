@@ -108,6 +108,7 @@ class NcsSearchRecallTests(unittest.TestCase):
                 (3, "12", "이용·숙박·여행·오락·스포츠", "04", "스포츠", "04", "스포츠산업", "03", "스포츠구단", "3"),
                 (4, "02", "경영·회계·사무", "02", "총무·인사", "01", "총무", "02", "시설총무", "4"),
                 (5, "07", "사회복지·종교", "01", "사회복지", "02", "사회복지서비스", "05", "자원봉사관리", "5"),
+                (6, "15", "기계", "01", "금속가공", "01", "표면가공", "01", "금속표면가공", "6"),
             ),
         )
         units = (
@@ -134,6 +135,13 @@ class NcsSearchRecallTests(unittest.TestCase):
             # older version tag, so a plain unit_code sort puts it first.
             ("0202010220_19v2", "공용시설관리", "공용 시설을 관리한다", "4", 5),
             ("0202010220_25v3", "공용시설관리", "공용 시설을 관리한다", "4", 4),
+            # 처리 spreads across the corpus while 퇴직정산 names one unit, so a
+            # lone 퇴직정산 hit has to outrank a lone 처리 hit even though the
+            # heat-treatment names are shorter.
+            ("U_HEAT_1", "심냉처리", "금속을 냉각한다", "3", 6),
+            ("U_HEAT_2", "퀜칭열처리", "금속을 열처리한다", "3", 6),
+            ("U_HEAT_3", "진공열처리", "진공에서 열처리한다", "3", 6),
+            ("U_SEVERANCE", "퇴직정산지원", "퇴직 정산 업무를 지원한다", "4", 1),
         )
         conn.executemany("INSERT INTO competency_units VALUES (?, ?, ?, ?, ?)", units)
         conn.execute(
@@ -255,6 +263,23 @@ class NcsSearchRecallTests(unittest.TestCase):
             search_core._ncs_search_intent_expansions("설비보수 외주 용역"),
             [],
         )
+
+    def test_rare_token_outranks_common_token_in_fallback(self) -> None:
+        result = server.search_ncs("퇴직정산 처리", scope="unit", limit=5)
+
+        self.assertEqual(result["results"][0]["id"], "U_SEVERANCE")
+
+    def test_token_idf_weights_fall_with_document_frequency(self) -> None:
+        from ncs_mcp.search import core as search_core
+
+        with self._open_db() as conn:
+            weights = search_core._ncs_search_token_idf_weights(
+                conn, ["퇴직정산", "처리"]
+            )
+
+        self.assertLess(weights["처리"], weights["퇴직정산"])
+        self.assertGreaterEqual(weights["처리"], search_core._NCS_SEARCH_IDF_FLOOR)
+        self.assertLessEqual(weights["퇴직정산"], 1.0)
 
     def test_shared_unit_ranks_home_classification_above_borrowed_copy(self) -> None:
         result = server.search_ncs("공용시설관리", scope="unit", limit=5)

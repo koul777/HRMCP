@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from typing import Any
@@ -113,6 +114,14 @@ _NCS_SEARCH_GENERIC_TOKENS = frozenset(
     }
 )
 _NCS_SEARCH_GENERIC_TOKEN_FACTOR = 0.3
+# Fallback scoring weighs each token by how few unit names contain it.  A hand
+# kept generic list only covers the words someone thought of: 퇴직 names 2 units
+# and 처리 names 195, but both scored 1.0, so a lone 처리 hit tied with a lone
+# 퇴직 hit and the shorter name won the length tiebreak -- which is how
+# 퇴직 정산 서류 처리 returned 심냉처리 and 퀜칭열처리.  Document frequency is
+# measured over unit names, the highest weighted field, and normalized to
+# (0, 1] so score magnitudes stay in the range the tiers already assume.
+_NCS_SEARCH_IDF_FLOOR = 0.05
 # Public-search recall equivalences bridge practitioner language to official NCS
 # names.  They are candidate-only expansions, not source evidence or DB writes.
 _NCS_SEARCH_QUERY_EQUIVALENTS = {
@@ -272,11 +281,41 @@ def _validated_ncs_search_token_expansions(
     return expansions
 
 
+def _ncs_search_token_idf_weights(
+    conn: Any,
+    fallback_tokens: list[str],
+) -> dict[str, float]:
+    """Weight each fallback token by how few unit names contain it."""
+    if not fallback_tokens:
+        return {}
+    total = conn.execute("SELECT COUNT(*) FROM competency_units").fetchone()[0]
+    total = int(total or 0)
+    if total <= 1:
+        return {}
+    ceiling = math.log(total)
+    weights: dict[str, float] = {}
+    for token in fallback_tokens:
+        if token in weights:
+            continue
+        row = conn.execute(
+            "SELECT COUNT(*) FROM competency_units "
+            "WHERE unit_name_raw LIKE :token ESCAPE '\\'",
+            {"token": f"%{_escape_ncs_search_like(token)}%"},
+        ).fetchone()
+        frequency = max(int(row[0] or 0), 1)
+        weights[token] = max(
+            _NCS_SEARCH_IDF_FLOOR,
+            math.log(total / frequency) / ceiling,
+        )
+    return weights
+
+
 def _ncs_search_fallback_ranking(
     weighted_columns: tuple[tuple[str, float], ...],
     fallback_tokens: list[str],
     parameter_groups: list[list[str]],
     search_groups: list[str],
+    token_weights: dict[str, float] | None = None,
 ) -> tuple[str, str, dict[str, Any]]:
     """Build a parameter-bound score and a non-generic-hit predicate.
 
@@ -286,21 +325,24 @@ def _ncs_search_fallback_ranking(
     score_terms: list[str] = []
     meaningful_groups: list[str] = []
     rank_params: dict[str, Any] = {}
+    weights = token_weights or {}
     for token_index, token in enumerate(fallback_tokens):
-        generic_factor = (
-            _NCS_SEARCH_GENERIC_TOKEN_FACTOR
-            if token.casefold() in _NCS_SEARCH_GENERIC_TOKENS
-            else 1.0
-        )
-        if generic_factor == 1.0:
+        is_generic = token.casefold() in _NCS_SEARCH_GENERIC_TOKENS
+        if not is_generic:
             meaningful_groups.append(search_groups[token_index])
+        # Document frequency subsumes the hand kept list for scoring; the list
+        # still decides which tokens may be a sole fallback hit.
+        token_factor = weights.get(
+            token,
+            _NCS_SEARCH_GENERIC_TOKEN_FACTOR if is_generic else 1.0,
+        )
         for column_index, (column, field_weight) in enumerate(weighted_columns):
             field_matches = "(" + " OR ".join(
                 _ncs_search_like_any((column,), parameter)
                 for parameter in parameter_groups[token_index]
             ) + ")"
             weight_parameter = f"rank_weight_{token_index}_{column_index}"
-            rank_params[weight_parameter] = field_weight * generic_factor
+            rank_params[weight_parameter] = field_weight * token_factor
             score_terms.append(
                 f"CASE WHEN {field_matches} "
                 f"THEN :{weight_parameter} ELSE 0 END"
@@ -320,6 +362,7 @@ def _ncs_search_tier_predicates(
     fallback_tokens: list[str],
     token_expansions: dict[str, list[str]] | None = None,
     weighted_columns: tuple[tuple[str, float], ...] | None = None,
+    token_weights: dict[str, float] | None = None,
 ) -> list[tuple[int, str, dict[str, Any], str, str]]:
     params: dict[str, Any] = {
         "phrase_pattern": f"%{_escape_ncs_search_like(phrase)}%",
@@ -361,6 +404,7 @@ def _ncs_search_tier_predicates(
         fallback_tokens,
         parameter_groups,
         search_groups,
+        token_weights,
     )
     params.update(rank_params)
     tiers = [
@@ -623,6 +667,7 @@ def search_ncs(
             conn,
             fallback_tokens,
         )
+        token_weights = _ncs_search_token_idf_weights(conn, fallback_tokens)
         if "unit" in requested_types:
             columns = (
                 "cu.unit_code",
@@ -649,6 +694,7 @@ def search_ncs(
                 fallback_tokens,
                 token_expansions,
                 weighted_columns=weighted_columns,
+                token_weights=token_weights,
             )
             tiers = _prepend_ncs_search_intent_tier(
                 tiers,
