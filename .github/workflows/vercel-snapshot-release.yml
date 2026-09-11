@@ -70,22 +70,44 @@ jobs:
         with:
           lfs: false
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: Install Python package
+      - name: Check user-space Python
+        shell: powershell
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e .
-          python -m pip check
+          $python = Get-Command python -ErrorAction Stop
+          $version = (& python --version 2>&1 | Out-String).Trim()
+          if ($version -notmatch 'Python 3\.(11|12|13)') {
+            throw "A user-space Python 3.11+ interpreter is required; found $version."
+          }
+          "RUNNER_SYSTEM_PYTHON=$($python.Source)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Check user-space Node.js
+        shell: powershell
+        run: |
+          $node = Get-Command node -ErrorAction Stop
+          $version = (& node --version 2>&1 | Out-String).Trim()
+          if ($version -notmatch '^v(22|23|24)\.') {
+            throw "A user-space Node.js 22+ interpreter is required; found $version."
+          }
+          "RUNNER_SYSTEM_NODE=$($node.Source)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install Python package in user-space venv
+        shell: powershell
+        run: |
+          $venv = Join-Path $env:GITHUB_WORKSPACE '.ncs-runner-venv'
+          if (-not (Test-Path -LiteralPath (Join-Path $venv 'Scripts\python.exe') -PathType Leaf)) {
+            python -m venv $venv
+            if ($LASTEXITCODE -ne 0) { throw "Unable to create the user-space Python venv." }
+          }
+          $venvPython = Join-Path $venv 'Scripts\python.exe'
+          & $venvPython -m pip install --upgrade pip
+          if ($LASTEXITCODE -ne 0) { throw "Unable to upgrade pip in the user-space venv." }
+          & $venvPython -m pip install -e .
+          if ($LASTEXITCODE -ne 0) { throw "Unable to install the NCS package in the user-space venv." }
+          & $venvPython -m pip check
+          if ($LASTEXITCODE -ne 0) { throw "The user-space venv dependency check failed." }
+          "RUNNER_VENV=$venv" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RUNNER_PYTHON=$venvPython" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          (Join-Path $venv 'Scripts') | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Install Vercel CLI
         run: npm install --global vercel@latest
