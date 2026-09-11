@@ -13,6 +13,17 @@ _TIER_PREDICATES: Any = None
 _TIER_EXECUTOR: Any = None
 _TOKEN_EXPANDER: Any = None
 
+_NCS_CLASSIFICATION_FILTER_FIELDS = (
+    "major_code",
+    "middle_code",
+    "small_code",
+    "sub_code",
+    "major_name",
+    "middle_name",
+    "small_name",
+    "sub_name",
+)
+
 
 def configure_search_runtime(
     *,
@@ -171,6 +182,111 @@ def _normalize_ncs_search_query(query: str) -> tuple[str, list[str], list[str]]:
     return phrase, query_tokens, fallback_tokens
 
 
+def _ncs_search_boundary_match(value: Any, needle: Any) -> int:
+    """Return 1 when ``needle`` starts at a lexical boundary in ``value``.
+
+    NCS names are Korean compounds, so a right-hand boundary would reject
+    useful prefix matches such as ``데이터분석`` -> ``데이터분석 실무``.  The
+    important false-positive case is a query token occurring *inside* another
+    word (for example ``차량`` in ``철도차량``), which is rejected by requiring
+    a non-word character on the left unless the match starts at position 0.
+    The helper is deliberately small and deterministic so it can be registered
+    as a SQLite UDF for every search connection and reused by Python metadata.
+    """
+    normalized_value = _normalize_ncs_search_text(value).casefold()
+    normalized_needle = _normalize_ncs_search_text(needle).casefold()
+    if not normalized_value or not normalized_needle:
+        return 0
+    start = 0
+    while True:
+        index = normalized_value.find(normalized_needle, start)
+        if index < 0:
+            return 0
+        if index == 0 or not _ncs_search_word_character(normalized_value[index - 1]):
+            return 1
+        start = index + 1
+
+
+def _ncs_search_word_character(character: str) -> bool:
+    """Whether a character belongs to a lexical token for boundary checks."""
+    if not character:
+        return False
+    category = unicodedata.category(character)
+    return character == "_" or category[0] in {"L", "N", "M"}
+
+
+def _register_ncs_search_udfs(conn: Any) -> None:
+    """Install search UDFs on a connection before executing tier SQL."""
+    conn.create_function("ncs_search_match", 2, _ncs_search_boundary_match)
+
+
+def _normalize_ncs_classification_filter(
+    classification_filter: dict[str, Any] | None,
+) -> dict[str, str]:
+    """Keep only explicit, parameter-bound classification constraints."""
+    if not isinstance(classification_filter, dict):
+        return {}
+    normalized: dict[str, str] = {}
+    for field in _NCS_CLASSIFICATION_FILTER_FIELDS:
+        value = classification_filter.get(field)
+        if value is None:
+            continue
+        text = _normalize_ncs_search_text(value)
+        if text:
+            normalized[field] = text
+    return normalized
+
+
+def _ncs_classification_filter_sql(
+    classification_filter: dict[str, str],
+    *,
+    alias: str = "c",
+) -> tuple[str, dict[str, str]]:
+    """Build exact-code/boundary-name predicates for a classification alias."""
+    clauses: list[str] = []
+    params: dict[str, str] = {}
+    for field in _NCS_CLASSIFICATION_FILTER_FIELDS:
+        value = classification_filter.get(field)
+        if not value:
+            continue
+        parameter = f"class_filter_{field}"
+        params[parameter] = value
+        if field.endswith("_code"):
+            clauses.append(
+                f"TRIM(COALESCE({alias}.{field}, '')) = :{parameter} COLLATE NOCASE"
+            )
+        else:
+            clauses.append(
+                f"ncs_search_match(COALESCE({alias}.{field}, ''), :{parameter}) = 1"
+            )
+    if not clauses:
+        return "", {}
+    return "(" + " AND ".join(clauses) + ")", params
+
+
+def _apply_ncs_classification_filter_to_tiers(
+    tiers: list[tuple[int, str, dict[str, Any], str, str]],
+    classification_filter: dict[str, str],
+) -> list[tuple[int, str, dict[str, Any], str, str]]:
+    clause, filter_params = _ncs_classification_filter_sql(classification_filter)
+    if not clause:
+        return tiers
+    filtered: list[tuple[int, str, dict[str, Any], str, str]] = []
+    for match_tier, where_clause, params, score_clause, meaningful_clause in tiers:
+        tier_params = dict(params)
+        tier_params.update(filter_params)
+        filtered.append(
+            (
+                match_tier,
+                f"({where_clause}) AND {clause}",
+                tier_params,
+                score_clause,
+                meaningful_clause,
+            )
+        )
+    return filtered
+
+
 def _ncs_search_intent_expansions(phrase: str) -> list[str]:
     """Return deduplicated official terms for strong practitioner-language hints."""
     normalized_phrase = phrase.casefold()
@@ -194,6 +310,14 @@ def _escape_ncs_search_like(value: str) -> str:
 def _ncs_search_like_any(columns: tuple[str, ...], parameter: str) -> str:
     return "(" + " OR ".join(
         f"COALESCE({column}, '') LIKE :{parameter} ESCAPE '\\'"
+        for column in columns
+    ) + ")"
+
+
+def _ncs_search_boundary_any(columns: tuple[str, ...], parameter: str) -> str:
+    """Build a parameter-bound lexical-boundary predicate for SQL search."""
+    return "(" + " OR ".join(
+        f"ncs_search_match(COALESCE({column}, ''), :{parameter}) = 1"
         for column in columns
     ) + ")"
 
@@ -349,7 +473,7 @@ def _ncs_search_fallback_ranking(
         )
         for column_index, (column, field_weight) in enumerate(weighted_columns):
             field_matches = "(" + " OR ".join(
-                _ncs_search_like_any((column,), parameter)
+                _ncs_search_boundary_any((column,), parameter)
                 for parameter in parameter_groups[token_index]
             ) + ")"
             weight_parameter = f"rank_weight_{token_index}_{column_index}"
@@ -377,14 +501,15 @@ def _ncs_search_tier_predicates(
 ) -> list[tuple[int, str, dict[str, Any], str, str]]:
     params: dict[str, Any] = {
         "phrase_pattern": f"%{_escape_ncs_search_like(phrase)}%",
+        "phrase_term": phrase,
     }
-    phrase_clause = _ncs_search_like_any(columns, "phrase_pattern")
+    phrase_clause = _ncs_search_boundary_any(columns, "phrase_term")
     token_clauses: list[str] = []
     parameter_groups: list[list[str]] = []
     for index, token in enumerate(fallback_tokens):
         parameter = f"token_{index}"
-        params[parameter] = f"%{_escape_ncs_search_like(token)}%"
-        token_clauses.append(_ncs_search_like_any(columns, parameter))
+        params[parameter] = token
+        token_clauses.append(_ncs_search_boundary_any(columns, parameter))
         parameter_groups.append([parameter])
     if not token_clauses:
         return [(0, phrase_clause, params, "", "")]
@@ -400,11 +525,11 @@ def _ncs_search_tier_predicates(
                 start=1,
             ):
                 parameter = f"expanded_{token_index}_{alternative_index}"
-                params[parameter] = f"%{_escape_ncs_search_like(alternative)}%"
+                params[parameter] = alternative
                 parameter_groups[token_index].append(parameter)
     search_groups = [
         "(" + " OR ".join(
-            _ncs_search_like_any(columns, parameter)
+            _ncs_search_boundary_any(columns, parameter)
             for parameter in group
         ) + ")"
         for group in parameter_groups
@@ -468,9 +593,9 @@ def _prepend_ncs_search_intent_tier(
     search_groups: list[str] = []
     for index, alternative in enumerate(intent_expansions):
         parameter = f"intent_{index}"
-        params[parameter] = f"%{_escape_ncs_search_like(alternative)}%"
+        params[parameter] = alternative
         parameter_groups.append([parameter])
-        search_groups.append(_ncs_search_like_any(columns, parameter))
+        search_groups.append(_ncs_search_boundary_any(columns, parameter))
     score_clause, _, rank_params = _ncs_search_fallback_ranking(
         weighted_columns,
         intent_expansions,
@@ -545,7 +670,8 @@ def _ncs_search_match_metadata(
             expansion_fields = [
                 field_name
                 for field_name, value in normalized_fields.items()
-                if normalized_expansion and normalized_expansion in value
+                if normalized_expansion
+                and _ncs_search_boundary_match(value, normalized_expansion)
             ]
             if not expansion_fields:
                 continue
@@ -562,7 +688,7 @@ def _ncs_search_match_metadata(
         direct_fields = [
             field_name
             for field_name, value in normalized_fields.items()
-            if normalized_token and normalized_token in value
+            if normalized_token and _ncs_search_boundary_match(value, normalized_token)
         ]
         if direct_fields:
             matched_tokens.append(token)
@@ -573,7 +699,8 @@ def _ncs_search_match_metadata(
             expansion_fields = [
                 field_name
                 for field_name, value in normalized_fields.items()
-                if normalized_expansion and normalized_expansion in value
+                if normalized_expansion
+                and _ncs_search_boundary_match(value, normalized_expansion)
             ]
             if not expansion_fields:
                 continue
@@ -592,13 +719,13 @@ def _ncs_search_match_metadata(
         match_fields = [
             field_name
             for field_name, value in normalized_fields.items()
-            if normalized_phrase and normalized_phrase in value
+            if normalized_phrase and _ncs_search_boundary_match(value, normalized_phrase)
         ]
     else:
         match_fields = [
             field_name
             for field_name, value in normalized_fields.items()
-            if any(term in value for term in matched_terms)
+            if any(_ncs_search_boundary_match(value, term) for term in matched_terms)
         ]
     item.pop("_match_tier", None)
     item["match_mode"] = match_mode
@@ -630,6 +757,7 @@ def search_ncs(
     scope: str = "all",
     limit: int = 50,
     offset: int = 0,
+    classification_filter: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Search NCS evidence with phrase, token-AND, and token-OR fallback."""
     max_rows = _required_runtime_helper("clamp_limit", _CLAMP_LIMIT)(limit)
@@ -642,6 +770,9 @@ def search_ncs(
         _NCS_SEARCH_TYPES if normalized_scope == "all" else (normalized_scope,)
     )
     phrase, query_tokens, fallback_tokens = _normalize_ncs_search_query(query)
+    normalized_classification_filter = _normalize_ncs_classification_filter(
+        classification_filter
+    )
     intent_expansions = _ncs_search_intent_expansions(phrase)
     empty_counts = {item_type: 0 for item_type in requested_types}
     empty_more = {item_type: False for item_type in requested_types}
@@ -651,6 +782,8 @@ def search_ncs(
             "normalized_query": phrase,
             "query_tokens": query_tokens,
             "scope": normalized_scope,
+            "classification_filter": normalized_classification_filter,
+            "classification_filter_applied": bool(normalized_classification_filter),
             "match_mode": None,
             "query_expansions": {},
             "query_intent_expansions": [],
@@ -674,6 +807,7 @@ def search_ncs(
         item_type: [] for item_type in requested_types
     }
     with _required_runtime_helper("open_db", _OPEN_DB_FACTORY)() as conn:
+        _register_ncs_search_udfs(conn)
         token_expansions = _active_token_expander()(
             conn,
             fallback_tokens,
@@ -713,6 +847,10 @@ def search_ncs(
                 weighted_columns=weighted_columns,
                 phrase=phrase,
                 intent_expansions=intent_expansions,
+            )
+            tiers = _apply_ncs_classification_filter_to_tiers(
+                tiers,
+                normalized_classification_filter,
             )
             rows = _active_tier_executor()(
                 conn,
@@ -805,6 +943,10 @@ def search_ncs(
                 token_expansions,
                 weighted_columns=(("ce.element_name_raw", 3.0),),
             )
+            tiers = _apply_ncs_classification_filter_to_tiers(
+                tiers,
+                normalized_classification_filter,
+            )
             rows = _active_tier_executor()(
                 conn,
                 """
@@ -812,6 +954,7 @@ def search_ncs(
                        :match_tier AS match_tier
                 FROM competency_elements ce
                 JOIN competency_units cu ON cu.unit_code = ce.unit_code
+                JOIN classifications c ON c.classification_id = cu.classification_id
                 WHERE {where_clause}{fallback_filter_clause}
                 ORDER BY match_tier, {fallback_order_clause}
                          LENGTH(ce.element_name_raw), ce.element_id
@@ -847,6 +990,10 @@ def search_ncs(
                     ("pc.criteria_text_refined", 3.0),
                 ),
             )
+            tiers = _apply_ncs_classification_filter_to_tiers(
+                tiers,
+                normalized_classification_filter,
+            )
             rows = _active_tier_executor()(
                 conn,
                 """
@@ -856,6 +1003,7 @@ def search_ncs(
                 FROM performance_criteria pc
                 JOIN competency_elements ce ON ce.element_id = pc.element_id
                 JOIN competency_units cu ON cu.unit_code = ce.unit_code
+                JOIN classifications c ON c.classification_id = cu.classification_id
                 WHERE {where_clause}{fallback_filter_clause}
                 ORDER BY match_tier, {fallback_order_clause} pc.criteria_id
                 LIMIT :candidate_limit
@@ -895,6 +1043,10 @@ def search_ncs(
                     ("ki.ksa_text_refined", 3.0),
                 ),
             )
+            tiers = _apply_ncs_classification_filter_to_tiers(
+                tiers,
+                normalized_classification_filter,
+            )
             rows = _active_tier_executor()(
                 conn,
                 """
@@ -904,6 +1056,7 @@ def search_ncs(
                 FROM ksa_items ki
                 JOIN competency_elements ce ON ce.element_id = ki.element_id
                 JOIN competency_units cu ON cu.unit_code = ce.unit_code
+                JOIN classifications c ON c.classification_id = cu.classification_id
                 WHERE {where_clause}{fallback_filter_clause}
                 ORDER BY match_tier, {fallback_order_clause} ki.ksa_id
                 LIMIT :candidate_limit
@@ -1011,6 +1164,8 @@ def search_ncs(
         "normalized_query": phrase,
         "query_tokens": query_tokens,
         "scope": normalized_scope,
+        "classification_filter": normalized_classification_filter,
+        "classification_filter_applied": bool(normalized_classification_filter),
         "match_mode": match_mode,
         "match_mode_by_type": match_mode_by_type,
         "query_expansions": applied_token_expansions,

@@ -1629,11 +1629,26 @@ def ncs_search(
     scope: str = "all",
     limit: int = 20,
     offset: int = 0,
+    classification_filter: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """NCS 분류·능력단위·요소·수행준거·KSA를 검색합니다. Search NCS structure and evidence."""
     normalized_scope = scope if scope in {"unit", "element", "criteria", "ksa", "all"} else "all"
     if not query:
-        result = list_classifications(limit=limit)
+        filter_kwargs = {
+            key: value
+            for key, value in (classification_filter or {}).items()
+            if key in {
+                "major_code",
+                "major_name",
+                "middle_code",
+                "middle_name",
+                "small_code",
+                "small_name",
+                "sub_code",
+                "sub_name",
+            }
+        }
+        result = list_classifications(limit=limit, **filter_kwargs)
         rows = result.get("classifications", [])
         if not rows:
             return not_found_response("NCS 분류 목록을 찾을 수 없습니다.")
@@ -1651,6 +1666,7 @@ def ncs_search(
         scope=normalized_scope,
         limit=limit,
         offset=offset,
+        classification_filter=classification_filter,
     )
     rows = result.get("results", [])
     if not rows:
@@ -1666,6 +1682,9 @@ def ncs_search(
                 "ksa_items",
             ],
             "returned": len(rows),
+            "classification_filter_applied": bool(
+                result.get("classification_filter_applied")
+            ),
             "generated_at": now_utc(),
         },
         include_data_alias=False,

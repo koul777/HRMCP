@@ -16,6 +16,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from ncs_mcp import server  # noqa: E402
+from ncs_mcp.search import core as search_core  # noqa: E402
 
 
 class NcsSearchRecallTests(unittest.TestCase):
@@ -36,6 +37,41 @@ class NcsSearchRecallTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.open_db_patch.stop()
         self.temp_dir.cleanup()
+
+    def test_boundary_match_rejects_internal_compound_but_keeps_prefix(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        try:
+            search_core._register_ncs_search_udfs(conn)
+            rows = conn.execute(
+                """
+                SELECT
+                    ncs_search_match('alphabet soup', 'beta'),
+                    ncs_search_match('beta testing', 'beta'),
+                    ncs_search_match('alpha beta', 'beta'),
+                    ncs_search_match('alpha-beta', 'beta')
+                """
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertEqual(tuple(rows), (0, 1, 1, 1))
+
+    def test_classification_filter_is_applied_to_structure_search(self) -> None:
+        unfiltered = server.search_ncs(
+            "data workflow analysis",
+            scope="unit",
+            limit=5,
+        )
+        filtered_out = server.search_ncs(
+            "data workflow analysis",
+            scope="unit",
+            limit=5,
+            classification_filter={"major_code": "99"},
+        )
+
+        self.assertEqual(unfiltered["results"][0]["id"], "U_ASCII")
+        self.assertEqual(filtered_out["results"], [])
+        self.assertEqual(filtered_out["classification_filter"], {"major_code": "99"})
+        self.assertTrue(filtered_out["classification_filter_applied"])
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)

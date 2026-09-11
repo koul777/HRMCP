@@ -398,6 +398,17 @@ TASK_TRAINING_CONTEXT_ONLY_SIGNALS = {
     "요구 수준",
 }
 
+SEARCH_CLASSIFICATION_FILTER_FIELDS = (
+    "major_code",
+    "middle_code",
+    "small_code",
+    "sub_code",
+    "major_name",
+    "middle_name",
+    "small_name",
+    "sub_name",
+)
+
 DIRECT_TASK_TRANSITION_SIGNALS = (
     "similar task",
     "similar tasks",
@@ -544,6 +555,7 @@ def route_ncs_query(
     )
     legacy_scope_mentioned = any(flag["code"] == "legacy_sqf_or_learning_module_scope" for flag in risk_flags)
     legacy_scope_requested = legacy_scope_mentioned and _legacy_scope_requested(normalized)
+    classification_context = _classification_context_contract(pattern)
     route_contract = {
         "schema": ROUTE_CONTRACT_SCHEMA,
         "fingerprint_version": ROUTE_FINGERPRINT_VERSION,
@@ -565,6 +577,7 @@ def route_ncs_query(
             "legacy_sqf_or_learning_module_mentioned": legacy_scope_mentioned,
             "legacy_sqf_or_learning_module_requested": legacy_scope_requested,
         },
+        "classification_context": classification_context,
     }
     guide_prompt_template = match_hrd_guide_prompt_template(
         query,
@@ -604,6 +617,7 @@ def route_ncs_query(
             }
             if guide_prompt_template
             else None,
+            "classification_context": classification_context,
         }
     )
     route_contract["route_fingerprint"] = route_fingerprint
@@ -629,6 +643,7 @@ def route_ncs_query(
         "route_fingerprint": route_fingerprint,
         "guide_reference": guide_reference,
         "guide_prompt_template": guide_prompt_template,
+        "classification_context": classification_context,
     }
 
 
@@ -655,6 +670,7 @@ def aihr_plan_route_evidence(
         "risk_flags": route.get("risk_flags") or [],
         "route_contract": route.get("route_contract") or {},
         "route_fingerprint": route.get("route_fingerprint"),
+        "classification_context": route.get("classification_context") or {},
         "guide_reference": route.get("guide_reference") or {},
         "guide_prompt_template": route.get("guide_prompt_template") or {},
     }
@@ -892,6 +908,24 @@ def _params_for_pattern(pattern: RoutePattern, query: str) -> dict[str, Any]:
         return params
     params.setdefault("query", _strip_route_noise(query))
     return params
+
+
+def _classification_context_contract(pattern: RoutePattern) -> dict[str, Any]:
+    """Describe the explicit classification scope supported by structure search.
+
+    The router does not infer a major from ordinary words and never invents a
+    filter.  Callers may supply ``classification_filter`` when executing the
+    routed ``ncs_search`` tool; the search layer applies it as a hard,
+    parameter-bound scope constraint.
+    """
+    supported = pattern.tool == "ncs_search"
+    return {
+        "supported": supported,
+        "parameter": "classification_filter" if supported else None,
+        "mode": "explicit_hard_filter" if supported else "not_applicable",
+        "source": "caller_supplied" if supported else None,
+        "fields": list(SEARCH_CLASSIFICATION_FILTER_FIELDS) if supported else [],
+    }
 
 
 def _extract_transition_terms(query: str) -> dict[str, str]:

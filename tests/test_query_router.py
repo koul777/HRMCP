@@ -150,6 +150,19 @@ class NcsQueryRouterTests(unittest.TestCase):
         self.assertEqual(route["tool"], "ncs_search")
         self.assertEqual(route["params"]["query"], "HR planning")
 
+    def test_structure_search_route_exposes_explicit_classification_filter_path(self) -> None:
+        route = route_ncs_query("HR planning NCS search")
+
+        context = route["classification_context"]
+        self.assertTrue(context["supported"])
+        self.assertEqual(context["parameter"], "classification_filter")
+        self.assertEqual(context["mode"], "explicit_hard_filter")
+        self.assertIn("major_code", context["fields"])
+        self.assertEqual(
+            route["route_contract"]["classification_context"],
+            context,
+        )
+
     def test_routes_korean_unit_lookup_to_structure_search(self) -> None:
         cases = (
             "인사담당자 채용 직무 능력단위 찾기",
