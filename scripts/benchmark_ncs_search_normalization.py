@@ -163,10 +163,14 @@ def result_match_signature(payload: dict[str, Any]) -> list[str]:
 
 class RuntimeSearchHarness:
     def __init__(self, server: Any) -> None:
+        from ncs_mcp.search import core as search_core
+
         self.server = server
+        self.search_core = search_core
         self.original_open_db = server.open_db
         self.original_tier_predicates = server._ncs_search_tier_predicates
         self.original_like_any = server._ncs_search_like_any
+        self.original_core_like_any = search_core._ncs_search_like_any
         self.sql_statement_count = 0
 
         @contextmanager
@@ -196,6 +200,7 @@ class RuntimeSearchHarness:
         self.server.open_db = self.original_open_db
         self.server._ncs_search_tier_predicates = self.original_tier_predicates
         self.server._ncs_search_like_any = self.original_like_any
+        self.search_core._ncs_search_like_any = self.original_core_like_any
 
     def activate(self, strategy: str) -> None:
         self.restore()
@@ -246,6 +251,7 @@ class RuntimeSearchHarness:
                 ) + ")"
 
             self.server._ncs_search_like_any = normalized_like_any
+            self.search_core._ncs_search_like_any = normalized_like_any
             return
         raise ValueError(f"unknown strategy: {strategy}")
 

@@ -430,6 +430,19 @@ class NcsSearchRecallTests(unittest.TestCase):
 
         self.assertEqual(local_server.read_bytes(), vercel_server.read_bytes())
 
+        for relative in ("search/__init__.py", "search/core.py"):
+            with self.subTest(relative=relative):
+                local_search = ROOT / "src" / "ncs_mcp" / relative
+                vercel_search = (
+                    ROOT / "deploy" / "vercel_mcp_app" / "src" / "ncs_mcp" / relative
+                )
+                self.assertEqual(local_search.read_bytes(), vercel_search.read_bytes())
+
+    def test_server_reexports_search_package_entrypoint(self) -> None:
+        from ncs_mcp.search import search_ncs as package_search_ncs
+
+        self.assertIs(server.search_ncs, package_search_ncs)
+
 
 if __name__ == "__main__":
     unittest.main()

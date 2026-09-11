@@ -179,6 +179,7 @@ def load_stage1_baseline_search(db_path: Path) -> SearchFunction:
     os.environ["NCS_MCP_READ_ONLY_MODE"] = "true"
     os.environ["NCS_MCP_OPERATOR_TOOLS"] = "false"
     from ncs_mcp import server
+    from ncs_mcp.search import core as search_core
 
     def legacy_tiers(
         columns: tuple[str, ...],
@@ -236,13 +237,16 @@ def load_stage1_baseline_search(db_path: Path) -> SearchFunction:
 
     def baseline_search(query: str, scope: str, limit: int) -> dict[str, Any]:
         original_equivalents = server._NCS_SEARCH_QUERY_EQUIVALENTS
+        original_core_equivalents = search_core._NCS_SEARCH_QUERY_EQUIVALENTS
         original_tier_builder = server._ncs_search_tier_predicates
         try:
             server._NCS_SEARCH_QUERY_EQUIVALENTS = {}
+            search_core._NCS_SEARCH_QUERY_EQUIVALENTS = {}
             server._ncs_search_tier_predicates = legacy_tiers
             return server.search_ncs(query, scope=scope, limit=limit)
         finally:
             server._NCS_SEARCH_QUERY_EQUIVALENTS = original_equivalents
+            search_core._NCS_SEARCH_QUERY_EQUIVALENTS = original_core_equivalents
             server._ncs_search_tier_predicates = original_tier_builder
 
     return baseline_search
