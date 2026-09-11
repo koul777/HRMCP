@@ -188,33 +188,16 @@ def _successful_request_factory(
 
 
 class RemoteMcpTransportVerifierTests(unittest.TestCase):
-    def test_release_workflow_fails_before_promotion_when_smoke_gate_fails(self) -> None:
-        workflow = (
-            ROOT / ".github" / "workflows" / "vercel-snapshot-release.yml"
-        ).read_text(encoding="utf-8")
+    def test_builder_docs_keep_release_verification_before_promotion(self) -> None:
+        workflow = ROOT / ".github" / "workflows" / "vercel-snapshot-release.yml"
+        self.assertFalse(workflow.exists())
 
-        self.assertEqual(workflow.count("--request-timeout 30"), 3)
-        self.assertIn(
-            "The staged deployment failed transport or public-tool smoke verification.",
-            workflow,
+        builder_doc = (ROOT / "docs" / "VERCEL_SNAPSHOT_BUILDER.md").read_text(
+            encoding="utf-8"
         )
-        self.assertIn(
-            "The public production MCP URL failed transport or public-tool smoke verification.",
-            workflow,
-        )
-        self.assertLess(
-            workflow.index("The staged deployment failed transport or public-tool smoke verification."),
-            workflow.index("vercel promote"),
-        )
-        self.assertIn(
-            "The current public production MCP URL failed transport or public-tool smoke verification.",
-            workflow,
-        )
-        self.assertIn('"NCS_MCP_BUILD_ID=$env:GITHUB_SHA"', workflow)
-        self.assertLess(
-            workflow.index("No source projection change was detected; deployment and baseline promotion were skipped."),
-            workflow.index("The current public production MCP URL failed transport or public-tool smoke verification."),
-        )
+        self.assertIn("Builder-only refresh and Vercel release shape", builder_doc)
+        self.assertIn("exact Vercel deployment and MCP verification", builder_doc)
+        self.assertIn("verified baseline promotion", builder_doc)
 
     def test_all_public_tools_and_analysis_modes_are_smoked_without_body_logging(self) -> None:
         selected_protocol = "2025-06-18"

@@ -186,8 +186,9 @@ snapshot을 빌드·배포 단계로 전달하는 HTTPS 전송 경로입니다. 
 
 - `NCS_DB_URL`: 함수 시작 시 사전 준비된 snapshot을 받아 `NCS_DB_PATH`의 읽기 전용 DB로 materialize할
   때 사용하는 선택 경로입니다.
-- `NCS_SOURCE_DB_URL`: release workflow가 canonical source DB를 받아 compact snapshot Builder 입력으로
-  사용할 때의 선택 경로입니다.
+- `NCS_SOURCE_DB_URL`: 과거 release workflow가 사용하던 입력 경로입니다. 해당 workflow와
+  self-hosted runner는 retired 상태이며, 현재 canonical source DB 입력은 Windows NCS Data Builder가
+  로컬 `data/processed/ncs.db`에서 관리합니다.
 
 현재 `.env.example`의 `NCS_API_BASE_URL`은 설정 예시로 남아 있지만 실제 기준정보 수집기는 코드 상수를
 사용합니다. 반대로 SQF·학습모듈 키 alias는 코드에서 인식해도 예제 env에 모두 드러나지 않습니다.

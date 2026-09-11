@@ -163,28 +163,28 @@ A failed build, deployment, or remote verification leaves `current.json`
 untouched. Versioned baselines are not deleted automatically; retention is an
 explicit operator task after backup and rollback requirements are satisfied.
 
-## Automatic refresh and Vercel release shape
+## Builder-only refresh and Vercel release shape
 
-`.github/workflows/vercel-snapshot-release.yml` implements the complete guarded
-sequence on a self-hosted Windows runner:
+The Windows Data Builder is the single owner of the data-to-production path.
+It operates on the local canonical `data/processed/ncs.db`, creates a versioned
+working copy, refreshes the explicitly selected supplemental APIs, prepares the
+change-aware ontology candidate, builds the compact snapshot, verifies it, and
+then performs the guarded Vercel release from the selected Builder version.
 
 ```text
-HTTPS ncs.db download + optional SHA-256 check
-  -> optional all-major supplemental API refresh on a working copy
-  -> source-diff plan + change-aware ontology preparation
-  -> compact ZIP/manifest in a temporary tracked-code deploy root
-  -> Vercel staged deployment
-  -> exact deployment MCP verification
-  -> production promotion + public MCP verification
+run_ncs_builder.bat
+  -> source delta + ontology candidate
+  -> optional all-major supplemental API refresh
+  -> compact ZIP/manifest build and verification
+  -> exact Vercel deployment and MCP verification
   -> verified baseline promotion
 ```
 
-The workflow accepts only HTTPS source URLs. A manual override host must match
-the configured source host or `NCS_SOURCE_DB_ALLOWED_HOSTS`. Its persistent
-state directory is outside the checkout (`NCS_REFRESH_STATE_DIR`, or a
-self-hosted runner workspace sibling by default). `api_refresh_mode=auto` uses
-whichever safe supplemental API credentials are configured; `require` demands
-both; `skip` performs no network collection.
+The former scheduled GitHub Actions snapshot workflow and its self-hosted
+runner are retired. GitHub Actions remains available for CI tests only; it is
+not a second data refresh or deployment authority. This prevents the local
+Builder's versioned `publisher_source` from diverging from an unrelated
+downloaded database.
 
 The deterministic release path is deliberately not AI. It needs reproducible
 file transforms, source identity checks, rollback boundaries, and explicit

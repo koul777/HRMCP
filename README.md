@@ -1,5 +1,9 @@
 # HRMCP — NCS 기반 HR 실무용 MCP
 
+> 운영 원칙(2026-09-11): 데이터 갱신과 Vercel 배포는 Windows NCS Data
+> Builder로 일원화합니다. GitHub Actions는 CI 검증만 수행하며, 별도
+> snapshot refresh workflow와 self-hosted runner는 운영하지 않습니다.
+
 > **HR 실무에서 NCS를 활용하는 가장 빠른 길.**
 > 채용 직무에 맞는 NCS 분류부터 능력단위 → 능력단위요소 → 수행준거 → 지식(K)·기술(S)·태도(A)까지,
 > 사람이 일일이 찾아 정리하던 정보를 이제 AI가 구조화된 NCS 데이터베이스에서 직접 조회해 활용합니다.
@@ -117,7 +121,7 @@ AI의 검색과 결과물 작성을 뒷받침합니다.
 - **2026-08-30**: Vercel 함수 검증기가 빌드 폴더의 물리 파일뿐 아니라 `.vc-config.json`의 `filePathMap`까지 확인하도록 강화했습니다. 원본 `.db`·SQLite sidecar·금지 디렉터리 참조가 하나라도 있거나 실제 매핑 총량이 상한을 넘으면 배포를 중단합니다.
 - **2026-08-30**: Vercel 릴리스 워크플로에 배포 후 원격 스모크 게이트를 추가했습니다. `GET 405 종료`, `initialize`, `tools/list`, 공개 7개 도구 호출, `ncs_analysis`의 `career_path`·`qualification`·`job_base`·`ontology` 4개 모드를 실제 URL에 대해 검증합니다.
 - **2026-08-30**: qualification 스모크를 `광역 자격 조회 → 반환된 능력단위코드 정확 검색 → 해당 능력단위의 자격 조회` 체인으로 확장했습니다. 광역 결과만 존재하고 실제 단위별 조회가 깨진 배포는 승격하지 않으며, 검증 보고서에는 조회 코드와 응답 본문을 기록하지 않습니다.
-- **2026-08-30**: 운영 스모크는 `.github/workflows/vercel-snapshot-release.yml`과 `scripts/verify_remote_mcp_transport.py`가 담당합니다. 스냅샷 테이블 누락, raw exception 노출, 공개 도구 응답 회귀가 발생하면 production 승격 전에 릴리스를 중단합니다.
+- **2026-08-30**: 운영 스모크는 `scripts/verify_remote_mcp_transport.py`가 담당합니다. 스냅샷 테이블 누락, raw exception 노출, 공개 도구 응답 회귀가 발생하면 production 승격 전에 릴리스를 중단합니다. 데이터 갱신·배포 실행은 현재 Windows NCS Data Builder로 일원화되어 있습니다.
 - **2026-08-30**: `initialize`의 `serverInfo.version`에 Git 커밋 SHA, Vercel 배포 ID 또는 스냅샷 해시를 포함해 신·구 배포를 식별할 수 있게 했습니다.
 - **2026-08-30**: `ncs_analysis(mode="job_base")` 응답을 필드 화이트리스트와 링크 상한으로 제한하고, 원격 스모크에서 2,000자·1초 계약을 검사하도록 했습니다.
 - **2026-08-30**: Vercel compact snapshot의 qualification 계약을 강화했습니다. `ncs_qualification_items`와 `ncs_unit_qualification_links`가 없거나 비어 있으면 패키지 검증과 production 승격이 실패합니다.
@@ -481,7 +485,7 @@ python scripts\publish_vercel_snapshot.py --source <publisher_source.path>
 검증된 ZIP과 manifest만 `deploy/vercel_mcp_app/api/`에 함께 publish하며, 자체적으로 API를
 수집하거나 Vercel을 배포하지 않습니다. 별도 출력 경로가 필요한 경우에만 low-level
 `build_vercel_snapshot.py`를 사용하세요. 전체 자동 갱신·staged 배포·원격 검증·기준본 승격은
-`.github/workflows/vercel-snapshot-release.yml`이 담당합니다. 자격 API의 운영자 승인 절차는
+Windows NCS Data Builder의 버전 작업 흐름에서 수행합니다. 자격 API의 운영자 승인 절차는
 자동화 범위 밖에 그대로 유지됩니다.
 
 ### API 키 발급

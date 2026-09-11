@@ -1,5 +1,9 @@
 # HRMCP — Vercel HTTPS 배포 가이드
 
+> 운영 원칙(2026-09-11): 데이터 갱신과 Vercel 배포의 단일 권한자는
+> Windows NCS Data Builder입니다. GitHub Actions는 CI 검증만 담당하며,
+> 별도 snapshot refresh workflow나 self-hosted runner는 사용하지 않습니다.
+
 HRMCP(NCS 기반 HR MCP)를 Vercel Serverless(Streamable HTTP)로 배포해 하나의
 HTTPS MCP URL로 연결하는 운영 가이드입니다. `HRMCP`는 표시 이름이고, 내부
 패키지는 `ncs_mcp`입니다.
@@ -118,17 +122,16 @@ ZIP과 manifest pair만 배포 루트 `api/`에 원자적으로 publish합니다
 
 훈련과정·직업기초능력 API 자동 갱신은 `refresh_ncs_api_evidence.py`가 원본의 SQLite 온라인
 백업 복사본에서만 수행합니다. 자격/NCS006은 기존 운영자 승인·재시도 절차를 유지합니다.
-전체 자동 흐름은 `.github/workflows/vercel-snapshot-release.yml`에 있으며, 임시 Vercel
-배포와 Remote MCP 검증이 모두 성공한 뒤에만 `promote_ncs_refresh_baseline.py`가 다음
-비교 기준본을 승격합니다.
+전체 갱신·배포 흐름은 Windows NCS Data Builder에 있습니다. Builder가 임시 Vercel
+배포와 Remote MCP 검증을 모두 성공시킨 뒤에만 다음 비교 기준본을 승격합니다.
 
 ## 5. Preview와 Production 배포
 
 수동 배포 시 Vercel CLI를 연결한 뒤 canonical deploy root에서 실행합니다. 아래 직접 배포
-명령은 Vercel이 소스에서 다시 빌드하므로 `--prebuilt`를 붙이지 않습니다. 자동 워크플로는
+명령은 Vercel이 소스에서 다시 빌드하므로 `--prebuilt`를 붙이지 않습니다. Builder는
 `vercel build`로 만든 `.vercel/output`과 함수 번들을 먼저 검증하고, 그 동일 산출물을
 `vercel deploy --prebuilt --prod --skip-domain`으로 올립니다. 고유 배포 URL의 MCP 검증이
-성공한 뒤에만 `vercel promote`를 수행합니다.
+성공한 뒤에만 production alias를 갱신합니다.
 
 ```powershell
 cd deploy\vercel_mcp_app
