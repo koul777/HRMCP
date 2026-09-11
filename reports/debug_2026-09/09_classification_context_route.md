@@ -14,6 +14,9 @@
 - `classification_context`에 `provided`와 실제 filter를 함께 남긴다.
 - `ncs_execute_tool`이 `_route_query`를 재계산할 때 동일한
   `classification_filter`를 포함하므로 route fingerprint가 유지된다.
+- `ncs_discover_tools`도 선택적 `classification_filter`를 받아 같은
+  `classification_context`와 route fingerprint를 반환한다. 따라서
+  discovery 단계에서 scope를 확인한 뒤 execution 단계로 넘길 수 있다.
 - 검색 계층은 기존의 parameter-bound hard filter를 그대로 적용한다.
 - Vercel mirror와 canonical source의 query router/server 파일 parity를 유지한다.
 
@@ -35,6 +38,7 @@ canonical `data/processed/ncs.db`에서 동일 질의를 분류 필터 없이/`m
 - query router 테스트: 통과
 - search recall 테스트: 통과
 - meta-tool route fingerprint/filter 전달 테스트: 통과
+- discovery → route filter 전달 테스트: 통과
 - local/Vercel runtime parity: 통과
 - `ncs_harness.py lint`: 오류 0, 경고 0
 - `ncs_harness.py smoke`: 통과
@@ -47,4 +51,3 @@ canonical `data/processed/ncs.db`에서 동일 질의를 분류 필터 없이/`m
 
 holdout 성능 개선 여부는 기존 holdout을 변경하지 않은 동일 조건으로 별도
 측정해야 하며, 이번 변경 자체의 효과를 alias 성능으로 해석하지 않는다.
-

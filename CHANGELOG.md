@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Carry an explicit classification filter through `ncs_discover_tools` as well
+  as `ncs_execute_tool`, so agent routing and execution preserve the same NCS
+  scope without inferring a major from query text.
+
 - Carried caller-supplied `classification_filter` through the query route and
   `ncs_execute_tool` path into `ncs_search`, preserving the route fingerprint
   while enforcing the same parameter-bound NCS scope at execution time. This

@@ -8,7 +8,8 @@
   "route_contract": {
     "classification_filter_parameter": "classification_filter",
     "mode": "explicit_hard_filter",
-    "route_fingerprint_includes_filter": true
+    "route_fingerprint_includes_filter": true,
+    "discovery_accepts_filter": true
   },
   "examples": [
     {
@@ -30,6 +31,7 @@
     "query_router": "pass",
     "search_recall": "pass",
     "meta_route_filter": "pass",
+    "discovery_route_filter": "pass",
     "runtime_parity": "pass",
     "lint_errors": 0,
     "lint_warnings": 0,

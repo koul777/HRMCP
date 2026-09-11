@@ -8258,6 +8258,10 @@ class TrainingRecommendationTests(unittest.TestCase):
                 from ncs_mcp import server
 
                 discovery = server.ncs_discover_tools(intent="training transition")
+                filtered_discovery = server.ncs_discover_tools(
+                    intent="HR planning NCS search",
+                    classification_filter={"major_code": "02", "ignored": "drop"},
+                )
                 search_route = route_ncs_query(
                     "HR planning NCS search",
                     available_tool_names=server.tool_registry.NCS_EXECUTABLE_TOOL_NAMES,
@@ -8326,6 +8330,12 @@ class TrainingRecommendationTests(unittest.TestCase):
         self.assertNotIn("plan_ncs_education_path", discovered_names)
         self.assertEqual(discovery["response_schema_version"], "ncs_discover_tools_v2")
         self.assertNotIn("data", discovery)
+        self.assertEqual(discovery["classification_filter"], {})
+        self.assertEqual(filtered_discovery["classification_filter"], {"major_code": "02"})
+        self.assertEqual(
+            filtered_discovery["query_route"]["classification_context"]["filter"],
+            {"major_code": "02"},
+        )
         self.assertIn("route_fingerprint", discovery["query_route"])
         self.assertIn("guard_flags", discovery["query_route"])
         self.assertTrue(execute_result["ok"])

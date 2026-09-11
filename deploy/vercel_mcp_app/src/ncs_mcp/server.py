@@ -1953,10 +1953,17 @@ def ncs_analysis(
 
 @mcp.tool()
 @guard_public_tool
-def ncs_discover_tools(intent: str = "") -> dict[str, Any]:
+def ncs_discover_tools(
+    intent: str = "",
+    classification_filter: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """한국어 사용자 의도에 맞는 HRMCP 도구와 호출 순서를 안내합니다. Discover the right tool."""
     surface = current_mcp_tool_surface()
-    query_route = route_ncs_query(intent, available_tool_names=set(surface["all_tools"]))
+    query_route = route_ncs_query(
+        intent,
+        available_tool_names=set(surface["all_tools"]),
+        classification_filter=classification_filter,
+    )
     matches = tool_registry.discover_tools_for_intent(
         intent,
         executable_tool_names=tool_registry.NCS_EXECUTABLE_TOOL_NAMES,
@@ -1966,6 +1973,10 @@ def ncs_discover_tools(intent: str = "") -> dict[str, Any]:
         {
             "response_schema_version": "ncs_discover_tools_v2",
             "intent": intent,
+            "classification_filter": (
+                query_route.get("classification_context", {}).get("filter")
+                or {}
+            ),
             "query_route": query_route,
             "matched_categories": matches,
             "exposed_tool_count": len(surface["all_tools"]),
