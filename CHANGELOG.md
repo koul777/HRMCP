@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Carried caller-supplied `classification_filter` through the query route and
+  `ncs_execute_tool` path into `ncs_search`, preserving the route fingerprint
+  while enforcing the same parameter-bound NCS scope at execution time. This
+  lets an HR or education-planning client constrain ambiguous terms such as
+  vehicle dispatch or event preparation without adding holdout-specific aliases.
 - Weighted fallback search tokens by document frequency instead of a hand kept
   generic-word list, so a token naming few units outranks one spread across the
   catalogue. Holdout Hit@3 0.451 -> 0.549 with the 40-query regression set
@@ -33,4 +38,3 @@
 - Documented the open-source release quick start, runtime scope, and API key
   handling expectations.
 - Added a release-readable README for the NCS-centered MCP surface.
-

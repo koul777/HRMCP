@@ -2086,7 +2086,11 @@ def ncs_execute_tool(tool_name: str, params: dict[str, Any] | None = None) -> di
     route_query = tool_params.pop("_route_query", None)
     route_fingerprint = tool_params.pop("_route_fingerprint", None)
     query_route = (
-        route_ncs_query(str(route_query), available_tool_names=tool_registry.NCS_EXECUTABLE_TOOL_NAMES)
+        route_ncs_query(
+            str(route_query),
+            available_tool_names=tool_registry.NCS_EXECUTABLE_TOOL_NAMES,
+            classification_filter=tool_params.get("classification_filter"),
+        )
         if route_query
         else None
     )

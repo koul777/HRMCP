@@ -8272,6 +8272,22 @@ class TrainingRecommendationTests(unittest.TestCase):
                         "_route_fingerprint": search_route["route_fingerprint"],
                     },
                 )
+                filtered_route = route_ncs_query(
+                    "HR planning NCS search",
+                    available_tool_names=server.tool_registry.NCS_EXECUTABLE_TOOL_NAMES,
+                    classification_filter={"major_code": "02"},
+                )
+                filtered_execute_result = server.ncs_execute_tool(
+                    "ncs_search",
+                    {
+                        "query": "HR planning",
+                        "scope": "unit",
+                        "limit": 2,
+                        "classification_filter": {"major_code": "02"},
+                        "_route_query": "HR planning NCS search",
+                        "_route_fingerprint": filtered_route["route_fingerprint"],
+                    },
+                )
                 fingerprint_mismatch = server.ncs_execute_tool(
                     "ncs_search",
                     {
@@ -8320,6 +8336,16 @@ class TrainingRecommendationTests(unittest.TestCase):
         self.assertTrue(execute_result["meta_execution"]["route_tool_allowed"])
         self.assertEqual(execute_result["meta_execution"]["route_allowed_tools"], ["ncs_search"])
         self.assertFalse(execute_result["meta_execution"]["route_tool_mismatch"])
+        self.assertTrue(filtered_execute_result["ok"])
+        self.assertEqual(
+            filtered_execute_result["classification_filter"],
+            {"major_code": "02"},
+        )
+        self.assertTrue(filtered_execute_result["classification_filter_applied"])
+        self.assertEqual(
+            filtered_execute_result["meta_execution"]["route_fingerprint"],
+            filtered_route["route_fingerprint"],
+        )
         self.assertFalse(fingerprint_mismatch["ok"])
         self.assertEqual(fingerprint_mismatch["error"]["code"], "route_fingerprint_mismatch")
         self.assertFalse(tool_mismatch["ok"])

@@ -163,6 +163,21 @@ class NcsQueryRouterTests(unittest.TestCase):
             context,
         )
 
+    def test_structure_search_route_carries_caller_classification_filter(self) -> None:
+        route = route_ncs_query(
+            "vehicle dispatch NCS search",
+            classification_filter={"major_code": "02", "ignored": "drop"},
+        )
+
+        self.assertEqual(route["params"]["classification_filter"], {"major_code": "02"})
+        context = route["classification_context"]
+        self.assertTrue(context["provided"])
+        self.assertEqual(context["filter"], {"major_code": "02"})
+        self.assertEqual(
+            route["route_contract"]["classification_context"]["filter"],
+            {"major_code": "02"},
+        )
+
     def test_routes_korean_unit_lookup_to_structure_search(self) -> None:
         cases = (
             "인사담당자 채용 직무 능력단위 찾기",

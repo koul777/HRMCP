@@ -502,6 +502,7 @@ def route_ncs_query(
     query: str,
     *,
     available_tool_names: set[str] | None = None,
+    classification_filter: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized = normalize_query(query)
     internal_role_request = _is_internal_role_request(normalized)
@@ -526,6 +527,11 @@ def route_ncs_query(
         score = 1
 
     params = _params_for_pattern(pattern, query)
+    normalized_classification_filter = _normalize_route_classification_filter(
+        classification_filter
+    )
+    if pattern.tool == "ncs_search" and normalized_classification_filter:
+        params["classification_filter"] = normalized_classification_filter
     required_params = list(pattern.required_params)
     if (
         pattern.scenario == EVIDENCE_ANALYSIS
@@ -555,7 +561,10 @@ def route_ncs_query(
     )
     legacy_scope_mentioned = any(flag["code"] == "legacy_sqf_or_learning_module_scope" for flag in risk_flags)
     legacy_scope_requested = legacy_scope_mentioned and _legacy_scope_requested(normalized)
-    classification_context = _classification_context_contract(pattern)
+    classification_context = _classification_context_contract(
+        pattern,
+        normalized_classification_filter,
+    )
     route_contract = {
         "schema": ROUTE_CONTRACT_SCHEMA,
         "fingerprint_version": ROUTE_FINGERPRINT_VERSION,
@@ -910,7 +919,27 @@ def _params_for_pattern(pattern: RoutePattern, query: str) -> dict[str, Any]:
     return params
 
 
-def _classification_context_contract(pattern: RoutePattern) -> dict[str, Any]:
+def _normalize_route_classification_filter(
+    classification_filter: dict[str, Any] | None,
+) -> dict[str, str]:
+    """Normalize only caller-supplied classification constraints for routing."""
+    if not isinstance(classification_filter, dict):
+        return {}
+    normalized: dict[str, str] = {}
+    for field in SEARCH_CLASSIFICATION_FILTER_FIELDS:
+        value = classification_filter.get(field)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            normalized[field] = text
+    return normalized
+
+
+def _classification_context_contract(
+    pattern: RoutePattern,
+    classification_filter: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """Describe the explicit classification scope supported by structure search.
 
     The router does not infer a major from ordinary words and never invents a
@@ -919,12 +948,15 @@ def _classification_context_contract(pattern: RoutePattern) -> dict[str, Any]:
     parameter-bound scope constraint.
     """
     supported = pattern.tool == "ncs_search"
+    normalized_filter = classification_filter if supported else {}
     return {
         "supported": supported,
         "parameter": "classification_filter" if supported else None,
         "mode": "explicit_hard_filter" if supported else "not_applicable",
         "source": "caller_supplied" if supported else None,
         "fields": list(SEARCH_CLASSIFICATION_FILTER_FIELDS) if supported else [],
+        "provided": bool(normalized_filter),
+        "filter": normalized_filter or None,
     }
 
 

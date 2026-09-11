@@ -1,0 +1,38 @@
+{
+  "schema": "ncs_search_classification_context_route_v1",
+  "generated_at": "2026-09-11",
+  "scope": "canonical_data_processed_ncs_db",
+  "mutation": false,
+  "holdout_modified": false,
+  "auto_major_inference": false,
+  "route_contract": {
+    "classification_filter_parameter": "classification_filter",
+    "mode": "explicit_hard_filter",
+    "route_fingerprint_includes_filter": true
+  },
+  "examples": [
+    {
+      "query": "업무용 차량 배차 관리",
+      "filter": {"major_code": "02"},
+      "without_filter_top_units": ["업무용 동산관리", "차량손해사정 기획 관리", "차량손해액 산정"],
+      "with_filter_top_units": ["업무용 동산관리", "차량운영관리", "업무지원"],
+      "filter_applied": true
+    },
+    {
+      "query": "워크숍 행사 준비",
+      "filter": {"major_code": "02"},
+      "without_filter_top_units": ["웨딩 행사 준비", "연회 행사 준비", "국내여행안내 행사준비"],
+      "with_filter_top_units": ["행사지원관리", "세무조정 준비", "공공조달 입찰 참가 준비"],
+      "filter_applied": true
+    }
+  ],
+  "verification": {
+    "query_router": "pass",
+    "search_recall": "pass",
+    "meta_route_filter": "pass",
+    "runtime_parity": "pass",
+    "lint_errors": 0,
+    "lint_warnings": 0,
+    "smoke": "pass"
+  }
+}
