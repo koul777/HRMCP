@@ -437,6 +437,13 @@ def text_value(raw: str | None, refined: str | None, version: str) -> str | dict
     return raw or ""
 
 
+def _display_element_level(value: Any) -> Any:
+    """Render upstream zero placeholders as an explicit missing value."""
+    if value is None or str(value).strip() in {"", "0"}:
+        return "-"
+    return value
+
+
 def like_filter(clauses: list[str], params: list[Any], column: str, value: str | None) -> None:
     if value:
         clauses.append(f"{column} LIKE ?")
@@ -2357,9 +2364,9 @@ def get_unit_structure(
                 "element_no": element["element_no"],
                 "element_code": element["element_code_raw"],
                 "element_name": element["element_name_raw"],
-                "element_level": element["element_level_raw"],
+                "element_level": _display_element_level(element["element_level_raw"]),
                 "api_element_name": element["api_element_name"],
-                "api_element_level": element["api_element_level"],
+                "api_element_level": _display_element_level(element["api_element_level"]),
                 "api_match_status": element["api_match_status"],
                 "performance_criteria": criteria,
                 "ksa": ksa,

@@ -14,15 +14,20 @@ dependencies = [
   "openpyxl>=3.1,<4",
   "requests>=2.32,<3",
   "python-dotenv>=1,<2",
+  "psutil>=5,<8",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7,<9",
+]
+ingest = [
   "Pillow>=10,<13",
   "PyMuPDF>=1.24,<2",
   "pypdf>=5,<7",
   "pytesseract>=0.3.10,<1",
   "olefile>=0.47,<1",
-  "psutil>=5,<8",
 ]
-
-[project.optional-dependencies]
 gold = [
   "neo4j>=6,<7",
   "sentence-transformers>=3,<6",

@@ -1,3 +1,4 @@
+# Full local/ingest-compatible dependency list. Serving installs use pyproject.toml.
 mcp>=1.26,<=1.29.1
 openpyxl>=3.1,<4
 requests>=2.32,<3
@@ -8,4 +9,3 @@ pypdf>=5,<7
 pytesseract>=0.3.10,<1
 olefile>=0.47,<1
 psutil>=5,<8
-pytest>=7,<9

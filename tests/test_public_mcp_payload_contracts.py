@@ -577,6 +577,25 @@ class PublicMcpPayloadContractTests(unittest.TestCase):
                 f"{label} returned {_json_size(payload)} chars",
             )
 
+    def test_unit_detail_renders_zero_element_level_as_missing(self) -> None:
+        with self._open_fixture_db() as conn:
+            conn.execute(
+                """
+                UPDATE competency_elements
+                SET element_level_raw = '0', api_element_level = '0'
+                WHERE unit_code = ?
+                """,
+                (EXACT_UNIT,),
+            )
+            conn.commit()
+
+        structure = server.get_unit_structure(EXACT_UNIT)
+        self.assertEqual(structure["elements"][0]["element_level"], "-")
+        self.assertEqual(structure["elements"][0]["api_element_level"], "-")
+
+        detail = server.ncs_unit_detail(unit_code=EXACT_UNIT, include=["elements"])
+        self.assertEqual(detail["elements"][0]["element_level"], "-")
+
     def test_unit_detail_meaningful_include_combinations_stay_under_budget(self) -> None:
         structural_variants = (
             ("elements",),

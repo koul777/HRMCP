@@ -19,6 +19,7 @@ RUN addgroup --system app && adduser --system --ingroup app app
 COPY pyproject.toml requirements.txt README.md ./
 COPY src ./src
 
+# The serving image installs only core dependencies; document/OCR workers use .[ingest].
 RUN python -m pip install --no-cache-dir --upgrade pip \
     && python -m pip install --no-cache-dir . \
     && python -m pip check
