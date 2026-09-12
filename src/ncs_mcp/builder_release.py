@@ -729,25 +729,48 @@ def _production_root(mcp_url: str) -> str:
 
 def _parse_inspection(stdout: str, production_root: str) -> dict:
     """Extract only bounded deployment identity fields from Vercel inspect output."""
+    try:
+        payload = json.loads(stdout)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        payload = None
+    if isinstance(payload, dict):
+        deployment_id = payload.get('id')
+        deployment_host = payload.get('url')
+        if (
+            not isinstance(deployment_id, str)
+            or not re.fullmatch(r'dpl_[A-Za-z0-9]+', deployment_id)
+            or not isinstance(deployment_host, str)
+        ):
+            raise ReleaseError('Unable to identify exactly one current production deployment.')
+        deployment_url = (
+            deployment_host.rstrip('/') if deployment_host.startswith('https://')
+            else 'https://' + deployment_host.rstrip('/')
+        )
+        if not re.fullmatch(r'https://[A-Za-z0-9-]+\.vercel\.app', deployment_url):
+            raise ReleaseError('Unable to identify exactly one current production deployment.')
+        return {'deployment_id': deployment_id, 'deployment_url': deployment_url}
+
     deployment_ids = list(dict.fromkeys(re.findall(r'\bdpl_[A-Za-z0-9]+\b', stdout)))
-    urls = list(dict.fromkeys(
+    # ``vercel inspect`` also prints every alias.  Only the labelled General
+    # ``url`` row identifies the immutable deployment that may be used for a
+    # compare-and-promote transaction.
+    deployment_urls = list(dict.fromkeys(
         match.rstrip('/') for match in re.findall(
-            r'https://[A-Za-z0-9-]+\.vercel\.app/?', stdout
+            r'(?im)^\s*url\s+(https://[A-Za-z0-9-]+\.vercel\.app/?)\s*$', stdout
         )
     ))
-    unique_urls = [url for url in urls if url != production_root.rstrip('/')]
-    if len(deployment_ids) > 1 or len(unique_urls) != 1:
+    if len(deployment_ids) > 1 or len(deployment_urls) != 1:
         raise ReleaseError('Unable to identify exactly one current production deployment.')
     return {
         'deployment_id': deployment_ids[0] if deployment_ids else None,
-        'deployment_url': unique_urls[0],
+        'deployment_url': deployment_urls[0],
     }
 
 
 def _inspect_production(executable: str, production_mcp_url: str,
                         stage: Path, run: Callable) -> dict:
     root = _production_root(production_mcp_url)
-    stdout = run([executable, 'inspect', root, '--wait', '--no-color'], stage)
+    stdout = run([executable, 'inspect', root, '--wait', '--json'], stage)
     return _parse_inspection(stdout, root)
 
 

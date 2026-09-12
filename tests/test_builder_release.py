@@ -13,7 +13,7 @@ import unittest
 from unittest.mock import patch
 
 from ncs_mcp.builder_release import (
-    ReleaseError, _is_canonically_within, _verify, _verify_deployment,
+    ReleaseError, _is_canonically_within, _parse_inspection, _verify, _verify_deployment,
     _write, build_release as direct_build_release, deploy_release as direct_deploy_release,
     project_configuration,
 )
@@ -520,6 +520,51 @@ class BuilderReleaseTests(unittest.TestCase):
         self.assertIn(
             ['build', '--prod', '--yes'],
             [argv[1:] for argv, _ in self.commands],
+        )
+
+    def test_inspection_uses_general_deployment_url_not_aliases(self):
+        output = """
+General
+id dpl_4KKUkg1BqGYq2FeKuCf8eoTPDk7E
+name ncs-mcp-bridge-mini2
+target production
+url https://ncs-mcp-bridge-mini2-7v2l146ve-hrkim.vercel.app
+
+Aliases
+https://ncs-mcp-bridge-mini2.vercel.app
+https://ncs-mcp-bridge-mini2-hrkim.vercel.app
+"""
+        self.assertEqual(
+            _parse_inspection(
+                output, 'https://ncs-mcp-bridge-mini2.vercel.app'
+            ),
+            {
+                'deployment_id': 'dpl_4KKUkg1BqGYq2FeKuCf8eoTPDk7E',
+                'deployment_url': (
+                    'https://ncs-mcp-bridge-mini2-7v2l146ve-hrkim.vercel.app'
+                ),
+            },
+        )
+
+    def test_inspection_parses_vercel_json_stdout(self):
+        self.assertEqual(
+            _parse_inspection(
+                json.dumps({
+                    'id': 'dpl_4KKUkg1BqGYq2FeKuCf8eoTPDk7E',
+                    'url': 'ncs-mcp-bridge-mini2-7v2l146ve-hrkim.vercel.app',
+                    'aliases': [
+                        'ncs-mcp-bridge-mini2.vercel.app',
+                        'ncs-mcp-bridge-mini2-hrkim.vercel.app',
+                    ],
+                }),
+                'https://ncs-mcp-bridge-mini2.vercel.app',
+            ),
+            {
+                'deployment_id': 'dpl_4KKUkg1BqGYq2FeKuCf8eoTPDk7E',
+                'deployment_url': (
+                    'https://ncs-mcp-bridge-mini2-7v2l146ve-hrkim.vercel.app'
+                ),
+            },
         )
 
     def test_template_containment_canonicalizes_both_root_and_child(self):
