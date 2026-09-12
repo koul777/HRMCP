@@ -1188,6 +1188,27 @@ print(json.dumps({'report': report, 'calls': calls}))
         self.assertEqual(result['failed_phase'], 'preflight')
         self.assertEqual(len(self.commands), count)
 
+    def test_vercel_generated_metadata_does_not_invalidate_package(self):
+        report = self.build()
+        stage = Path(report['stage_dir'])
+        generated = stage / '.vercel/python/.venv/Lib/site-packages/example'
+        generated.mkdir(parents=True)
+        (generated / '__init__.py').write_text('generated = True')
+        (stage / '.vercel/.env.production.local').write_text('GENERATED=1')
+        project_path = stage / '.vercel/project.json'
+        project = json.loads(project_path.read_text())
+        project['settings'] = {'framework': 'python'}
+        project_path.write_text(json.dumps(project))
+
+        result = deploy_release(
+            self.version,
+            production_mcp_url='https://selected-project.vercel.app/api/mcp',
+            runner=self.run_command,
+            verifier=self.verified,
+        )
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(result['status'], 'deployed')
+
     def test_changed_prebuilt_output_blocks_upload_before_vercel_or_network(self):
         report = self.build()
         bundle = Path(report['function_bundle_verification']['function_bundle_path'])

@@ -184,11 +184,19 @@ def _artifact_evidence(path: Path, *, digest: str | None = None) -> dict:
 
 
 def _stage_artifacts(stage: Path) -> dict[str, str]:
-    """Hash immutable staged inputs, excluding only generated Build Output API files."""
+    """Hash immutable staged inputs, excluding Vercel-generated local metadata.
+
+    ``vercel build`` materializes Python dependencies, a production env cache,
+    and the Build Output API below ``.vercel``.  The exact Build Output API is
+    attested separately by ``_tree_evidence`` and the project identity is
+    checked through ``project_configuration``.  Treating the rest of that
+    generated directory as source makes every real package fail its first
+    deployment preflight even though the tracked inputs are unchanged.
+    """
     artifacts: dict[str, str] = {}
     for path in stage.rglob('*'):
         relative = path.relative_to(stage)
-        if relative.parts[:2] == ('.vercel', 'output'):
+        if relative.parts and relative.parts[0] == '.vercel':
             continue
         info = path.lstat()
         if path.is_symlink() or getattr(info, 'st_file_attributes', 0) & 0x400:
@@ -904,7 +912,18 @@ def _release_package_preflight(report: dict, version: Path, production_mcp_url: 
         raise ReleaseError('Prepared source has an active SQLite sidecar.')
     if _hash(version / 'ncs.db') != report['source_sha256']:
         raise ReleaseError('Prepared source changed after packaging.')
-    if _stage_artifacts(stage) != report['artifacts']:
+    recorded_artifacts = report.get('artifacts')
+    if not isinstance(recorded_artifacts, dict):
+        raise ReleaseError('Recorded deployment package evidence is missing or invalid.')
+    # Packages created before the Vercel-metadata exclusion recorded the
+    # initial .vercel/project.json.  Compare the same immutable source set so a
+    # pre-upload failure can be retried without rebuilding or weakening the
+    # separately verified project/output checks.
+    immutable_recorded_artifacts = {
+        name: digest for name, digest in recorded_artifacts.items()
+        if not name.startswith('.vercel/')
+    }
+    if _stage_artifacts(stage) != immutable_recorded_artifacts:
         raise ReleaseError('Deployment package changed after verification.')
     selected_project = project_configuration(stage)
     for key in ('projectId', 'orgId', 'projectName', 'production_mcp_url'):
