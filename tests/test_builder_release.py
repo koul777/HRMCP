@@ -1195,6 +1195,12 @@ print(json.dumps({'report': report, 'calls': calls}))
         generated.mkdir(parents=True)
         (generated / '__init__.py').write_text('generated = True')
         (stage / '.vercel/.env.production.local').write_text('GENERATED=1')
+        generated_build = stage / 'build/lib/ncs_mcp'
+        generated_build.mkdir(parents=True)
+        (generated_build / '__init__.py').write_text('generated = True')
+        generated_metadata = stage / 'src/ncs_mcp.egg-info'
+        generated_metadata.mkdir(parents=True)
+        (generated_metadata / 'PKG-INFO').write_text('generated')
         project_path = stage / '.vercel/project.json'
         project = json.loads(project_path.read_text())
         project['settings'] = {'framework': 'python'}

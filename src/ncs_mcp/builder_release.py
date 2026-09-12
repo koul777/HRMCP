@@ -196,7 +196,10 @@ def _stage_artifacts(stage: Path) -> dict[str, str]:
     artifacts: dict[str, str] = {}
     for path in stage.rglob('*'):
         relative = path.relative_to(stage)
-        if relative.parts and relative.parts[0] == '.vercel':
+        generated_by_vercel_build = (
+            relative.parts and relative.parts[0] in {'.vercel', 'build'}
+        ) or relative.parts[:2] == ('src', 'ncs_mcp.egg-info')
+        if generated_by_vercel_build:
             continue
         info = path.lstat()
         if path.is_symlink() or getattr(info, 'st_file_attributes', 0) & 0x400:
