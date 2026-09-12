@@ -239,6 +239,11 @@ class ProfiledConnection:
 class StatementRecorder:
     def __init__(self) -> None:
         self.records: list[dict[str, Any]] = []
+        # ``records`` remains the search-statement stream used by the original
+        # SQL-plan report.  ``all_records`` additionally captures helper SQL
+        # (notably context/job-scope resolution) so a shadow-context run can
+        # report its real call overhead without changing production behavior.
+        self.all_records: list[dict[str, Any]] = []
         self.context: dict[str, Any] = {}
         self.plan_cache: dict[str, dict[str, Any]] = {}
         self.connection: sqlite3.Connection | None = None
@@ -255,6 +260,15 @@ class StatementRecorder:
         rows_returned: int,
     ) -> None:
         item_type = identify_search_type(sql)
+        item = {
+            **self.context,
+            "search_type": item_type,
+            "match_tier": None,
+            "statement_kind": "auxiliary",
+            "elapsed_ms": round(float(elapsed_ms), 6),
+            "rows_returned": int(rows_returned),
+        }
+        self.all_records.append(item)
         if item_type == "other":
             return
         param_map = params if isinstance(params, dict) else {}
@@ -285,18 +299,14 @@ class StatementRecorder:
                     **classify_query_plan([]),
                 }
         candidate_limit = param_map.get("candidate_limit")
-        self.records.append(
+        item.update(
             {
-                **self.context,
-                "search_type": item_type,
                 "match_tier": int(tier) if tier is not None else None,
                 "statement_kind": (
                     "fast_reject_probe"
                     if "profile_fast_reject" in sql
                     else "search"
                 ),
-                "elapsed_ms": round(float(elapsed_ms), 6),
-                "rows_returned": int(rows_returned),
                 "candidate_limit": (
                     int(candidate_limit) if candidate_limit is not None else None
                 ),
@@ -307,6 +317,7 @@ class StatementRecorder:
                 "plan_key": plan_key,
             }
         )
+        self.records.append(item)
 
 
 class SearchHarness:
@@ -345,11 +356,13 @@ class SearchHarness:
     def normal_search(
         self, query: str, scope: str, limit: int,
         *, classification_filter: dict[str, Any] | None = None,
+        context_text: str | None = None, job_scope: str | None = None,
     ) -> dict[str, Any]:
         server._execute_ncs_search_tiers = self._original_executor
         return server.search_ncs(
             query=query, scope=scope, limit=limit, offset=0,
             classification_filter=classification_filter,
+            context_text=context_text, job_scope=job_scope,
         )
 
     def adaptive_limit_search(
@@ -503,6 +516,8 @@ def _run_strategy(
         query = str(candidate["query"])
         scope = str(candidate.get("scope_candidate") or "all")
         classification_filter = candidate.get("classification_filter")
+        context_text = candidate.get("context_text")
+        job_scope = candidate.get("job_scope")
         for run_index in range(runs):
             recorder.set_context(
                 strategy=strategy,
@@ -510,7 +525,7 @@ def _run_strategy(
                 run=run_index + 1,
                 phase="primary",
             )
-            before = len(recorder.records)
+            before = len(recorder.all_records)
             started = time.perf_counter_ns()
             fallback = False
             rejected = False
@@ -518,6 +533,15 @@ def _run_strategy(
             if strategy == "baseline":
                 result = harness.normal_search(
                     query, scope, limit, classification_filter=classification_filter
+                )
+            elif strategy == "context_shadow":
+                result = harness.normal_search(
+                    query,
+                    scope,
+                    limit,
+                    classification_filter=classification_filter,
+                    context_text=str(context_text) if context_text is not None else None,
+                    job_scope=str(job_scope) if job_scope is not None else None,
                 )
             elif strategy == "adaptive_limit_sizing":
                 result, fallback, first_pass_limit = harness.adaptive_limit_search(
@@ -531,7 +555,7 @@ def _run_strategy(
             else:
                 raise ValueError(f"unknown strategy: {strategy}")
             elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000.0
-            statement_slice = recorder.records[before:]
+            statement_slice = recorder.all_records[before:]
             order_hash = result_order_fingerprint(result)
             contract_hash = result_contract_fingerprint(result)
             samples.append(
@@ -545,8 +569,17 @@ def _run_strategy(
                     "elapsed_ms": round(elapsed_ms, 6),
                     "returned": int(result.get("returned", 0)),
                     "statement_count": len(statement_slice),
+                    "search_statement_count": sum(
+                        row["search_type"] != "other" for row in statement_slice
+                    ),
+                    "auxiliary_statement_count": sum(
+                        row["search_type"] == "other" for row in statement_slice
+                    ),
                     "order_fingerprint": order_hash,
                     "contract_fingerprint": contract_hash,
+                    "classification_filter_fingerprint": stable_hash(
+                        result.get("classification_filter")
+                    ),
                     "baseline_order_parity": (
                         True
                         if strategy == "baseline"
@@ -556,6 +589,12 @@ def _run_strategy(
                         True
                         if strategy == "baseline"
                         else contract_hash == baseline[case_id]["contract"]
+                    ),
+                    "baseline_classification_filter_parity": (
+                        True
+                        if strategy == "baseline"
+                        else stable_hash(result.get("classification_filter"))
+                        == baseline[case_id]["classification_filter"]
                     ),
                     "fallback_full_limit": fallback,
                     "fast_rejected": rejected,
@@ -650,6 +689,12 @@ def _aggregate_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
         "statement_count": latency_summary(
             sample["statement_count"] for sample in samples
         ),
+        "search_statement_count": latency_summary(
+            sample["search_statement_count"] for sample in samples
+        ),
+        "auxiliary_statement_count": latency_summary(
+            sample["auxiliary_statement_count"] for sample in samples
+        ),
         "zero_hit_samples": sum(sample["returned"] == 0 for sample in samples),
         "order_parity_rate": round(
             sum(bool(sample["baseline_order_parity"]) for sample in samples)
@@ -658,6 +703,11 @@ def _aggregate_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
         ),
         "contract_parity_rate": round(
             sum(bool(sample["baseline_contract_parity"]) for sample in samples)
+            / len(samples),
+            4,
+        ),
+        "classification_filter_parity_rate": round(
+            sum(bool(sample["baseline_classification_filter_parity"]) for sample in samples)
             / len(samples),
             4,
         ),
@@ -679,9 +729,74 @@ def _aggregate_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def context_shadow_summary(
+    baseline: dict[str, Any], shadow: dict[str, Any]
+) -> dict[str, Any]:
+    """Summarize shadow-only overhead without treating it as a rank change.
+
+    Context metadata intentionally changes the complete response contract, so
+    this comparison gates only the two invariants shadow mode promises: public
+    result order and caller-provided classification filters.
+    """
+    baseline_latency = baseline["latency"]
+    shadow_latency = shadow["latency"]
+    return {
+        "baseline_latency": baseline_latency,
+        "shadow_latency": shadow_latency,
+        "latency_overhead_ms": {
+            percentile: round(
+                float(shadow_latency[f"{percentile}_ms"])
+                - float(baseline_latency[f"{percentile}_ms"]),
+                3,
+            )
+            for percentile in ("p50", "p95")
+        },
+        "sql_calls": {
+            "baseline_total": baseline["statement_count"],
+            "shadow_total": shadow["statement_count"],
+            "baseline_search": baseline["search_statement_count"],
+            "shadow_search": shadow["search_statement_count"],
+            "baseline_auxiliary": baseline["auxiliary_statement_count"],
+            "shadow_auxiliary": shadow["auxiliary_statement_count"],
+        },
+        "public_order_parity_rate": shadow["order_parity_rate"],
+        "classification_hard_filter_parity_rate": shadow[
+            "classification_filter_parity_rate"
+        ],
+        "public_order_parity": bool(shadow["order_parity_rate"] == 1.0),
+        "classification_hard_filter_parity": bool(
+            shadow["classification_filter_parity_rate"] == 1.0
+        ),
+        "ranking_promotion": "HOLD",
+        "ranking_promotion_reason": (
+            "The measured path is a read-only shadow annotation. Context fields "
+            "change response metadata by design, and this profile does not "
+            "authorize production ranking changes."
+        ),
+    }
+
+
+def validate_context_shadow_candidates(candidates: list[dict[str, Any]]) -> None:
+    for candidate in candidates:
+        case_id = str(candidate.get("case_id") or "<missing>")
+        for field in ("context_text", "job_scope"):
+            value = candidate.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(
+                    f"context-shadow candidate {case_id!r} requires non-empty {field}"
+                )
+        classification_filter = candidate.get("classification_filter")
+        if classification_filter is not None and not isinstance(
+            classification_filter, dict
+        ):
+            raise ValueError(
+                f"context-shadow candidate {case_id!r} has invalid classification_filter"
+            )
+
+
 def _render_markdown(report: dict[str, Any]) -> str:
     lines = [
-        "# NCS Search SQL Profile (2026-08-30)",
+        "# NCS Search SQL Profile",
         "",
         "## Scope and safety",
         "",
@@ -694,8 +809,8 @@ def _render_markdown(report: dict[str, Any]) -> str:
         "",
         "## Strategy decision",
         "",
-        "| Strategy | p50 ms | p95 ms | p50 change | Contract parity | Promote |",
-        "| --- | ---: | ---: | ---: | ---: | --- |",
+        "| Strategy | p50 ms | p95 ms | p50 improvement | Parity check | Parity | Promote |",
+        "| --- | ---: | ---: | ---: | --- | ---: | --- |",
     ]
     baseline_p50 = report["strategies"]["baseline"]["samples"]["latency"]["p50_ms"]
     for name, data in report["strategies"].items():
@@ -703,20 +818,37 @@ def _render_markdown(report: dict[str, Any]) -> str:
         if name == "baseline":
             change = 0.0
             parity = 1.0
+            parity_label = "full response"
+            promote = False
+        elif name == "context_shadow":
+            change = (
+                round(
+                    (baseline_p50 - latency["p50_ms"])
+                    / baseline_p50
+                    * 100.0,
+                    2,
+                )
+                if baseline_p50
+                else 0.0
+            )
+            parity = data["samples"]["order_parity_rate"]
+            parity_label = "public order"
             promote = False
         else:
             gate = data["promotion_gate"]
             change = gate["p50_improvement_percent"]
             parity = data["samples"]["contract_parity_rate"]
+            parity_label = "full response"
             promote = gate["promotion_candidate"]
         lines.append(
             f"| {name} | {latency['p50_ms']:.3f} | {latency['p95_ms']:.3f} | "
-            f"{change:.2f}% | {parity:.2%} | {'YES' if promote else 'NO'} |"
+            f"{change:.2f}% | {parity_label} | {parity:.2%} | "
+            f"{'YES' if promote else 'NO'} |"
         )
     lines.extend(
         [
             "",
-            "Promotion requires both exact contract parity across every sample and at least 25% p50 improvement.",
+            "Prototype promotion requires exact full-response parity across every sample and at least 25% p50 improvement. Context shadow instead checks public order and the hard filter, and is always non-promoting.",
             "",
             "## Baseline SQL behavior",
             "",
@@ -740,6 +872,23 @@ def _render_markdown(report: dict[str, Any]) -> str:
     ].items():
         lines.append(
             f"- `{item_type}`: {item['total_ms']:.3f} ms ({item['share']:.2%})"
+        )
+    context_profile = report.get("context_shadow_profile")
+    if context_profile:
+        overhead = context_profile["latency_overhead_ms"]
+        calls = context_profile["sql_calls"]
+        lines.extend(
+            [
+                "",
+                "## Context shadow overhead (non-promoting)",
+                "",
+                f"- p50 overhead: {overhead['p50']:.3f} ms; p95 overhead: {overhead['p95']:.3f} ms.",
+                f"- SQL calls p50/p95: baseline {calls['baseline_total']['p50_ms']:.3f}/{calls['baseline_total']['p95_ms']:.3f}; shadow {calls['shadow_total']['p50_ms']:.3f}/{calls['shadow_total']['p95_ms']:.3f}.",
+                f"- Auxiliary SQL calls p50/p95: baseline {calls['baseline_auxiliary']['p50_ms']:.3f}/{calls['baseline_auxiliary']['p95_ms']:.3f}; shadow {calls['shadow_auxiliary']['p50_ms']:.3f}/{calls['shadow_auxiliary']['p95_ms']:.3f}.",
+                f"- Public result-order parity: {context_profile['public_order_parity_rate']:.2%}.",
+                f"- Classification hard-filter parity: {context_profile['classification_hard_filter_parity_rate']:.2%}.",
+                "- Ranking promotion: HOLD (shadow-only measurement; no production ranking change).",
+            ]
         )
     lines.extend(["", "### Query groups", ""])
     for group, item in report["strategies"]["baseline"]["samples"]["groups"].items():
@@ -780,6 +929,8 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     candidates = list(source["candidates"])
     if args.candidate_limit is not None:
         candidates = candidates[: max(int(args.candidate_limit), 0)]
+    if args.context_shadow:
+        validate_context_shadow_candidates(candidates)
     if not db_path.exists():
         raise FileNotFoundError(db_path)
     before_hash = sha256_file(db_path)
@@ -801,6 +952,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
                 int(args.limit),
             )
         recorder.records.clear()
+        recorder.all_records.clear()
 
         baseline_samples = _run_strategy(
             harness,
@@ -820,6 +972,9 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
                 {
                     "order": sample["order_fingerprint"],
                     "contract": sample["contract_fingerprint"],
+                    "classification_filter": sample[
+                        "classification_filter_fingerprint"
+                    ],
                 },
             )
         baseline_type_ms = Counter()
@@ -835,6 +990,18 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         for item_type in SEARCH_TYPES:
             if item_type not in fast_order:
                 fast_order.append(item_type)
+
+        if args.context_shadow:
+            all_samples["context_shadow"] = _run_strategy(
+                harness,
+                recorder,
+                candidates,
+                strategy="context_shadow",
+                runs=int(args.runs),
+                limit=int(args.limit),
+                baseline=baseline,
+                fast_reject_order=fast_order,
+            )
 
         for strategy in ("adaptive_limit_sizing", "no_result_fast_reject"):
             all_samples[strategy] = _run_strategy(
@@ -859,7 +1026,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "statements": _aggregate_statements(recorder.records, name),
             "case_samples": samples,
         }
-        if name != "baseline":
+        if name not in {"baseline", "context_shadow"}:
             exact = all(sample["baseline_contract_parity"] for sample in samples)
             item["promotion_gate"] = promotion_gate(
                 baseline_p50_ms=baseline_aggregate["latency"]["p50_ms"],
@@ -876,8 +1043,8 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         and item.get("promotion_gate", {}).get("promotion_candidate")
     ]
     report = {
-        "schema": "ncs_search_sql_profile_v1",
-        "version": 1,
+        "schema": "ncs_search_sql_profile_v2",
+        "version": 2,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "mode": "read_only_compact_snapshot_sql_profile",
         "environment": {
@@ -911,6 +1078,8 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "candidate_status": "candidate_eval",
             "human_labels_present": False,
             "recall_claim_allowed": False,
+            "fixture_kind": source.get("fixture_kind", "unspecified"),
+            "holdout_fixture_read": False,
         },
         "strategies": strategy_reports,
         "query_plans": {
@@ -929,6 +1098,12 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "select_column_reduction": {
                 "measured_candidate": False,
                 "reason": "Projection-only timing would omit the mandatory ID-to-detail lookup and would not be an exact end-to-end parity measurement.",
+            },
+            "context_shadow": {
+                "measured": bool(args.context_shadow),
+                "production_ranking_changed": False,
+                "public_order_is_the_parity_contract": True,
+                "classification_filter_is_hard_filter": True,
             },
         },
         "decision": {
@@ -955,9 +1130,15 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
                 f'--candidates "{candidate_path}" --runs {args.runs} '
                 f'--limit {args.limit} --out "{Path(args.out).resolve()}" '
                 f'--markdown-out "{Path(args.markdown_out).resolve()}"'
+                + (" --context-shadow" if args.context_shadow else "")
             )
         },
     }
+    if args.context_shadow:
+        report["context_shadow_profile"] = context_shadow_summary(
+            baseline_aggregate,
+            strategy_reports["context_shadow"]["samples"],
+        )
     return report
 
 
@@ -970,21 +1151,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument("--candidate-limit", type=int)
+    parser.add_argument(
+        "--context-shadow",
+        action="store_true",
+        help="Measure read-only context_text/job_scope shadow overhead and parity.",
+    )
     parser.add_argument("--out", default=str(DEFAULT_JSON))
     parser.add_argument("--markdown-out", default=str(DEFAULT_MARKDOWN))
+    parser.add_argument(
+        "--render-existing-report",
+        help="Render Markdown from an already generated JSON profile without rerunning SQL.",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    report = build_report(args)
+    if args.render_existing_report:
+        report = json.loads(
+            Path(args.render_existing_report).read_text(encoding="utf-8")
+        )
+    else:
+        report = build_report(args)
     out = Path(args.out)
     markdown_out = Path(args.markdown_out)
     out.parent.mkdir(parents=True, exist_ok=True)
     markdown_out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
+    if not args.render_existing_report:
+        out.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
     markdown_out.write_text(_render_markdown(report), encoding="utf-8")
     print(
         json.dumps(
@@ -994,6 +1190,7 @@ def main() -> int:
                 "candidate_count": report["evaluation"]["candidate_count"],
                 "promotable_strategies": report["decision"]["promotable_strategies"],
                 "database_unchanged": report["database"]["unchanged"],
+                "rendered_existing_report": bool(args.render_existing_report),
             },
             ensure_ascii=False,
         )

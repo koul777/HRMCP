@@ -165,6 +165,135 @@ class ProfileNcsSearchSqlTests(unittest.TestCase):
             ["punctuation", "two_syllable", "off_scope"],
         )
 
+    def test_context_shadow_forwards_context_and_checks_public_invariants(self) -> None:
+        class RecordingHarness:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def normal_search(self, query, scope, limit, **kwargs):
+                self.calls.append((query, scope, limit, kwargs))
+                result = {
+                    "returned": 1,
+                    "results": [{"type": "unit", "id": "synthetic-unit"}],
+                    "classification_filter": kwargs.get("classification_filter"),
+                }
+                if kwargs.get("context_text") or kwargs.get("job_scope"):
+                    result["search_context"] = {"rollout_phase": "shadow"}
+                return result
+
+        candidate = {
+            "case_id": "synthetic_context",
+            "query": "synthetic",
+            "scope_candidate": "all",
+            "context_text": "synthetic context",
+            "job_scope": "synthetic job",
+            "classification_filter": {"major_code": "02"},
+        }
+        baseline_result = {
+            "returned": 1,
+            "results": [{"type": "unit", "id": "synthetic-unit"}],
+            "classification_filter": {"major_code": "02"},
+        }
+        recorder = profile.StatementRecorder()
+        harness = RecordingHarness()
+        samples = profile._run_strategy(
+            harness,
+            recorder,
+            [candidate],
+            strategy="context_shadow",
+            runs=1,
+            limit=5,
+            baseline={
+                "synthetic_context": {
+                    "order": profile.result_order_fingerprint(baseline_result),
+                    "contract": profile.result_contract_fingerprint(baseline_result),
+                    "classification_filter": profile.stable_hash(
+                        baseline_result["classification_filter"]
+                    ),
+                }
+            },
+            fast_reject_order=list(profile.SEARCH_TYPES),
+        )
+
+        self.assertEqual(harness.calls[0][3]["context_text"], "synthetic context")
+        self.assertEqual(harness.calls[0][3]["job_scope"], "synthetic job")
+        self.assertTrue(samples[0]["baseline_order_parity"])
+        self.assertTrue(samples[0]["baseline_classification_filter_parity"])
+        self.assertEqual(samples[0]["auxiliary_statement_count"], 0)
+
+    def test_context_shadow_summary_is_non_promoting(self) -> None:
+        baseline = {
+            "latency": {"p50_ms": 2.0, "p95_ms": 3.0},
+            "statement_count": {"p50_ms": 4.0, "p95_ms": 5.0},
+            "search_statement_count": {"p50_ms": 3.0, "p95_ms": 4.0},
+            "auxiliary_statement_count": {"p50_ms": 1.0, "p95_ms": 1.0},
+        }
+        shadow = {
+            "latency": {"p50_ms": 3.0, "p95_ms": 6.0},
+            "statement_count": {"p50_ms": 6.0, "p95_ms": 8.0},
+            "search_statement_count": {"p50_ms": 3.0, "p95_ms": 4.0},
+            "auxiliary_statement_count": {"p50_ms": 3.0, "p95_ms": 4.0},
+            "order_parity_rate": 1.0,
+            "classification_filter_parity_rate": 1.0,
+        }
+        summary = profile.context_shadow_summary(baseline, shadow)
+        self.assertEqual(summary["latency_overhead_ms"], {"p50": 1.0, "p95": 3.0})
+        self.assertTrue(summary["public_order_parity"])
+        self.assertTrue(summary["classification_hard_filter_parity"])
+        self.assertEqual(summary["ranking_promotion"], "HOLD")
+
+    def test_context_shadow_markdown_labels_order_parity_and_real_slowdown(self) -> None:
+        report = {
+            "evaluation": {"candidate_count": 1, "runs_per_query": 1},
+            "database": {
+                "path": "synthetic.db",
+                "bytes": 1,
+                "open_mode": "mode=ro",
+            },
+            "strategies": {
+                "baseline": {
+                    "samples": {
+                        "latency": {"p50_ms": 100.0, "p95_ms": 120.0},
+                        "groups": {},
+                    },
+                    "statements": {
+                        "statement_count": 0,
+                        "early_stop": {"rate": 0.0},
+                        "tiers": [],
+                        "type_latency_contribution": {},
+                    },
+                },
+                "context_shadow": {
+                    "samples": {
+                        "latency": {"p50_ms": 125.0, "p95_ms": 150.0},
+                        "order_parity_rate": 1.0,
+                    }
+                },
+            },
+            "query_plans": {
+                "unique_plan_count": 0,
+                "full_scan_count": 0,
+                "index_access_count": 0,
+                "temp_btree_count": 0,
+            },
+            "decision": {"summary": "HOLD"},
+        }
+
+        markdown = profile._render_markdown(report)
+
+        self.assertIn(
+            "| context_shadow | 125.000 | 150.000 | -25.00% | "
+            "public order | 100.00% | NO |",
+            markdown,
+        )
+        self.assertIn("Context shadow instead checks public order", markdown)
+
+    def test_context_shadow_fixture_requires_non_empty_context_fields(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires non-empty context_text"):
+            profile.validate_context_shadow_candidates(
+                [{"case_id": "synthetic", "context_text": "", "job_scope": "job"}]
+            )
+
     def test_read_only_profile_connection_registers_search_boundary_function(
         self,
     ) -> None:

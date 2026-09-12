@@ -1,0 +1,43 @@
+{
+  "schema": "ncs_search_context_synthetic_adversarial_v1",
+  "fixture_kind": "synthetic_adversarial_non_holdout_v1",
+  "purpose": "Measure read-only context_text/job_scope shadow overhead and preserve public ordering plus classification hard filters. This fixture contains no relevance labels, aliases, or production ranking expectations.",
+  "candidates": [
+    {
+      "case_id": "synthetic_context_hr_standard",
+      "query": "인사",
+      "scope_candidate": "all",
+      "context_text": "synthetic HR workflow planning context",
+      "job_scope": "synthetic HR operations",
+      "classification_filter": {"major_code": "02"},
+      "tags": ["synthetic", "context", "hard_filter"]
+    },
+    {
+      "case_id": "synthetic_context_scope_boundary",
+      "query": "관리",
+      "scope_candidate": "all",
+      "context_text": "synthetic task boundary evidence for an HR planning workflow",
+      "job_scope": "synthetic workforce administration",
+      "classification_filter": {"major_code": "02", "middle_code": "02"},
+      "tags": ["synthetic", "context", "boundary", "hard_filter"]
+    },
+    {
+      "case_id": "synthetic_context_no_result",
+      "query": "zz_synthetic_context_no_result_9f1d",
+      "scope_candidate": "all",
+      "context_text": "synthetic adversarial no-result context",
+      "job_scope": "synthetic unavailable job scope",
+      "classification_filter": {"major_code": "02"},
+      "tags": ["synthetic", "context", "negative_control", "off_scope"]
+    },
+    {
+      "case_id": "synthetic_context_long_tokens",
+      "query": "교육",
+      "scope_candidate": "all",
+      "context_text": "synthetic training system task knowledge skill attitude delivery facility review trace with deliberately redundant context tokens",
+      "job_scope": "synthetic education planning operations",
+      "classification_filter": {"major_code": "02"},
+      "tags": ["synthetic", "context", "adversarial"]
+    }
+  ]
+}

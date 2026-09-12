@@ -120,6 +120,7 @@ _NCS_SEARCH_MATCH_MODES = {
     1: "token_and",
     2: "expanded_token_and",
     3: "token_or",
+    4: "morphology_fill",
 }
 _NCS_SEARCH_LOW_INFORMATION_SUFFIXES = (
     "관리",
@@ -208,6 +209,47 @@ def _normalize_ncs_search_query(query: str) -> tuple[str, list[str], list[str]]:
     phrase = " ".join(query_tokens)
     fallback_tokens = [token for token in query_tokens if len(token) > 1]
     return phrase, query_tokens, fallback_tokens
+
+
+def _ncs_search_morphology_expansions(tokens: list[str]) -> dict[str, list[str]]:
+    """Offer one conservative Korean particle removal per bounded query token.
+
+    These are retrieval candidates, not a tokenizer or aliases. Preserve the
+    original query and only use stems after every original lexical tier. Paired
+    particles must agree with the final Hangul consonant; never peel repeatedly
+    or reduce a token to a single syllable.
+    """
+    particles = (
+        ("으로", "consonant_except_rieul"), ("에서", "any"),
+        ("에게", "any"), ("부터", "any"), ("까지", "any"),
+        ("은", "consonant"), ("는", "vowel"),
+        ("을", "consonant"), ("를", "vowel"),
+        ("이", "consonant"), ("가", "vowel"),
+        ("과", "consonant"), ("와", "vowel"),
+        ("로", "vowel_or_rieul"), ("의", "any"), ("에", "any"),
+    )
+    expansions: dict[str, list[str]] = {}
+    for token in tokens[:4]:
+        if not re.fullmatch(r"[가-힣]{3,}", token):
+            continue
+        for suffix, rule in particles:
+            if not token.endswith(suffix):
+                continue
+            stem = token[:-len(suffix)]
+            if len(stem) < 2:
+                continue
+            final = (ord(stem[-1]) - 0xAC00) % 28
+            allowed = (
+                rule == "any"
+                or (rule == "consonant" and final != 0)
+                or (rule == "vowel" and final == 0)
+                or (rule == "consonant_except_rieul" and final not in (0, 8))
+                or (rule == "vowel_or_rieul" and final in (0, 8))
+            )
+            if allowed:
+                expansions[token] = [stem]
+            break
+    return expansions
 
 
 def _ncs_search_boundary_match(value: Any, needle: Any) -> int:
@@ -1323,7 +1365,7 @@ def _normalized_ncs_search_params(params: dict[str, Any]) -> dict[str, Any]:
     """Keep original code binds while normalizing text binds once per tier."""
     result = dict(params)
     for key, value in params.items():
-        if key == "phrase_term" or key.startswith(("token_", "expanded_", "intent_")):
+        if key == "phrase_term" or key.startswith(("token_", "expanded_", "intent_", "morphology_")):
             result[f"{key}_raw"] = value
             result[key] = normalize_search_text(value)
     # phrase_pattern is the legacy unit-order tiebreak, not a text prefilter.
@@ -1418,6 +1460,43 @@ def _ncs_search_tier_predicates(
             meaningful_clause if meaningful_clause == "0 = 1" else "",
         )
     )
+    morphology = _ncs_search_morphology_expansions(fallback_tokens)
+    if morphology:
+        morphology_params: dict[str, Any] = {}
+        morphology_groups = []
+        morphology_tokens = []
+        morphology_parameter_groups = []
+        for index, token in enumerate(fallback_tokens):
+            stem = morphology.get(token, [token])[0]
+            parameter = f"morphology_{index}"
+            morphology_params[parameter] = stem
+            morphology_tokens.append(stem)
+            morphology_parameter_groups.append([parameter])
+            morphology_groups.append(
+                _ncs_search_boundary_any(columns, parameter, normalized=normalized)
+            )
+        morphology_score, morphology_meaningful, morphology_weights = (
+            _ncs_search_fallback_ranking(
+                weighted_columns or tuple((column, 1.0) for column in columns),
+                morphology_tokens, morphology_parameter_groups, morphology_groups,
+                normalized=normalized,
+            )
+        )
+        morphology_params.update(morphology_weights)
+        if normalized:
+            morphology_params = _normalized_ncs_search_params(morphology_params)
+        morphology_params = {**params, **morphology_params}
+        # All query terms must still match. Exclude original OR candidates so
+        # the bounded fill query cannot spend its limit on existing rows.
+        original_or = token_or_candidates
+        if meaningful_clause == "0 = 1":
+            original_or = "0 = 1"
+        tiers.append((
+            4,
+            "(" + " AND ".join(morphology_groups) + f") AND NOT ({original_or})",
+            morphology_params, morphology_score,
+            morphology_meaningful if morphology_meaningful == "0 = 1" else "",
+        ))
     return tiers
 
 
@@ -1469,11 +1548,14 @@ def _execute_ncs_search_tiers(
     tiers: list[tuple[int, str, dict[str, Any], str, str]],
     base_params: dict[str, Any],
 ) -> list[Any]:
-    """Run a weaker search tier only when the stronger tier has no matches."""
+    """Preserve lexical ranks; only append morphology to an underfilled OR tier."""
+    original_rows: list[Any] = []
     for match_tier, where_clause, tier_params, score_clause, meaningful_clause in tiers:
         params = dict(tier_params)
         params.update(base_params)
         params["match_tier"] = match_tier
+        if original_rows:
+            params["candidate_limit"] -= len(original_rows)
         rows = conn.execute(
             sql_template.format(
                 where_clause=where_clause,
@@ -1487,8 +1569,11 @@ def _execute_ncs_search_tiers(
             params,
         ).fetchall()
         if rows:
-            return rows
-    return []
+            if match_tier == 3 and len(rows) < base_params["candidate_limit"]:
+                original_rows = rows
+                continue
+            return original_rows + rows
+    return original_rows
 
 
 def _ncs_search_match_metadata(
@@ -1522,6 +1607,8 @@ def _ncs_search_match_metadata(
         if match_mode in {"expanded_token_and", "token_or"}
         else {}
     )
+    if match_mode == "morphology_fill":
+        active_expansions = _ncs_search_morphology_expansions(query_tokens)
     matched_tokens: list[str] = []
     matched_expansions: list[dict[str, Any]] = []
     matched_terms: list[str] = []
@@ -1858,7 +1945,7 @@ def search_ncs(
             if selected_unit_tier == 3:
                 unit_task_ksa_scores = _ncs_search_unit_task_ksa_scores(
                     conn,
-                    [item["id"] for item in raw_candidates["unit"]],
+                    [item["id"] for item in raw_candidates["unit"] if item["_match_tier"] == 3],
                     fallback_tokens,
                     token_weights,
                     normalized=normalized_search,
@@ -2043,16 +2130,16 @@ def search_ncs(
         )
         for item_type in requested_types
     }
+    modes_by_type = {
+        item_type: {_NCS_SEARCH_MATCH_MODES[item["_match_tier"]] for item in rows}
+        for item_type, rows in raw_candidates.items()
+    }
     match_mode_by_type = {
-        item_type: (
-            _NCS_SEARCH_MATCH_MODES.get(selected_tier)
-            if selected_tier is not None
-            else None
-        )
-        for item_type, selected_tier in selected_tier_by_type.items()
+        item_type: next(iter(modes)) if len(modes) == 1 else "mixed" if modes else None
+        for item_type, modes in modes_by_type.items()
     }
     active_match_modes = {
-        mode for mode in match_mode_by_type.values() if mode is not None
+        mode for modes in modes_by_type.values() for mode in modes
     }
     applied_token_expansions = (
         token_expansions
@@ -2069,23 +2156,16 @@ def search_ncs(
         if len(active_match_modes) == 1
         else "mixed" if active_match_modes else None
     )
-    candidates_by_type = {
-        item_type: [
-            item
-            for item in raw_candidates.get(item_type, [])
-            if item["_match_tier"] == selected_tier_by_type[item_type]
-        ]
-        for item_type in requested_types
-    }
+    candidates_by_type = {item_type: list(rows) for item_type, rows in raw_candidates.items()}
     if selected_tier_by_type.get("unit") == 3 and unit_task_ksa_scores:
         candidates_by_type["unit"] = _rerank_ncs_unit_task_ksa_candidates(
-            candidates_by_type["unit"],
+            [item for item in candidates_by_type["unit"] if item["_match_tier"] == 3],
             unit_task_ksa_scores,
             fallback_tokens,
             token_expansions,
             token_weights,
             normalized=normalized_search,
-        )
+        ) + [item for item in candidates_by_type["unit"] if item["_match_tier"] == 4]
     if search_context.get("status") == "not_provided":
         search_context["needs_context"] = _ncs_search_needs_context(
             candidates_by_type,
@@ -2097,7 +2177,15 @@ def search_ncs(
             requested_types,
             search_context,
         )
-    merged = _round_robin_ncs_search_results(candidates_by_type, requested_types)
+    # Cross-type balancing must not let new fill rows displace original results
+    # from another scope. Keep the entire original round-robin prefix intact.
+    merged = _round_robin_ncs_search_results(
+        {kind: [item for item in rows if item["_match_tier"] != 4]
+         for kind, rows in candidates_by_type.items()}, requested_types,
+    ) + _round_robin_ncs_search_results(
+        {kind: [item for item in rows if item["_match_tier"] == 4]
+         for kind, rows in candidates_by_type.items()}, requested_types,
+    )
     page_end = applied_offset + max_rows
     page = merged[applied_offset:page_end]
     consumed_by_type = {item_type: 0 for item_type in requested_types}
@@ -2112,7 +2200,6 @@ def search_ncs(
             selected_tier is not None
             and len(fetched) == candidate_limit
             and fetched
-            and fetched[-1]["_match_tier"] == selected_tier
         )
         has_more_by_type[item_type] = (
             len(selected_candidates) > consumed_by_type[item_type]
@@ -2126,7 +2213,7 @@ def search_ncs(
             item,
             query_tokens=query_tokens,
             phrase=phrase,
-            match_mode=str(match_mode_by_type[item["type"]]),
+            match_mode=_NCS_SEARCH_MATCH_MODES[item["_match_tier"]],
             token_expansions=token_expansions,
             intent_expansions=intent_expansions,
             normalized=normalized_search,

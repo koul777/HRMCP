@@ -1357,6 +1357,103 @@ class NcsSearchRecallTests(unittest.TestCase):
                 )
                 self.assertEqual(local_search.read_bytes(), vercel_search.read_bytes())
 
+    def test_morphology_particles_are_bounded_and_do_not_rewrite_query(self) -> None:
+        variants = search_core._ncs_search_morphology_expansions(
+            ["장비를", "센서는", "설비의", "공정으로", "전원을"]
+        )
+        self.assertEqual(variants, {
+            "장비를": ["장비"], "센서는": ["센서"],
+            "설비의": ["설비"], "공정으로": ["공정"],
+        })
+        for token in ("사과", "관리", "장비을", "공정를", "API를", "UNIT_01", "%"):
+            with self.subTest(token=token):
+                self.assertEqual(search_core._ncs_search_morphology_expansions([token]), {})
+        self.assertEqual(search_core._ncs_search_morphology_expansions(["기술로"]), {"기술로": ["기술"]})
+
+    def test_morphology_fills_empty_results_with_trace_and_storage_parity(self) -> None:
+        with self._open_db() as conn:
+            conn.execute("INSERT INTO competency_units VALUES ('M_FILL', '센서 장비', '', '4', 1)")
+            conn.execute("INSERT INTO competency_elements VALUES (150, '센서 장비', 'M_FILL')")
+            conn.execute("INSERT INTO performance_criteria VALUES (150, '센서 장비', NULL, 150)")
+            conn.execute("INSERT INTO ksa_items VALUES (150, 'knowledge', '센서 장비', NULL, 150)")
+            conn.commit()
+        query = "센서를 장비로"
+        with patch.object(search_core, "_ncs_search_morphology_expansions", return_value={}):
+            baseline = server.search_ncs(query, scope="all", limit=10)
+        self.assertEqual(baseline["returned"], 0)
+        result = server.search_ncs(query, scope="all", limit=10)
+        self.assertEqual(result["returned"], 4)
+        self.assertEqual(result["normalized_query"], query)
+        self.assertEqual(result["query_tokens"], ["센서를", "장비로"])
+        self.assertEqual(result["match_mode"], "morphology_fill")
+        for row in result["results"]:
+            self.assertEqual(row["matched_tokens"], ["센서를", "장비로"])
+            self.assertEqual([item["matched_as"] for item in row["matched_expansions"]], ["센서", "장비"])
+        with self._open_db() as conn:
+            self._add_normalized_columns(conn)
+            conn.commit()
+        self.assertEqual(server.search_ncs(query, scope="all", limit=10), result)
+        self.assertEqual(server.search_ncs(query, scope="unit", classification_filter={"major_code": "99"})["returned"], 0)
+
+    def test_morphology_fill_preserves_original_or_prefix_across_scopes_and_pages(self) -> None:
+        with self._open_db() as conn:
+            conn.execute("INSERT INTO competency_units VALUES ('M_OR', '센서를 검토', '', '4', 1)")
+            conn.execute("INSERT INTO competency_elements VALUES (150, '센서를 검토', 'M_OR')")
+            conn.execute("INSERT INTO performance_criteria VALUES (150, '센서를 검토', NULL, 150)")
+            conn.execute("INSERT INTO ksa_items VALUES (150, 'knowledge', '센서를 검토', NULL, 150)")
+            for index in range(8):
+                conn.execute("INSERT INTO competency_units VALUES (?, '센서 장비', '', '4', 1)", (f"M_FILL_{index}",))
+            conn.commit()
+        for scope in ("unit", "all"):
+            query = "센서를 장비로"
+            with patch.object(search_core, "_ncs_search_morphology_expansions", return_value={}):
+                baseline = server.search_ncs(query, scope=scope, limit=30)
+            actual = server.search_ncs(query, scope=scope, limit=30)
+            self.assertEqual(actual["results"][:baseline["returned"]], baseline["results"])
+            self.assertEqual(actual["returned"], baseline["returned"] + 8)
+            self.assertEqual(actual["match_mode"], "mixed")
+            pages = []
+            offset = 0
+            while offset is not None:
+                page = server.search_ncs(query, scope=scope, limit=2, offset=offset)
+                pages.extend(page["results"])
+                offset = page["next_offset"]
+            self.assertEqual(pages, actual["results"])
+            self.assertEqual(len({(row["type"], row["id"]) for row in pages}), len(pages))
+
+    def test_morphology_never_runs_after_strong_tier_or_full_or_page(self) -> None:
+        with self._open_db() as conn:
+            conn.executemany("INSERT INTO competency_units VALUES (?, ?, '', '4', 1)", (
+                ("M_STRONG", "센서를 장비로",), ("M_FILL", "센서 장비",),
+            ))
+            conn.commit()
+        for query, mode in (("센서를 장비로", "phrase"), ("장비로 센서를", "token_and")):
+            self.sql_statements.clear()
+            actual = server.search_ncs(query, scope="unit", limit=10)
+            self.assertEqual(actual["match_mode"], mode)
+            self.assertFalse(any("4 AS match_tier" in sql for sql in self.sql_statements))
+            with patch.object(search_core, "_ncs_search_morphology_expansions", return_value={}):
+                self.assertEqual(server.search_ncs(query, scope="unit", limit=10), actual)
+        with self._open_db() as conn:
+            conn.execute("UPDATE competency_units SET unit_name_raw = '센서를 검토' WHERE unit_code = 'M_STRONG'")
+            conn.execute("INSERT INTO competency_units VALUES ('M_OR_2', '센서를 검사', '', '4', 1)")
+            conn.commit()
+        self.sql_statements.clear()
+        actual = server.search_ncs("센서를 장비로", scope="unit", limit=1)
+        self.assertEqual(actual["match_mode"], "token_or")
+        self.assertFalse(any("4 AS match_tier" in sql for sql in self.sql_statements))
+
+    def test_morphology_requires_all_terms_and_rejects_generic_only_stems(self) -> None:
+        with self._open_db() as conn:
+            conn.execute("INSERT INTO competency_units VALUES ('M_GENERIC', '관리 운영', '', '4', 1)")
+            conn.execute("INSERT INTO competency_units VALUES ('M_PARTIAL', '센서', '', '4', 1)")
+            conn.commit()
+        for query in ("관리의 운영을", "센서를 장비로"):
+            with self.subTest(query=query):
+                with patch.object(search_core, "_ncs_search_morphology_expansions", return_value={}):
+                    baseline = server.search_ncs(query, scope="unit")
+                self.assertEqual(server.search_ncs(query, scope="unit"), baseline)
+
     def test_server_reexports_search_package_entrypoint(self) -> None:
         from ncs_mcp.search import search_ncs as package_search_ncs
 
