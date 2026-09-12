@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import os
 import sqlite3
 import subprocess
@@ -289,7 +290,7 @@ class SupplementalDataTests(unittest.TestCase):
             self.assertEqual(row["ncs_code_normalized"], "020202")
             self.assertEqual(row["match_status"], "matched_small_scope")
 
-    def test_supplemental_import_cli_exits_nonzero_for_malformed_csv(self) -> None:
+    def test_supplemental_import_cli_requires_builder_before_parsing_csv(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "ncs.db"
             bad_csv = Path(tmp) / "bad.csv"
@@ -316,8 +317,15 @@ class SupplementalDataTests(unittest.TestCase):
                 timeout=60,
             )
 
-            self.assertNotEqual(completed.returncode, 0)
-            self.assertIn("supplemental_import_failed", completed.stdout)
+            # This command mutates the serving DB.  It must fail closed at the
+            # Builder gate, before even attempting to parse a malformed input.
+            self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
+            payload = json.loads(completed.stdout)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["error"], "builder_authorization_required")
+            self.assertEqual(payload["command"], "import-supplemental-ncs-data")
+            self.assertEqual(payload["mutation_policy"], "builder_required")
+            self.assertFalse(db_path.exists(), "blocked command must not create or mutate a DB")
 
 
 if __name__ == "__main__":

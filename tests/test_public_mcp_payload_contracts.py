@@ -480,8 +480,15 @@ class PublicMcpPayloadContractTests(unittest.TestCase):
             conn.close()
         self.open_db_patch = patch.object(server, "open_db", new=self._open_fixture_db)
         self.open_db_patch.start()
+        # Recommendations use their own strict read-only context; keep its real
+        # connection on the test fixture rather than the workspace database.
+        self.recommendation_db_patch = patch.dict(
+            "os.environ", {"NCS_DB_PATH": str(self.db_path)}
+        )
+        self.recommendation_db_patch.start()
 
     def tearDown(self) -> None:
+        self.recommendation_db_patch.stop()
         self.open_db_patch.stop()
         self.temp_dir.cleanup()
 
@@ -492,6 +499,12 @@ class PublicMcpPayloadContractTests(unittest.TestCase):
             yield conn
         finally:
             conn.close()
+
+    def test_recommendation_connection_is_isolated_to_read_only_fixture(self) -> None:
+        with server.open_recommendation_db() as conn:
+            database_path = conn.execute("PRAGMA database_list").fetchone()[2]
+            self.assertEqual(Path(database_path).resolve(), self.db_path.resolve())
+            self.assertEqual(conn.execute("PRAGMA query_only").fetchone()[0], 1)
 
     def _call_tool_wire(self, name: str, arguments: dict[str, object]) -> tuple[dict[str, object], str]:
         async def invoke() -> dict[str, object]:
@@ -576,6 +589,74 @@ class PublicMcpPayloadContractTests(unittest.TestCase):
                 MAX_PUBLIC_PAYLOAD_CHARS,
                 f"{label} returned {_json_size(payload)} chars",
             )
+
+    def test_search_context_inputs_are_optional_and_schema_bounded(self) -> None:
+        async def inspect_tools() -> dict[str, object]:
+            return {
+                tool.name: tool
+                for tool in await server.mcp.list_tools()
+                if tool.name in {"ncs_search", "ncs_discover_tools"}
+            }
+
+        tools = asyncio.run(inspect_tools())
+        self.assertEqual(set(tools), {"ncs_search", "ncs_discover_tools"})
+        for tool_name, tool in tools.items():
+            properties = tool.inputSchema["properties"]
+            self.assertNotIn("context_text", tool.inputSchema.get("required", []), tool_name)
+            self.assertNotIn("job_scope", tool.inputSchema.get("required", []), tool_name)
+            context_string = next(
+                branch
+                for branch in properties["context_text"]["anyOf"]
+                if branch.get("type") == "string"
+            )
+            job_string = next(
+                branch
+                for branch in properties["job_scope"]["anyOf"]
+                if branch.get("type") == "string"
+            )
+            self.assertEqual(context_string["maxLength"], 500, tool_name)
+            self.assertEqual(job_string["maxLength"], 100, tool_name)
+
+    def test_public_search_context_is_shadow_only_redacted_and_bounded(self) -> None:
+        raw_context = "PRIVATE CALLER CONTEXT 12345"
+        baseline = server.ncs_search(query=RANK_QUERY, scope="unit", limit=5)
+        contextual = server.ncs_search(
+            query=RANK_QUERY,
+            scope="unit",
+            limit=5,
+            context_text=raw_context,
+            job_scope="인사 관리",
+        )
+
+        self.assertEqual(
+            [item["id"] for item in contextual["results"]],
+            [item["id"] for item in baseline["results"]],
+        )
+        context = contextual["search_context"]
+        self.assertEqual(context["schema"], "ncs_search_context_v1")
+        self.assertFalse(context["prior_applied"])
+        self.assertEqual(context["policy"]["rollout_phase"], "shadow")
+        self.assertNotIn(raw_context, json.dumps(contextual, ensure_ascii=False))
+        self.assertLessEqual(_json_size(contextual), MAX_PUBLIC_PAYLOAD_CHARS)
+
+    def test_context_discovery_exposes_one_redacted_v2_route(self) -> None:
+        raw_context = "PRIVATE DISCOVERY CONTEXT 98765"
+        discovery = server.ncs_discover_tools(
+            "HR planning NCS search",
+            context_text=raw_context,
+            job_scope="인사 관리",
+        )
+
+        route = discovery["query_route"]
+        self.assertEqual(route["tool"], "ncs_search")
+        self.assertEqual(route["search_context"]["schema"], "ncs_search_context_v1")
+        self.assertEqual(
+            route["route_contract"]["fingerprint_version"],
+            "route-fingerprint-v2",
+        )
+        self.assertEqual(route["classification_context"]["mode"], "soft_prior")
+        self.assertNotIn(raw_context, json.dumps(discovery, ensure_ascii=False))
+        self.assertLessEqual(_json_size(discovery), MAX_PUBLIC_PAYLOAD_CHARS)
 
     def test_unit_detail_renders_zero_element_level_as_missing(self) -> None:
         with self._open_fixture_db() as conn:

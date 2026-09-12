@@ -66,6 +66,86 @@ class BenchmarkNcsSearchNormalizationTests(unittest.TestCase):
         self.assertEqual(decision["recommendation"], "keep_current_token_fallback")
         self.assertFalse(decision["promotion_approved"])
 
+    def test_query_expansion_forwards_current_tier_contract(self) -> None:
+        calls = []
+
+        class FakeServer:
+            @staticmethod
+            def _escape_ncs_search_like(value: str) -> str:
+                return value.replace("%", "\\%")
+
+            @staticmethod
+            def _ncs_search_like_any(columns: tuple[str, ...], parameter: str) -> str:
+                return " OR ".join(f"{column} LIKE :{parameter}" for column in columns)
+
+        def original(
+            columns: tuple[str, ...],
+            phrase: str,
+            fallback_tokens: list[str],
+            *,
+            weighted_columns: tuple[str, ...] = (),
+            expansion_mode: str = "default",
+        ) -> list[tuple[object, ...]]:
+            calls.append(
+                {
+                    "columns": columns,
+                    "phrase": phrase,
+                    "fallback_tokens": fallback_tokens,
+                    "weighted_columns": weighted_columns,
+                    "expansion_mode": expansion_mode,
+                }
+            )
+            return [
+                (
+                    "tier1",
+                    "phrase_clause",
+                    {"phrase": phrase},
+                    "score_clause",
+                    "meaningful_clause",
+                ),
+                ("tier2", "fallback_clause", {"tokens": fallback_tokens}),
+            ]
+
+        tiers = benchmark.build_query_pattern_expansion_tier_predicates(
+            original,
+            FakeServer(),
+            ("name", "description"),
+            "워크숍 행사 준비",
+            ["워크숍", "행사", "준비"],
+            weighted_columns=("name",),
+            expansion_mode="weighted",
+        )
+
+        self.assertEqual(calls[0]["weighted_columns"], ("name",))
+        self.assertEqual(calls[0]["expansion_mode"], "weighted")
+        self.assertEqual(len(tiers[0]), 5)
+        self.assertIn("separator_variant_pattern", tiers[0][2])
+        self.assertEqual(tiers[0][3:], ("score_clause", "meaningful_clause"))
+
+    def test_query_expansion_preserves_legacy_three_tuple_contract(self) -> None:
+        class FakeServer:
+            @staticmethod
+            def _escape_ncs_search_like(value: str) -> str:
+                return value
+
+            @staticmethod
+            def _ncs_search_like_any(columns: tuple[str, ...], parameter: str) -> str:
+                return f"{columns[0]} LIKE :{parameter}"
+
+        def original(*args: object, **kwargs: object) -> list[tuple[object, ...]]:
+            return [("tier1", "phrase_clause", {"phrase": "x"})]
+
+        tiers = benchmark.build_query_pattern_expansion_tier_predicates(
+            original,
+            FakeServer(),
+            ("name",),
+            "x y",
+            ["x", "y"],
+        )
+
+        self.assertEqual(len(tiers[0]), 3)
+        self.assertIn("separator_variant_pattern", tiers[0][2])
+
     def test_markdown_exposes_caveat_and_safety(self) -> None:
         report = {
             "generated_at": "2026-08-30T00:00:00+00:00",

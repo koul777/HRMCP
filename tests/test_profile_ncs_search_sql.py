@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import sqlite3
+import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -14,6 +17,80 @@ SPEC.loader.exec_module(profile)
 
 
 class ProfileNcsSearchSqlTests(unittest.TestCase):
+    @contextmanager
+    def _synthetic_harness(self, *, normalized: bool = False):
+        from tests.test_ncs_search_recall import NcsSearchRecallTests
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "search.db"
+            conn = sqlite3.connect(path)
+            conn.row_factory = sqlite3.Row
+            NcsSearchRecallTests._create_schema(conn)
+            NcsSearchRecallTests._seed(conn)
+            conn.execute(
+                "INSERT INTO competency_units VALUES ('UNICODE', ?, '', '4', 1)",
+                ("ＡＬＰＨＡ Straße",),
+            )
+            if normalized:
+                NcsSearchRecallTests()._add_normalized_columns(conn)
+            conn.commit()
+            conn.close()
+            recorder = profile.StatementRecorder()
+            with profile.SearchHarness(path, recorder) as harness:
+                yield harness, recorder
+
+    def test_fast_reject_uses_production_intent_and_expansion_tiers(self) -> None:
+        with self._synthetic_harness() as (harness, recorder):
+            for query in ("연봉 협상", "인사 채용관리"):
+                with self.subTest(query=query):
+                    expected = harness.normal_search(query, "unit", 5)
+                    actual, rejected = harness.fast_reject_search(
+                        query, "unit", 5, ["unit"]
+                    )
+                    self.assertGreater(expected["returned"], 0)
+                    self.assertEqual(actual, expected)
+                    self.assertFalse(rejected)
+            self.assertTrue(any(
+                row["match_tier"] == -1 and row["statement_kind"] == "fast_reject_probe"
+                for row in recorder.records
+            ))
+
+    def test_fast_reject_uses_normalized_production_schema(self) -> None:
+        with self._synthetic_harness(normalized=True) as (harness, _):
+            expected = harness.normal_search("alpha strasse", "unit", 5)
+            actual, rejected = harness.fast_reject_search(
+                "alpha strasse", "unit", 5, ["unit"]
+            )
+            self.assertEqual(expected["results"][0]["id"], "UNICODE")
+            self.assertEqual(actual, expected)
+            self.assertFalse(rejected)
+
+    def test_fast_reject_preserves_explicit_classification_and_empty_contract(self) -> None:
+        with self._synthetic_harness() as (harness, _):
+            for classification_filter, is_empty in (({"major_code": "02"}, False), ({"major_code": "15"}, True)):
+                with self.subTest(classification_filter=classification_filter):
+                    expected = harness.normal_search(
+                        "데이터분석", "all", 8,
+                        classification_filter=classification_filter,
+                    )
+                    actual, rejected = harness.fast_reject_search(
+                        "데이터분석", "all", 8, ["ksa", "unit"],
+                        classification_filter=classification_filter,
+                    )
+                    self.assertEqual(actual, expected)
+                    self.assertEqual(rejected, is_empty)
+                    self.assertEqual(actual["classification_filter"], classification_filter)
+
+    def test_fast_reject_incomplete_type_order_does_not_hide_results(self) -> None:
+        with self._synthetic_harness() as (harness, _):
+            expected = harness.normal_search("신입사원 면접 절차", "criteria", 5)
+            actual, rejected = harness.fast_reject_search(
+                "신입사원 면접 절차", "criteria", 5, ["unit"]
+            )
+            self.assertGreater(expected["returned"], 0)
+            self.assertEqual(actual, expected)
+            self.assertFalse(rejected)
+
     def test_percentile_interpolates(self) -> None:
         self.assertEqual(profile.percentile([1, 2, 3], 0.5), 2.0)
         self.assertEqual(profile.percentile([1, 3], 0.5), 2.0)
@@ -87,6 +164,29 @@ class ProfileNcsSearchSqlTests(unittest.TestCase):
             ),
             ["punctuation", "two_syllable", "off_scope"],
         )
+
+    def test_read_only_profile_connection_registers_search_boundary_function(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "profile.db"
+            raw = sqlite3.connect(db_path)
+            raw.execute("CREATE TABLE marker (value TEXT)")
+            raw.commit()
+            raw.close()
+
+            recorder = profile.StatementRecorder()
+            harness = profile.SearchHarness(db_path, recorder)
+            with harness.open_db() as conn:
+                row = conn.execute(
+                    "SELECT ncs_search_match(?, ?), "
+                    "ncs_search_match_normalized('출입 통제', '출입'), "
+                    "ncs_search_match_normalized('수출입계약', '출입'), "
+                    "ncs_search_match_normalized('strasse alpha', 'strasse')",
+                    ("출입 통제와 보안 점검", "출입"),
+                ).fetchone()
+
+            self.assertEqual(tuple(row), (1, 1, 0, 1))
 
 
 if __name__ == "__main__":

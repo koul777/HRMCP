@@ -17,6 +17,14 @@ except ModuleNotFoundError:  # pragma: no cover - package-style test import
     from scripts.check_deployment_source_boundary import ROOT, _normalize_path, tracked_path_reason
 
 
+REQUIRED_SOURCE_MIRROR_PAIRS = (
+    (
+        "src/ncs_mcp/search/normalization.py",
+        "deploy/vercel_mcp_app/src/ncs_mcp/search/normalization.py",
+    ),
+)
+
+
 def _is_relative_to(child: Path, parent: Path) -> bool:
     try:
         child.relative_to(parent)
@@ -102,6 +110,21 @@ def export_preview(
             included_untracked_paths.append(path)
 
     selected_paths = _dedupe(tracked_paths + included_untracked_paths)
+
+    selected_path_set = set(selected_paths)
+    for root_path, deploy_path in REQUIRED_SOURCE_MIRROR_PAIRS:
+        root_selected = root_path in selected_path_set
+        deploy_selected = deploy_path in selected_path_set
+        if root_selected == deploy_selected:
+            continue
+        missing_path = deploy_path if root_selected else root_path
+        present_path = root_path if root_selected else deploy_path
+        copy_errors.append(
+            {
+                "path": missing_path,
+                "reason": f"required source mirror missing while {present_path} is selected",
+            }
+        )
 
     if output_error is None and resolved_target is not None:
         resolved_target.mkdir(parents=True, exist_ok=False)

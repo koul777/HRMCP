@@ -5063,6 +5063,52 @@ def compact_training_task_response(result: dict[str, Any], *, recommendation_lim
         )
         for item in items[:max_items]
     ]
+    scope_interpretation = {
+        "match_text": scope.get("match_text"),
+        "match_level": scope.get("match_level"),
+        "unit_count": len(scope.get("unit_codes") or []),
+    }
+    recommendation_groups: dict[str, list[dict[str, Any]]] = {
+        "primary": [],
+        "supplemental": [],
+        "adjacent": [],
+    }
+    evidence_highlights: list[dict[str, Any]] = []
+    delivery_courses: list[dict[str, Any]] = []
+    review_courses: list[dict[str, Any]] = []
+    for card in cards:
+        course_ref = {
+            "rank": card.get("rank"),
+            "training_course_id": card.get("training_course_id"),
+            "course_name": card.get("course_name"),
+        }
+        tier = str(card.get("tier") or "adjacent")
+        group_key = tier if tier in {"primary", "supplemental"} else "adjacent"
+        recommendation_groups[group_key].append({
+            **course_ref,
+            "tier": tier,
+            "tier_label": card.get("tier_label"),
+            "confidence_grade": card.get("confidence_grade"),
+        })
+        evidence_highlights.append({
+            **course_ref,
+            "evidence": card.get("evidence_highlights") or {},
+        })
+        delivery_courses.append({
+            **course_ref,
+            "course_fit": card.get("delivery") or {},
+            "facility_constraint_fit": card.get("facility_constraint_fit") or {},
+        })
+        review = card.get("human_review") if isinstance(card.get("human_review"), dict) else {}
+        review_courses.append({
+            **course_ref,
+            "severity": review.get("severity"),
+            "action": review.get("action"),
+            "flags": review.get("flags") or [],
+        })
+    needs_review_count = sum(
+        1 for item in review_courses if item.get("severity") == "needs_review"
+    )
     return {
         "ok": True,
         "view": "compact_training_task",
@@ -5073,19 +5119,39 @@ def compact_training_task_response(result: dict[str, Any], *, recommendation_lim
             "unit_code": result.get("requested_unit_code"),
             "preferred_max_hours": summary.get("preferred_max_hours"),
             "preferred_methods": summary.get("preferred_methods") or [],
+            "preferred_facilities": summary.get("preferred_facilities") or [],
         },
-        "scope_interpretation": {
-            "match_text": scope.get("match_text"),
-            "match_level": scope.get("match_level"),
-            "unit_count": len(scope.get("unit_codes") or []),
+        "scope": {
+            "requested_query": result.get("requested_query"),
+            "interpretation": scope_interpretation,
+            "source_task": result.get("source_task") or {},
         },
+        "scope_interpretation": scope_interpretation,
         "source_task": result.get("source_task") or {},
         "recommendation_summary": summary,
+        "recommendation_groups": recommendation_groups,
         "source_recommendation_counts": {key: len(value) for key, value in groups.items()},
-        "source_task": result.get("source_task") or {},
         "current_task": result.get("current_task") or {},
         "target_task": result.get("target_task") or result.get("source_task") or {},
         "recommended_courses": cards,
+        "evidence_highlights": evidence_highlights,
+        "delivery": {
+            "preferences": {
+                "max_hours": summary.get("preferred_max_hours"),
+                "methods": summary.get("preferred_methods") or [],
+                "facilities": summary.get("preferred_facilities") or [],
+            },
+            "courses": delivery_courses,
+        },
+        "human_review": {
+            "status": "needs_review" if needs_review_count else "ready",
+            "course_count": len(review_courses),
+            "needs_review_count": needs_review_count,
+            "courses": review_courses,
+            "status_update_allowed": False,
+            "db_writes": False,
+            "approval_claim": False,
+        },
         "gaps": result.get("gaps") or {},
         "input_quality": _input_quality_for_task(result),
         "audit": _compact_audit(result),

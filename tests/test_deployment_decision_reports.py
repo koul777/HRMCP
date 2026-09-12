@@ -17,7 +17,7 @@ class DeploymentDecisionReportTests(unittest.TestCase):
             (root / ".env").write_text("NCS_API_KEY=real-value\n", encoding="utf-8")
             (root / "tests").mkdir()
             (root / "tests" / "test_smoke.py").write_text(
-                'secret = "placeholder"\n',
+                'SECRET = "placeholder"\n',
                 encoding="utf-8",
             )
 
@@ -25,7 +25,7 @@ class DeploymentDecisionReportTests(unittest.TestCase):
 
         self.assertFalse(report["ok"])
         self.assertEqual(report["allowed_template_file_count"], 1)
-        self.assertEqual(report["allowed_secret_example_count"], 1)
+        self.assertEqual(report["allowed_secret_example_count"], 2)
         self.assertEqual(report["blocked_name_finding_count"], 1)
         self.assertGreaterEqual(report["high_confidence_secret_finding_count"], 1)
 

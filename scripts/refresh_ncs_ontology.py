@@ -14,12 +14,14 @@ if str(SRC) not in sys.path:
 from ncs_mcp.ontology_refresh_builder import (  # noqa: E402
     RefreshBuilderError,
     build_ontology_refresh,
+    resolve_managed_baseline,
 )
+from ncs_mcp.api_refresh_builder import validate_refresh_report_path, write_refresh_evidence  # noqa: E402
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Plan or safely prepare a change-aware NCS ontology refresh."
+        description="Plan a change-aware NCS ontology refresh; apply through NCS Data Builder."
     )
     parser.add_argument(
         "source", type=Path, help="candidate ncs.db (the only required input)"
@@ -31,10 +33,17 @@ def main() -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--report", type=Path)
     parser.add_argument(
-        "--apply", action="store_true", help="copy and prepare an output DB"
+        "--apply", action="store_true", help="Reserved; apply requires NCS Data Builder."
     )
     args = parser.parse_args()
+    if args.apply:
+        print(json.dumps({"ok": False, "error": "builder_authorization_required"}))
+        return 2
     try:
+        baseline = args.baseline if args.baseline is not None else resolve_managed_baseline(args.state_dir)
+        protected = (args.source, baseline)
+        if args.report:
+            validate_refresh_report_path(args.report, protected)
         report = build_ontology_refresh(
             args.source,
             baseline_db=args.baseline,
@@ -42,15 +51,14 @@ def main() -> int:
             prepared_output=args.output,
             apply=args.apply,
         )
+        if args.report:
+            write_refresh_evidence(report, args.report, protected_databases=protected)
     except (OSError, ValueError, RefreshBuilderError) as exc:
         print(
             json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2)
         )
         return 2
     rendered = json.dumps(report, ensure_ascii=False, indent=2)
-    if args.report:
-        args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_text(rendered + "\n", encoding="utf-8")
     print(rendered)
     return 0 if report.get("ok") else 2
 

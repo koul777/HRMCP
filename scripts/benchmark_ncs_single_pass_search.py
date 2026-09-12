@@ -730,7 +730,7 @@ def build_report(
     if len(candidates) != 50:
         raise ValueError(f"expected 50 candidate_eval rows, found {len(candidates)}")
     os.environ["NCS_DB_PATH"] = str(db_path.resolve())
-    os.environ["NCS_MCP_READ_ONLY_MODE"] = "true"
+    os.environ["NCS_MCP_READ_ONLY"] = "true"
     os.environ["NCS_MCP_OPERATOR_TOOLS"] = "false"
     from ncs_mcp import server
 

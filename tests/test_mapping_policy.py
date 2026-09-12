@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -150,18 +153,69 @@ class MappingPolicyTests(unittest.TestCase):
             conn.execute("UPDATE sqf_ncs_matches SET review_status = 'accepted'")
             conn.commit()
             conn.close()
+            before = (
+                db_path.stat().st_size,
+                db_path.stat().st_mtime_ns,
+                hashlib.sha256(db_path.read_bytes()).hexdigest(),
+            )
+            before_files = sorted(path.name for path in Path(tmp).iterdir())
+            previous_db_path = os.environ.get("NCS_DB_PATH")
             os.environ["NCS_DB_PATH"] = str(db_path)
-            from ncs_mcp.server import recommend_education_for_duty
+            try:
+                from ncs_mcp.server import recommend_education_for_duty
 
-            result = recommend_education_for_duty("사무행정", major_code="02", limit=1)
+                # The private legacy compatibility call must ignore its historical
+                # save=True default: serving opens the SQLite snapshot query-only.
+                result = recommend_education_for_duty(
+                    "사무행정", major_code="02", limit=1, save=True
+                )
+            finally:
+                if previous_db_path is None:
+                    os.environ.pop("NCS_DB_PATH", None)
+                else:
+                    os.environ["NCS_DB_PATH"] = previous_db_path
 
+            self.assertTrue(result["ok"], result)
             recommendation = result["recommendations"][0]
             self.assertIn(recommendation["recommendation_type"], {"ncs_derived", "mixed"})
             self.assertEqual(recommendation["source_sqf_fields"], {})
             self.assertGreaterEqual(len(recommendation["learning_objectives"]), 1)
             self.assertEqual(recommendation["metadata"]["used_refined_policy"], "refined_if_approved")
             self.assertEqual(recommendation["metadata"]["used_mapping_count"], 1)
+            self.assertIsNone(result["recommendation_run_id"])
+            after = (
+                db_path.stat().st_size,
+                db_path.stat().st_mtime_ns,
+                hashlib.sha256(db_path.read_bytes()).hexdigest(),
+            )
+            self.assertEqual(after, before)
+            self.assertEqual(sorted(path.name for path in Path(tmp).iterdir()), before_files)
             self.assertIsNotNone(source_key)
+
+    def test_legacy_education_compatibility_reader_is_not_a_public_mcp_tool(self) -> None:
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(SRC)
+        env["NCS_MCP_ENABLE_ADVANCED_TOOLS"] = ""
+        env["NCS_MCP_ENABLE_OPERATOR_TOOLS"] = ""
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import json; from ncs_mcp import server; "
+                "print(json.dumps(server.current_mcp_tool_surface()))",
+            ],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        surface = json.loads(completed.stdout)
+
+        self.assertEqual(len(surface["all_tools"]), 7)
+        self.assertNotIn("recommend_education_for_duty", surface["all_tools"])
+        self.assertNotIn("recommend_education_for_duty", surface["user_tools"])
+        self.assertEqual(surface["legacy_tools_present"], [])
 
     def test_evaluation_records_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

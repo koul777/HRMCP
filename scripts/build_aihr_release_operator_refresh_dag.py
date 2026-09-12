@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ncs_mcp.agent_queue import _canonical_json_sha256, build_agent_queue_status_from_file
+from ncs_mcp.blocker_report import _release_readiness_cycle_safe_sha256
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +39,33 @@ def sha256_file(path: Path | None) -> str | None:
     if path is None or not path.exists() or not path.is_file():
         return None
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def sha256_artifact(path: Path | None, *, scope: str | None = None) -> str | None:
+    if scope == "cycle_safe_release_readiness" and path is not None:
+        try:
+            payload = read_json(path)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            return None
+        if payload.get("sha256_scope") != scope:
+            return None
+        # The persisted digest is excluded from its own projection to avoid a
+        # self-reference.  It is evidence to compare, never the actual value
+        # used to verify the release payload.
+        return _release_readiness_cycle_safe_sha256(payload)
+    return sha256_file(path)
+
+
+def stored_cycle_safe_release_readiness_sha256(path: Path | None) -> str | None:
+    """Return the declared digest only for comparison with a recomputed value."""
+    if path is None:
+        return None
+    try:
+        payload = read_json(path)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return None
+    value = str(payload.get("cycle_safe_content_sha256") or "").strip()
+    return value if re.fullmatch(r"sha256:[0-9a-f]{64}", value) else None
 
 
 def portable_path(path: str | Path | None, *, root: Path = PROJECT_ROOT) -> str | None:
@@ -189,18 +217,45 @@ def source_hash_checks_from_payload(
 ) -> dict[str, dict[str, Any]]:
     source_paths = payload.get("source_paths") if isinstance(payload.get("source_paths"), dict) else {}
     source_hashes = payload.get("source_hashes") if isinstance(payload.get("source_hashes"), dict) else {}
+    source_hash_scopes = (
+        payload.get("source_hash_scopes")
+        if isinstance(payload.get("source_hash_scopes"), dict)
+        else {}
+    )
     checks: dict[str, dict[str, Any]] = {}
     for key, value in source_paths.items():
         if not value:
             continue
         resolved = resolve_artifact(value, root=root)
-        actual = sha256_file(resolved)
+        scope = str(source_hash_scopes.get(key) or "").strip() or None
+        actual = sha256_artifact(resolved, scope=scope)
+        stored = (
+            stored_cycle_safe_release_readiness_sha256(resolved)
+            if scope == "cycle_safe_release_readiness"
+            else None
+        )
+        stored_matches_actual = (
+            bool(stored and actual and stored == actual)
+            if scope == "cycle_safe_release_readiness"
+            else None
+        )
         expected = source_hashes.get(key)
         checks[key] = {
             "path": portable_path(value, root=root),
+            "sha256_scope": scope or "raw_file",
             "expected_sha256": expected,
             "actual_sha256": actual,
-            "hash_matches": bool(expected and actual and expected == actual),
+            "stored_cycle_safe_content_sha256": stored,
+            "stored_hash_matches_actual": stored_matches_actual,
+            "hash_matches": bool(
+                expected
+                and actual
+                and expected == actual
+                and (
+                    scope != "cycle_safe_release_readiness"
+                    or stored_matches_actual is True
+                )
+            ),
         }
     return checks
 

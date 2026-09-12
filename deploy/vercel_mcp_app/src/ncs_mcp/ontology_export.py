@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any
 
-from ncs_mcp.db import connect, initialize_database, now_utc
+from ncs_mcp.db import connect, now_utc
 
 
 JSONLD_CONTEXT: dict[str, Any] = {
@@ -66,6 +67,32 @@ def node_id(prefix: str, value: str) -> str:
     return f"{prefix}:{value}"
 
 
+def _guard_export_destination(db_path: Path, out_path: Path) -> None:
+    """Reject any destination that can refer to the source SQLite file."""
+    try:
+        resolved_db = db_path.resolve(strict=False)
+        resolved_out = out_path.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError("Unable to safely resolve ontology export paths.") from exc
+
+    normalized_db = os.path.normcase(os.path.normpath(os.fspath(resolved_db)))
+    normalized_out = os.path.normcase(os.path.normpath(os.fspath(resolved_out)))
+    if normalized_db == normalized_out:
+        raise ValueError("Ontology export destination must differ from the source database.")
+
+    try:
+        same_file = os.path.samefile(resolved_db, resolved_out)
+    except FileNotFoundError:
+        # A new destination cannot yet be a hardlink to the source. The
+        # normalized resolved-path check above still covers lexical aliases.
+        same_file = False
+    except OSError as exc:
+        # If an existing path cannot be identified safely, do not risk writing.
+        raise ValueError("Unable to safely verify ontology export path identity.") from exc
+    if same_file:
+        raise ValueError("Ontology export destination must differ from the source database.")
+
+
 def export_ontology_jsonld(
     db_path: Path,
     out_path: Path,
@@ -76,8 +103,14 @@ def export_ontology_jsonld(
     include_document_chunks: bool = True,
     document_chunk_limit: int = 20000,
 ) -> dict[str, Any]:
-    conn = connect(db_path)
-    initialize_database(conn)
+    db_path = Path(db_path)
+    out_path = Path(out_path)
+    _guard_export_destination(db_path, out_path)
+
+    # Export reads the canonical source and writes only the separate JSON-LD
+    # destination. Keep the source connection read-only; Builder owns schema
+    # creation and this surface must not change the canonical snapshot.
+    conn = connect(db_path, read_only=True)
     graph: list[dict[str, Any]] = []
     try:
         graph.extend(
@@ -350,8 +383,9 @@ def export_ontology_jsonld(
 
 
 def validate_ontology_readiness(db_path: Path) -> dict[str, Any]:
-    conn = connect(db_path)
-    initialize_database(conn)
+    # Validation must never initialize or mutate the source database. Builder
+    # owns schema creation; this report-only surface opens SQLite read-only.
+    conn = connect(db_path, read_only=True)
     try:
         counts = {
             table: int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])

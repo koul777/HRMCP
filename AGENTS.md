@@ -178,10 +178,11 @@ human_reviewed`가 보이더라도 이는 사람이 승인한 행에 대한 준�
 - AGENTS/리포트/패킷은 운영자 판단을 줄이기 위한 증거 묶음이지 승인 기록이
   아니다.
 
-## 현재 알려진 데이터 품질 문제 (2026-06-25 기준)
+## 현재 알려진 데이터 품질 문제 (2026-09-12 기준)
 
 ### definition boilerplate 문제 (최우선)
-ontology_concepts.definition 413,143건 전부가 아래 boilerplate 패턴이다.
+ontology_concepts 533,909건 중 definition이 있는 413,143건 전부가 아래
+boilerplate 패턴이며, 나머지 120,766건은 `definition_status='missing'`이다.
 패턴: "{concept_name}: {타입별 고정 문장}"
 - knowledge → "업무 판단과 문제 해결에 필요한 관련 원리, 기준, 절차, 사례에 대한 지식."
 - skill     → "업무 상황에서 관련 절차나 도구를 활용해 과업을 수행하는 능력."
@@ -189,15 +190,16 @@ ontology_concepts.definition 413,143건 전부가 아래 boilerplate 패턴이�
 
 ksa_meaning_candidates에 term_definition_candidate 413K건(llm_reviewed)이 있지만
 ontology_concepts.definition으로 승격하는 로직이 없다.
-120,766건은 definition_status='missing'으로 빈 칸이다.
 
 ### 추천 검증 미완
 - training_transition_gold_scenarios: 100건
 - training_transition_scenario_reviews: 11건 (11%만 검증됨)
 
 ### 수집 미완 API
-- ncs_job_base_competencies: 10건 (직업기초능력 사실상 빈 칸)
-- ncs_qualification_items: 795건 (부분 수집)
+- ncs_job_base_competencies: 10건, 하위요인 34건, 능력단위 자동 링크 230,920건
+  (`auto_linked`이며 사람 승인 상태가 아님)
+- ncs_qualification_items: 1,039건, 13,435개 능력단위 중 5,349개 시도
+  (수집 커버리지 0.3981, 부분 수집)
 
 ### 불변 원칙 (절대 위반 금지)
 - ksa_items.ksa_text_raw는 어떤 경우에도 수정하지 않는다.

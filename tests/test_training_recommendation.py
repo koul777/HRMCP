@@ -48,6 +48,7 @@ from ncs_mcp.ksa_label_report import (
 )
 from ncs_mcp.career_path import career_path_summary, import_career_paths_csv
 from ncs_mcp.query_router import route_ncs_query
+from ncs_mcp.hrd_guide_reference import load_hrd_guide_reference_index
 from ncs_mcp.smoke_data import create_ready_smoke_db
 from ncs_mcp.training_course_api import parse_training_course_xml, upsert_training_courses
 from ncs_mcp.training_recommendation import (
@@ -3308,6 +3309,25 @@ class TrainingRecommendationTests(unittest.TestCase):
         self.assertEqual(compact["view"], "compact_training_task")
         self.assertEqual(compact["requested"]["preferred_max_hours"], 16)
         self.assertEqual(compact["scope_interpretation"]["unit_count"], 1)
+        task_template = next(
+            item
+            for item in load_hrd_guide_reference_index()["prompt_scenario_templates"]
+            if item["id"] == "task_based_course_recommendation"
+        )
+        self.assertEqual(
+            set(task_template["required_response_fields"]) - set(compact),
+            set(),
+        )
+        self.assertEqual(compact["scope"]["interpretation"]["unit_count"], 1)
+        self.assertEqual(
+            compact["recommendation_groups"]["primary"][0]["course_name"],
+            "HR planning",
+        )
+        self.assertEqual(compact["evidence_highlights"][0]["course_name"], "HR planning")
+        self.assertEqual(compact["delivery"]["courses"][0]["course_name"], "HR planning")
+        self.assertFalse(compact["human_review"]["status_update_allowed"])
+        self.assertFalse(compact["human_review"]["db_writes"])
+        self.assertFalse(compact["human_review"]["approval_claim"])
         self.assertTrue(compact["input_quality"]["ok"])
         self.assertNotIn("transition", compact)
         self.assertNotIn("recommendations", compact)
@@ -8057,7 +8077,7 @@ class TrainingRecommendationTests(unittest.TestCase):
                 else:
                     os.environ["NCS_DB_PATH"] = previous
 
-    def test_operator_review_tools_update_active_recommendation_links(self) -> None:
+    def test_mcp_operator_reviews_cannot_update_active_recommendation_links(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             previous = os.environ.get("NCS_DB_PATH")
             db_path = Path(tmp) / "ncs.db"
@@ -8163,6 +8183,10 @@ class TrainingRecommendationTests(unittest.TestCase):
                 review_packet_hash = "sha256:" + hashlib.sha256(
                     review_packet.read_bytes()
                 ).hexdigest()
+                before_review = (
+                    db_path.stat().st_size, db_path.stat().st_mtime_ns,
+                    hashlib.sha256(db_path.read_bytes()).hexdigest(),
+                )
 
                 blocked_goal_review = server.review_training_goal_concept_link(
                     goal_link_id,
@@ -8190,7 +8214,12 @@ class TrainingRecommendationTests(unittest.TestCase):
                 )
                 invalid_status = server.review_training_goal_concept_link(goal_link_id, "approved")
 
-                conn = connect(db_path)
+                self.assertEqual(
+                    (db_path.stat().st_size, db_path.stat().st_mtime_ns,
+                     hashlib.sha256(db_path.read_bytes()).hexdigest()),
+                    before_review,
+                )
+                conn = connect(db_path, read_only=True)
                 goal_row = conn.execute(
                     "SELECT review_status, confidence_score FROM training_goal_concept_links WHERE link_id = ?",
                     (goal_link_id,),
@@ -8221,28 +8250,13 @@ class TrainingRecommendationTests(unittest.TestCase):
                 else:
                     os.environ["NCS_DB_PATH"] = previous
 
-        self.assertFalse(blocked_goal_review["ok"])
-        self.assertEqual(blocked_goal_review["error"]["code"], "trusted_review_provenance_required")
-        self.assertTrue(goal_review["ok"])
-        self.assertEqual(goal_review["previous_status"], "auto_linked")
-        self.assertEqual(goal_review["new_status"], "human_reviewed")
-        self.assertTrue(goal_review["trusted_for_recommendation"])
-        self.assertTrue(relation_review["ok"])
-        self.assertEqual(relation_review["previous_status"], "candidate")
-        self.assertEqual(relation_review["new_status"], "rejected")
-        self.assertFalse(relation_review["relation_usable_for_transition"])
-        self.assertFalse(invalid_status["ok"])
-        self.assertEqual(invalid_status["error"]["code"], "unsupported_review_status")
-        self.assertEqual(goal_row["review_status"], "human_reviewed")
-        self.assertAlmostEqual(goal_row["confidence_score"], 0.95)
-        self.assertEqual(relation_row["review_status"], "rejected")
-        self.assertEqual(len(audit_rows), 2)
-        goal_audit = [row for row in audit_rows if row["action"] == "review_training_goal_concept_link"][0]
-        self.assertEqual(goal_audit["source_decision_packet"], review_packet_stored_ref)
-        self.assertEqual(goal_audit["rationale"], "Human confirmed direct training-goal concept coverage.")
-        self.assertEqual(json.loads(goal_audit["evidence_refs_json"]), ["training_goal_concept_link:test"])
-        self.assertEqual(goal_audit["created_by_tool"], "mcp.review_training_goal_concept_link")
-        self.assertEqual(goal_audit["run_artifact"], "reports/operator_review_run.json")
+        for response in (blocked_goal_review, goal_review, relation_review, invalid_status):
+            self.assertFalse(response["ok"])
+            self.assertEqual(response["error"]["code"], "builder_only_operation")
+        self.assertEqual(goal_row["review_status"], "auto_linked")
+        self.assertAlmostEqual(goal_row["confidence_score"], 0.7)
+        self.assertEqual(relation_row["review_status"], "candidate")
+        self.assertEqual(audit_rows, [])
 
     def test_ncs_meta_tools_discover_and_execute_read_only_tools(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -8561,7 +8575,7 @@ class TrainingRecommendationTests(unittest.TestCase):
                 return False
 
         with (
-            patch("ncs_mcp.server.open_db", return_value=DummyDb()) as open_db_mock,
+            patch("ncs_mcp.server.open_recommendation_db", return_value=DummyDb()) as open_db_mock,
             patch(
                 "ncs_mcp.server.training_recommend_transition",
                 return_value={"ok": True},
@@ -8578,6 +8592,9 @@ class TrainingRecommendationTests(unittest.TestCase):
             result = server.plan_ncs_education_path(
                 current_query="\ub178\ubb34\uad00\ub9ac",
                 target_query="\uc778\uc0ac\uae30\ud68d",
+                current_major_code="01",
+                target_major_code="02",
+                target_middle_code="02",
                 save=True,
             )
 
@@ -8594,6 +8611,14 @@ class TrainingRecommendationTests(unittest.TestCase):
             "framework_reference",
         )
         self.assertEqual(result["missing_query_route_fields"], [])
+        self.assertEqual(
+            result["query_route"]["classification_context"]["current_filter"],
+            {"major_code": "01"},
+        )
+        self.assertEqual(
+            result["query_route"]["classification_context"]["target_filter"],
+            {"major_code": "02", "middle_code": "02"},
+        )
 
     def test_plan_ncs_education_path_facade_fails_when_route_contract_missing(self) -> None:
         from ncs_mcp import server
@@ -8606,7 +8631,7 @@ class TrainingRecommendationTests(unittest.TestCase):
                 return False
 
         with (
-            patch("ncs_mcp.server.open_db", return_value=DummyDb()) as open_db_mock,
+            patch("ncs_mcp.server.open_recommendation_db", return_value=DummyDb()) as open_db_mock,
             patch(
                 "ncs_mcp.server.training_recommend_transition",
                 return_value={"ok": True},

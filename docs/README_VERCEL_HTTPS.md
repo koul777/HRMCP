@@ -1,8 +1,10 @@
 # HRMCP — Vercel HTTPS 배포 가이드
 
-> 운영 원칙(2026-09-11): 데이터 갱신과 Vercel 배포의 단일 권한자는
-> Windows NCS Data Builder입니다. GitHub Actions는 CI 검증만 담당하며,
-> 별도 snapshot refresh workflow나 self-hosted runner는 사용하지 않습니다.
+> 운영 원칙(2026-09-11): production DB/API 갱신, 온톨로지 재구축, 경량
+> 패키지 생성, Vercel 반영, 기준본 승격의 단일 권한자는 Windows NCS Data
+> Builder(`run_ncs_builder.bat`)입니다. GitHub Actions는 CI 검증만 담당하며,
+> 별도 snapshot refresh/deploy workflow나 self-hosted runner는 사용하지
+> 않습니다. 자격/NCS006 수집만 기존 운영자 가드의 별도 예외입니다.
 
 HRMCP(NCS 기반 HR MCP)를 Vercel Serverless(Streamable HTTP)로 배포해 하나의
 HTTPS MCP URL로 연결하는 운영 가이드입니다. `HRMCP`는 표시 이름이고, 내부
@@ -11,8 +13,8 @@ HTTPS MCP URL로 연결하는 운영 가이드입니다. `HRMCP`는 표시 이�
 - MCP: `https://ncs-mcp-bridge-mini2.vercel.app/api/mcp`
 - Health: `https://ncs-mcp-bridge-mini2.vercel.app/api/health`
 - Readiness: `https://ncs-mcp-bridge-mini2.vercel.app/api/ready`
-- 현재 production deployment: `dpl_94usxf3AP6AjSdN8cySr1bu9fJK7`
-- 측정된 production function bundle: 131.54MB
+- 현재 production deployment: `dpl_4KKUkg1BqGYq2FeKuCf8eoTPDk7E` (2026-09-12)
+- 측정된 production function bundle: 169,689,338 bytes (약 161.83MiB)
 
 이 서비스는 읽기 전용입니다. 추천은 교육·업무 설계 참고자료이며 공식 자격, 채용,
 법적 판단이 아닙니다.
@@ -36,9 +38,12 @@ manifest만 원자적으로 publish합니다. 실패하면 기존 pair를 rollba
 포함하거나 호출하지 않으며, canonical DB를 변경하지 않고 NCS API도 수집하지 않습니다.
 Vercel 런타임도 요청 처리 중 AI 모델이나 외부 NCS API를 호출하지 않습니다.
 
-API 갱신은 이 배포와 분리된 upstream scheduled/guarded 파이프라인의 책임입니다.
-그 파이프라인은 체크포인트, 재시도/품질 게이트, 그리고 자격 API에 대한 운영자 승인을
-거친 뒤 하나의 canonical DB를 만들고, 그 DB만 Builder 입력으로 넘깁니다.
+훈련과정·직업기초능력 API 갱신은 Windows Data Builder의 선택 API 단계가 버전
+작업 복사본에서 전체 대분류로 수행합니다. 이어지는 온톨로지 검증, compact package,
+preview 검증, production 반영, 기준본 승격도 같은 Builder 버전과 source identity를
+유지합니다. 자격/NCS006 수집만 retry-hygiene, coverage-plan, checkpoint,
+cooldown, operator-ready 확인을 요구하는 별도 운영자 예외이며, 이 예외에는 package,
+deploy, 기준본 승격 권한이 없습니다.
 
 `NCS_DB_URL`은 표준 배포에 필요하지 않습니다. 현재 함수는 번들 안의 ZIP과 manifest를
 검증해 `/tmp`에 DB를 materialize하고 read-only로 엽니다. 외부 DB override는 기본적으로
@@ -83,64 +88,61 @@ manifest 기준 주요 서빙 건수는 다음과 같습니다.
 사람 검토를 거친 라벨 별칭 742건만 병합되었습니다. 이를 자동 라벨 병합이나 자동 승인으로
 해석하면 안 됩니다.
 
-## 4. 새 canonical DB에서 snapshot 만들기
+## 4. Builder에서 새 canonical 버전 만들기
 
-새 `ncs.db`를 받으면 먼저 변경 인식형 Refresh Builder를 실행합니다. 기본 실행은 계획만
-만들며 원본과 기준본을 수정하지 않습니다. `--apply`를 명시해야 별도의 준비본이 생성됩니다.
-
-```powershell
-python scripts\refresh_ncs_ontology.py data\processed\ncs.db `
-  --state-dir C:\ncs_mcp_state\ncs-ontology-refresh `
-  --report reports\ncs_ontology_refresh_plan.json
-
-python scripts\refresh_ncs_ontology.py data\processed\ncs.db `
-  --state-dir C:\ncs_mcp_state\ncs-ontology-refresh `
-  --output build\prepared\ncs.db `
-  --report reports\ncs_ontology_refresh_apply.json `
-  --apply
-```
-
-변화가 없으면 마지막 원격 검증까지 마친 기준본을 재사용합니다. 작은 추가 변화는 증분
-구축하고, 수정·삭제·스키마 충돌·사람 검토 관계 충돌은 자동 배포하지 않고 차단합니다.
-성공 보고서의 `publisher_source`만 아래 one-input Publisher에 넘깁니다.
+새 전체 Excel 또는 새 canonical 입력을 반영할 때의 유일한 운영 진입점은 다음 Windows
+Builder입니다.
 
 ```powershell
-python scripts\publish_vercel_snapshot.py --source <publisher_source.path>
+.\run_ncs_builder.bat
 ```
 
-필요할 때만 `--deploy-root <path>`, `--dry-run`, `--report <path>`를 추가합니다.
-Publisher는 임시 stage에서 아래 고정 단계를 수행해 source hash를 다시 확인하고, 검증된
-ZIP과 manifest pair만 배포 루트 `api/`에 원자적으로 publish합니다. publish 중 실패하면
-기존 complete pair를 rollback합니다.
+Builder에서 ① 원본 변경분·온톨로지 후보, ② 선택 API 갱신, ③ 경량 DB 생성·검증,
+④ Vercel 반영을 같은 버전 기록으로 진행합니다. 원본과 기준본은 수정하지 않고 별도
+후보를 만들며, 변화가 없으면 마지막 원격 검증까지 마친 기준본만 재사용합니다. 작은
+추가 변화는 증분 구축하고 수정·삭제·스키마 충돌·사람 검토 관계 충돌은 자동 반영하지
+않고 차단합니다.
+
+내부 Publisher는 source hash를 다시 확인하고 임시 stage에서 아래 고정 단계를 수행한
+뒤 검증된 ZIP과 manifest pair만 원자적으로 publish합니다. publish 중 실패하면 기존
+complete pair를 rollback합니다. 아래 이름은 Builder 구현 계약이며 별도 운영 명령이
+아닙니다.
 
 1. `export_interview_serving_db.py --profile vercel-ontology-compact`
 2. `package_vercel_compact_snapshot.py`
 3. `verify_vercel_compact_package.py --skip-function-bundle-check`
 
-`build_vercel_snapshot.py`는 custom output 경로가 필요한 경우에만 쓰는 low-level Builder입니다.
-기존 출력을 덮어쓰지 않으며, API 수집·사람 검토 상태 변경·Vercel 배포를 수행하지 않습니다.
+`build_vercel_snapshot.py`, `refresh_ncs_ontology.py`,
+`refresh_ncs_api_evidence.py`, `publish_vercel_snapshot.py`,
+`promote_ncs_refresh_baseline.py`는 Builder 내부 구성요소입니다. 운영자는 이 스크립트를
+조합해 production 경로를 우회하지 않습니다.
 
 훈련과정·직업기초능력 API 자동 갱신은 `refresh_ncs_api_evidence.py`가 원본의 SQLite 온라인
 백업 복사본에서만 수행합니다. 자격/NCS006은 기존 운영자 승인·재시도 절차를 유지합니다.
 전체 갱신·배포 흐름은 Windows NCS Data Builder에 있습니다. Builder가 임시 Vercel
 배포와 Remote MCP 검증을 모두 성공시킨 뒤에만 다음 비교 기준본을 승격합니다.
 
-## 5. Preview와 Production 배포
+## 5. Builder가 통제하는 Preview와 Production 배포
 
-수동 배포 시 Vercel CLI를 연결한 뒤 canonical deploy root에서 실행합니다. 아래 직접 배포
-명령은 Vercel이 소스에서 다시 빌드하므로 `--prebuilt`를 붙이지 않습니다. Builder는
-`vercel build`로 만든 `.vercel/output`과 함수 번들을 먼저 검증하고, 그 동일 산출물을
-`vercel deploy --prebuilt --prod --skip-domain`으로 올립니다. 고유 배포 URL의 MCP 검증이
-성공한 뒤에만 production alias를 갱신합니다.
+운영자는 Vercel CLI를 직접 실행하지 않고 Builder의 ④ `Vercel MCP 업데이트`를 사용합니다.
+Builder는 격리된 tracked-source stage에서 내부적으로 `vercel build --prod --yes`로
+`.vercel/output`을 새로 만들고, 정확히
+`.vercel/output/functions/python.func`를 compact verifier로 검사합니다. 그 동일 산출물만
+`vercel deploy --prebuilt --prod --skip-domain --yes`로 올립니다. 고유 배포 URL의
+`/api/health`, `/api/ready`, `/api/mcp`와 build identity가 모두 성공한 뒤에만 production
+alias를 갱신합니다.
 
-```powershell
-cd deploy\vercel_mcp_app
-vercel deploy
-vercel deploy --prod
-```
+Builder는 promotion 전에 기존 production deployment를 기록하고, staged 검증 직후 같은
+deployment인지 다시 확인합니다. promotion 뒤 production 검증이 실패하면 기록한 고유 URL을
+대상으로 `vercel rollback`을 명시적으로 실행하고 복구 대상을 재확인합니다. stage에서 import하는
+로컬 Python 모듈은 Git tracked 파일이어야 합니다. 예를 들어
+`ncs_mcp/search/normalization.py`가 필요하지만 tracked stage에 없으면 임의의 untracked 파일을
+복사하지 않고 source-package 오류로 조기에 중단합니다.
 
-첫 번째 명령은 preview deployment를 만들고 URL을 출력합니다. 두 번째 명령은 production
-alias로 배포합니다. 배포 후 다음을 확인합니다.
+직접 preview/production 배포는 Builder의 version lock, source identity, transaction
+checkpoint, rollback fencing을 우회하므로 운영 절차가 아닙니다. 다음 endpoint 조회는
+상태만 확인하는 비운영·읽기 전용 진단이며, 그 결과만으로 배포나 기준본 승격을 승인할 수
+없습니다.
 
 ```powershell
 curl https://ncs-mcp-bridge-mini2.vercel.app/api/health
@@ -152,7 +154,8 @@ curl https://ncs-mcp-bridge-mini2.vercel.app/api/ready
 
 `vercel.json`의 `git.deploymentEnabled=false`로 Git push는 production deployment를 만들지
 않습니다. ignore된 ZIP이 Git 기반 배포에서 빠져 production을 덮어쓰는 일을 막기 위해,
-검증된 snapshot pair를 publish한 뒤에만 위 Vercel CLI release를 실행합니다.
+Git/cron 배포 경로를 만들지 않으며 검증된 snapshot pair도 Windows Data Builder의 동일
+release transaction 안에서만 반영합니다.
 
 ## 6. 런타임 보안과 공개 범위
 

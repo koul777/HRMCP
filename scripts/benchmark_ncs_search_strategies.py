@@ -852,7 +852,7 @@ def build_report(
     limit: int,
 ) -> dict[str, Any]:
     os.environ["NCS_DB_PATH"] = str(db_path.resolve())
-    os.environ["NCS_MCP_READ_ONLY_MODE"] = "true"
+    os.environ["NCS_MCP_READ_ONLY"] = "true"
     os.environ["NCS_MCP_OPERATOR_TOOLS"] = "false"
     from ncs_mcp.server import search_ncs
 

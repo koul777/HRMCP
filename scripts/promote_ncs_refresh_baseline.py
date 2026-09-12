@@ -13,8 +13,8 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from ncs_mcp.refresh_release_state import (  # noqa: E402
+    PROMOTION_REPORT_SCHEMA,
     RefreshReleaseStateError,
-    promote_refresh_baseline,
     write_promotion_report,
 )
 
@@ -42,13 +42,56 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--out", type=Path)
     args = parser.parse_args(argv)
 
-    report = promote_refresh_baseline(
-        refresh_report_path=args.refresh_report,
-        publish_report_path=args.publish_report,
-        staged_verification_path=args.staged_verification,
-        remote_verification_path=args.remote_verification,
-        state_dir=args.state_dir,
-    )
+    # This legacy CLI cannot mint a Builder capability. Mutation now belongs
+    # exclusively to a guarded DataBuilder operation; keep a clear,
+    # machine-readable retirement response and optional report write.
+    report = {
+        "schema": PROMOTION_REPORT_SCHEMA,
+        "ok": False,
+        "status": "blocked",
+        "state_dir": str(args.state_dir.expanduser().resolve(strict=False)),
+        "blockers": [
+            {
+                "code": "builder_authorization_required",
+                "message": "Baseline promotion requires a live DataBuilder operation.",
+            }
+        ],
+        "inputs": {
+            "refresh_report": {
+                "path": str(args.refresh_report.expanduser().resolve(strict=False))
+            },
+            "publish_report": {
+                "path": str(args.publish_report.expanduser().resolve(strict=False))
+            },
+            "remote_verification": {
+                "path": str(args.remote_verification.expanduser().resolve(strict=False))
+            },
+            **(
+                {
+                    "staged_verification": {
+                        "path": str(
+                            args.staged_verification.expanduser().resolve(strict=False)
+                        )
+                    }
+                }
+                if args.staged_verification is not None
+                else {}
+            ),
+        },
+        "publisher_source": None,
+        "integrity": None,
+        "promoted_baseline": None,
+        "lineage": None,
+        "pointer": None,
+        "safety": {
+            "source_database_mutated": False,
+            "api_calls": False,
+            "deployment_performed": False,
+            "publication_performed": False,
+            "review_status_writes": False,
+            "automatic_deletion": False,
+        },
+    }
     if args.out:
         try:
             write_promotion_report(args.out, report)

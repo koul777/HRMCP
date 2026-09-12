@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import sqlite3
 import tempfile
 import uuid
@@ -23,6 +24,11 @@ from pathlib import Path
 from typing import Any
 
 from .config import load_settings
+from .builder_authorization import (
+    BuilderAuthorizationError,
+    BuilderOperationContext,
+    require_builder_context,
+)
 from .sqlite_diagnostics import is_dbstat_table
 from .db import connect
 from .job_base_api import collect_job_base_competencies
@@ -152,7 +158,10 @@ def file_sha256(file_path: Path, progress: Callable | None = None, stage: str = 
     return digest.hexdigest()
 
 
-def _prepare_working_copy(source_db: Path, prepared_output: Path, progress: Callable | None = None) -> Path:
+def _prepare_working_copy(
+    source_db: Path, prepared_output: Path, progress: Callable | None = None,
+    *, authorize: Callable[[], None] | None = None,
+) -> Path:
     """Create a consistent SQLite snapshot without checkpointing the source DB.
 
     ``sqlite3.Connection.backup`` reads committed WAL frames as part of its
@@ -161,6 +170,8 @@ def _prepare_working_copy(source_db: Path, prepared_output: Path, progress: Call
     the immutable source artifact.
     """
 
+    if authorize:
+        authorize()
     prepared_output.parent.mkdir(parents=True, exist_ok=True)
     temporary = prepared_output.with_name(
         f"{prepared_output.name}.building-{uuid.uuid4().hex}.tmp"
@@ -171,11 +182,18 @@ def _prepare_working_copy(source_db: Path, prepared_output: Path, progress: Call
         source_conn = sqlite3.connect(
             f"file:{source_db.resolve().as_posix()}?mode=ro", uri=True
         )
+        if authorize:
+            authorize()
         destination_conn = sqlite3.connect(temporary)
-        source_conn.backup(destination_conn, pages=4096,
-                           progress=(lambda status, remaining, total: progress({
-                               "stage": "작업 DB 복사", "completed": total - remaining,
-                               "total": total, "unit": "페이지"})) if progress else None)
+        def backup_progress(status: int, remaining: int, total: int) -> None:
+            if progress:
+                progress({"stage": "작업 DB 복사", "completed": total - remaining,
+                          "total": total, "unit": "페이지"})
+            if authorize:
+                authorize()
+        if authorize:
+            authorize()
+        source_conn.backup(destination_conn, pages=4096, progress=backup_progress)
         if progress:
             progress("복사한 DB 무결성 검사")
         quick_check = destination_conn.execute("PRAGMA quick_check").fetchall()
@@ -185,6 +203,8 @@ def _prepare_working_copy(source_db: Path, prepared_output: Path, progress: Call
         destination_conn = None
         source_conn.close()
         source_conn = None
+        if authorize:
+            authorize()
         temporary.replace(prepared_output)
     finally:
         if destination_conn is not None:
@@ -267,24 +287,130 @@ def trusted_review_status_counts(db_path: Path) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def _quoted_identifier(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def trusted_review_status_identity_digest(db_path: Path) -> dict[str, dict[str, Any]]:
+    """Return a stable identity digest for every protected review-status field.
+
+    Counts alone cannot distinguish a trusted status moving from one row to
+    another. Every protected field is serialized as its declared primary-key
+    tuple plus status, ordered by that key. A protected field with no declared
+    primary key is rejected rather than silently using an unstable surrogate.
+    """
+
+    protected: dict[str, dict[str, Any]] = {}
+    conn = sqlite3.connect(f"file:{db_path.resolve().as_posix()}?mode=ro", uri=True)
+    try:
+        tables = conn.execute(
+            "SELECT name, sql FROM sqlite_master "
+            "WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        ).fetchall()
+        placeholders = ",".join("?" for _ in TRUSTED_REVIEW_STATUSES)
+        for table_name, create_sql in tables:
+            if is_dbstat_table(create_sql):
+                continue
+            table = str(table_name)
+            quoted_table = _quoted_identifier(table)
+            columns = conn.execute(f"PRAGMA table_info({quoted_table})").fetchall()
+            primary_key_columns = [
+                str(column[1])
+                for column in sorted(columns, key=lambda column: int(column[5] or 0))
+                if int(column[5] or 0) > 0
+            ]
+            status_columns = [
+                str(column[1])
+                for column in columns
+                if str(column[1]) == "review_status"
+                or str(column[1]).endswith("_review_status")
+            ]
+            if status_columns and not primary_key_columns:
+                raise sqlite3.DatabaseError(
+                    f"trusted_review_status_table_missing_primary_key:{table}"
+                )
+            for column_name in status_columns:
+                quoted_status = _quoted_identifier(column_name)
+                quoted_keys = [_quoted_identifier(column) for column in primary_key_columns]
+                cursor = conn.execute(
+                    f"SELECT {', '.join([*quoted_keys, quoted_status])} "
+                    f"FROM {quoted_table} WHERE {quoted_status} IN ({placeholders}) "
+                    f"ORDER BY {', '.join(quoted_keys)}",
+                    TRUSTED_REVIEW_STATUSES,
+                )
+                digest = hashlib.sha256()
+                header = json.dumps(
+                    {
+                        "table": table,
+                        "review_status_column": column_name,
+                        "primary_key_columns": primary_key_columns,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                digest.update(header.encode("utf-8"))
+                digest.update(b"\n")
+                count = 0
+                for row in cursor:
+                    digest.update(
+                        json.dumps(
+                            list(row), ensure_ascii=False, separators=(",", ":")
+                        ).encode("utf-8")
+                    )
+                    digest.update(b"\n")
+                    count += 1
+                protected[f"{table}.{column_name}"] = {
+                    "count": count,
+                    "primary_key_columns": primary_key_columns,
+                    "sha256": f"sha256:{digest.hexdigest()}",
+                }
+    finally:
+        conn.close()
+    return dict(sorted(protected.items()))
+
+
 @contextmanager
 def exclusive_refresh_lock(db_path: Path) -> Iterable[Path]:
-    """Use O_EXCL so concurrent local refresh jobs cannot interleave writes."""
+    """Publish a complete owner record atomically without replacing another lock.
+
+    The private hard link pins the inode until release. Cleanup checks both that
+    identity and the random token; a replaced or edited lock is left intact.
+    Path comparison/unlink is not an OS compare-and-delete primitive: an external
+    process racing that final pair remains outside this cooperative lock model.
+    """
 
     lock_path = db_path.with_name(f"{db_path.name}{LOCK_SUFFIX}")
-    try:
-        descriptor = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError as exc:
-        raise RefreshLockError("refresh_lock_already_exists") from exc
+    metadata = {"schema": "ncs_api_refresh_lock_v1", "owner_token": secrets.token_hex(32),
+                "created_at": _utc_now(), "pid": os.getpid(),
+                "source": str(db_path.resolve())}
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{lock_path.name}.", dir=lock_path.parent)
+    owner_path = Path(temporary_name)
+    published = False
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump({"created_at": _utc_now(), "pid": os.getpid()}, handle)
+            json.dump(metadata, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+            owner_stat = os.fstat(handle.fileno())
+        try:
+            os.link(owner_path, lock_path)
+        except FileExistsError as exc:
+            raise RefreshLockError("refresh_lock_already_exists") from exc
+        published = True
         yield lock_path
     finally:
         try:
-            lock_path.unlink()
-        except FileNotFoundError:
+            if published:
+                current = lock_path.lstat()
+                if ((current.st_dev, current.st_ino) == (owner_stat.st_dev, owner_stat.st_ino)
+                        and not lock_path.is_symlink()
+                        and json.loads(lock_path.read_text(encoding="utf-8")) == metadata):
+                    lock_path.unlink()
+        except (OSError, ValueError):
             pass
+        finally:
+            owner_path.unlink(missing_ok=True)
 
 
 def _credentials_from_settings() -> dict[str, str | None]:
@@ -380,11 +506,13 @@ def refresh_ncs_api_evidence(
     progress: Callable | None = None,
     checkpoint_dir: Path | None = None,
     resume: bool = False,
+    builder_context: BuilderOperationContext | None = None,
 ) -> dict[str, Any]:
     """Plan or run the narrow append-only supplemental API refresh.
 
     ``apply=False`` is intentionally the default and never opens a write
-    connection.  ``apply=True`` copies the canonical source DB before any
+    connection. ``apply=True`` requires an explicit live Builder capability and
+    confines outputs/checkpoints to its version directory. It copies the source before any
     collector runs; collectors and link building receive only that copy.
     A failed or unprovable source never implies deletion or stale-row cleanup.
     With ``checkpoint_dir`` and an explicit ``output_path``, proven source-major
@@ -397,6 +525,38 @@ def refresh_ncs_api_evidence(
         dict.fromkeys(str(source).strip() for source in sources if str(source).strip())
     )
     resolved_db = Path(db_path).expanduser().resolve()
+    if apply:
+        try:
+            context = require_builder_context(
+                builder_context, action="resume" if resume else "refresh_api"
+            )
+            version_dir = Path(context.state_dir) / "versions" / str(context.version)
+            if version_dir.resolve() != version_dir or Path(context.root).resolve() != Path(context.root):
+                raise BuilderAuthorizationError("Builder version path was redirected.")
+            if state_dir is not None:
+                require_builder_context(context, action=context.action,
+                                        version_dir=state_dir)
+                if output_path is None:
+                    state_dir = None
+            output_path = (
+                Path(output_path).expanduser().resolve()
+                if output_path is not None else version_dir / "ncs.db"
+            )
+            require_builder_context(context, action=context.action,
+                                    version_dir=output_path.parent)
+            if checkpoint_dir is not None and (
+                Path(checkpoint_dir).resolve() != version_dir / "api-checkpoint"
+                or (Path(checkpoint_dir) / "api_checkpoint.json").resolve()
+                != version_dir / "api-checkpoint" / "api_checkpoint.json"
+            ):
+                raise BuilderAuthorizationError("Checkpoint is outside this Builder version.")
+        except BuilderAuthorizationError:
+            return {
+                **_base_evidence(resolved_db, selected_sources, apply=True, credentials={}),
+                "outcome": "blocked_preflight",
+                "preflight_errors": ["builder_authorization_required"],
+                "finished_at": _utc_now(),
+            }
     active_credentials = dict(
         _credentials_from_settings() if credentials is None else credentials
     )
@@ -514,16 +674,30 @@ def refresh_ncs_api_evidence(
     tell = progress or (lambda event: None)
     working_copy_created = False
     phase = "source_invariant_check"
+    def authorize() -> None:
+        require_builder_context(context, action="resume" if resume else "refresh_api",
+                                version_dir=prepared_output.parent)
+        if (version_dir.resolve() != version_dir
+                or prepared_output.resolve() != prepared_output
+                or (checkpoint_path is not None and checkpoint_path.resolve()
+                    != version_dir / "api-checkpoint" / "api_checkpoint.json")):
+            raise BuilderAuthorizationError("Builder version path was redirected.")
+
     try:
+        authorize()
         with exclusive_refresh_lock(resolved_db):
             source_before_file_hash = file_sha256(resolved_db, progress)
             tell("원본 KSA와 사람 검토 상태 검사")
             source_before_raw_hash = raw_ksa_sha256(resolved_db)
             source_before_trusted = trusted_review_status_counts(resolved_db)
+            source_before_trusted_identity = trusted_review_status_identity_digest(
+                resolved_db
+            )
             evidence["source_invariants_before"] = {
                 "file_sha256": source_before_file_hash,
                 "raw_ksa_sha256": source_before_raw_hash,
                 "trusted_review_status_counts": source_before_trusted,
+                "trusted_review_status_identity_digest": source_before_trusted_identity,
             }
             identity = {
                 "schema": "ncs_api_checkpoint_v1", "source": str(resolved_db),
@@ -542,26 +716,32 @@ def refresh_ncs_api_evidence(
                 if not token or token[0] != checkpoint.get("token"):
                     return {**evidence, "outcome": "blocked_preflight", "preflight_errors": ["checkpoint_working_db_mismatch"]}
             phase = "working_copy_backup"
-            working_db = prepared_output if checkpoint is not None else _prepare_working_copy(resolved_db, prepared_output, progress)
+            authorize()
+            working_db = prepared_output if checkpoint is not None else _prepare_working_copy(
+                resolved_db, prepared_output, progress, authorize=authorize)
             working_copy_created = True
             phase = "working_copy_invariant_check"
             tell("작업 DB 원문·검토 상태 검사")
             before_raw_hash = raw_ksa_sha256(working_db)
             before_trusted = trusted_review_status_counts(working_db)
+            before_trusted_identity = trusted_review_status_identity_digest(working_db)
             evidence["working_copy_invariants_before"] = {
                 "raw_ksa_sha256": before_raw_hash,
                 "trusted_review_status_counts": before_trusted,
+                "trusted_review_status_identity_digest": before_trusted_identity,
             }
             if checkpoint is not None and checkpoint.get("baseline") != evidence["working_copy_invariants_before"]:
                 return {**evidence, "outcome": "blocked_preflight", "preflight_errors": ["checkpoint_invariant_mismatch"]}
             if checkpoint_path and checkpoint is None:
                 checkpoint = {"identity": identity, "baseline": evidence["working_copy_invariants_before"],
                               "token": uuid.uuid4().hex, "working_inode": working_db.stat().st_ino, "completed": {}}
+                authorize()
                 with closing(sqlite3.connect(working_db)) as binding, binding:
                     binding.execute("CREATE TABLE IF NOT EXISTS builder_api_checkpoint_identity(token TEXT NOT NULL)")
                     binding.execute("DELETE FROM builder_api_checkpoint_identity")
                     binding.execute("INSERT INTO builder_api_checkpoint_identity VALUES (?)", (checkpoint["token"],))
-                write_refresh_evidence(checkpoint, checkpoint_path)
+                authorize()
+                write_refresh_evidence(checkpoint, checkpoint_path, protected_databases=(resolved_db, working_db))
             evidence["resumed"] = resume
             source_results: dict[str, list[dict[str, Any]]] = {
                 source: [] for source in selected_sources
@@ -587,6 +767,7 @@ def refresh_ncs_api_evidence(
                           "unit": "API·대분류", "detail": f"현재 {source} / {major_code}"})
                     try:
                         progress_options = {"progress_callback": progress} if progress and callables is None else {}
+                        authorize()
                         if source == "training-courses":
                             result = operations.collect_training(
                                 working_db,
@@ -617,6 +798,7 @@ def refresh_ncs_api_evidence(
                                 warnings.append(
                                     f"job-base:{major_code}:missing_local_units"
                                 )
+                        authorize()
                         source_results[source].append(
                             {
                                 "major_code": major_code,
@@ -630,9 +812,12 @@ def refresh_ncs_api_evidence(
                             proven_calls += 1
                             if checkpoint is not None:
                                 checkpoint["completed"][call_key] = source_results[source][-1]
-                                write_refresh_evidence(checkpoint, checkpoint_path)
+                                authorize()
+                                write_refresh_evidence(checkpoint, checkpoint_path, protected_databases=(resolved_db, working_db))
                         tell({"stage": "API 수집 완료 범위", "completed": proven_calls,
                               "total": total_calls, "unit": "API·대분류"})
+                    except BuilderAuthorizationError:
+                        raise
                     except Exception as exc:  # Preserve later-major evidence; never reconcile failures.
                         source_results[source].append(
                             {
@@ -651,13 +836,18 @@ def refresh_ncs_api_evidence(
             tell("API 수집 후 원문·검토 상태 검사")
             after_collection_raw_hash = raw_ksa_sha256(working_db)
             after_collection_trusted = trusted_review_status_counts(working_db)
+            after_collection_trusted_identity = trusted_review_status_identity_digest(
+                working_db
+            )
             collection_invariants_unchanged = (
                 before_raw_hash == after_collection_raw_hash
                 and before_trusted == after_collection_trusted
+                and before_trusted_identity == after_collection_trusted_identity
             )
             evidence["invariants_after_collection"] = {
                 "raw_ksa_sha256": after_collection_raw_hash,
                 "trusted_review_status_counts": after_collection_trusted,
+                "trusted_review_status_identity_digest": after_collection_trusted_identity,
                 "unchanged": collection_invariants_unchanged,
             }
             if not collection_invariants_unchanged:
@@ -675,8 +865,10 @@ def refresh_ncs_api_evidence(
                 phase = "training_link_build"
                 tell("교육과정·온톨로지 관계 연결 (전체 작업량 사전 산정 불가)")
                 try:
+                    authorize()
                     conn = connect(working_db)
                     try:
+                        authorize()
                         linked = operations.build_training_links(conn, reset=False)
                     finally:
                         conn.close()
@@ -685,6 +877,8 @@ def refresh_ncs_api_evidence(
                         "reset": False,
                         "result_keys": sorted(linked.keys()),
                     }
+                except BuilderAuthorizationError:
+                    raise
                 except Exception as exc:
                     source_failures.append("training-links")
                     evidence["training_link_build"] = {
@@ -703,12 +897,16 @@ def refresh_ncs_api_evidence(
             tell("최종 원문·검토 상태 보존 검사")
             after_raw_hash = raw_ksa_sha256(working_db)
             after_trusted = trusted_review_status_counts(working_db)
+            after_trusted_identity = trusted_review_status_identity_digest(working_db)
             evidence["working_copy_invariants_after"] = {
                 "raw_ksa_sha256": after_raw_hash,
                 "trusted_review_status_counts": after_trusted,
+                "trusted_review_status_identity_digest": after_trusted_identity,
             }
             invariants_unchanged = (
-                before_raw_hash == after_raw_hash and before_trusted == after_trusted
+                before_raw_hash == after_raw_hash
+                and before_trusted == after_trusted
+                and before_trusted_identity == after_trusted_identity
             )
             evidence["working_copy_invariants_unchanged"] = invariants_unchanged
             if not invariants_unchanged:
@@ -728,10 +926,14 @@ def refresh_ncs_api_evidence(
             tell("최종 원문·검토 상태 비교")
             source_after_raw_hash = raw_ksa_sha256(resolved_db)
             source_after_trusted = trusted_review_status_counts(resolved_db)
+            source_after_trusted_identity = trusted_review_status_identity_digest(
+                resolved_db
+            )
             source_unchanged = (
                 source_before_file_hash == source_after_file_hash
                 and source_before_raw_hash == source_after_raw_hash
                 and source_before_trusted == source_after_trusted
+                and source_before_trusted_identity == source_after_trusted_identity
             )
             if checkpoint_path:
                 source_wal = Path(str(resolved_db) + "-wal")
@@ -742,6 +944,7 @@ def refresh_ncs_api_evidence(
                 "file_sha256": source_after_file_hash,
                 "raw_ksa_sha256": source_after_raw_hash,
                 "trusted_review_status_counts": source_after_trusted,
+                "trusted_review_status_identity_digest": source_after_trusted_identity,
                 "unchanged": source_unchanged,
             }
             if not source_unchanged:
@@ -751,6 +954,7 @@ def refresh_ncs_api_evidence(
                 )
             evidence["source_writes_performed"] = False
             evidence["working_copy_writes_performed"] = True
+            authorize()
             if evidence["outcome"] in {
                 "succeeded_append_only",
                 "completed_with_warnings",
@@ -762,6 +966,14 @@ def refresh_ncs_api_evidence(
                 prepared_output.unlink(missing_ok=True)
                 working_copy_created = False
                 evidence["failed_output_deleted"] = True
+    except BuilderAuthorizationError:
+        # Loss of authority must stop all subsequent mutations, including cleanup.
+        evidence.pop("prepared_output", None)
+        evidence.update({"outcome": "failed_no_reconcile", "failure_type": "BuilderAuthorizationError",
+                         "failed_phase": phase, "failure_reason": "builder_authorization_required",
+                         "source_writes_performed": False})
+        if working_copy_created:
+            evidence["failed_output"] = str(prepared_output)
     except RefreshLockError:
         evidence.update(
             {
@@ -784,6 +996,7 @@ def refresh_ncs_api_evidence(
             if retain_failed_output:
                 evidence["failed_output"] = str(prepared_output)
             else:
+                authorize()
                 prepared_output.unlink(missing_ok=True)
                 evidence["failed_output_deleted"] = True
     evidence["finished_at"] = _utc_now()
@@ -804,10 +1017,30 @@ def _safe_local_failure_reason(exc: Exception) -> str:
     return "local_database_or_filesystem_error"
 
 
-def write_refresh_evidence(report: Mapping[str, Any], output_path: Path) -> Path:
+def validate_refresh_report_path(output_path: Path, protected_databases: Iterable[str | Path]) -> Path:
+    """Reject report aliases of source/baseline SQLite files and their sidecars."""
+    destination = Path(output_path).expanduser().resolve(strict=False)
+    for database in protected_databases:
+        # Both spellings matter when the database itself is a symlink.
+        original = Path(database).expanduser()
+        for base in (original, original.resolve(strict=False)):
+            for suffix in ("", "-wal", "-shm", "-journal"):
+                protected = Path(str(base) + suffix)
+                if destination == protected.resolve(strict=False) or (
+                    destination.exists() and protected.exists() and destination.samefile(protected)
+                ):
+                    raise ValueError("report_path_conflicts_with_protected_database")
+    return destination
+
+
+def write_refresh_evidence(
+    report: Mapping[str, Any], output_path: Path, *,
+    protected_databases: Iterable[str | Path] = (),
+) -> Path:
     """Atomically write structured evidence without leaking credentials or API payloads."""
 
-    destination = Path(output_path)
+    protected = tuple(protected_databases)
+    destination = validate_refresh_report_path(output_path, protected)
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         "w", encoding="utf-8", dir=destination.parent, delete=False, suffix=".tmp"
@@ -815,5 +1048,13 @@ def write_refresh_evidence(report: Mapping[str, Any], output_path: Path) -> Path
         json.dump(report, handle, ensure_ascii=False, indent=2, sort_keys=True)
         handle.write("\n")
         temporary_path = Path(handle.name)
-    temporary_path.replace(destination)
+    try:
+        # Resolve the original spelling again: parent symlink/junction changes
+        # must not redirect a preflight failure report into an immutable input.
+        if validate_refresh_report_path(output_path, protected) != destination:
+            raise ValueError("report_parent_changed_during_write")
+        validate_refresh_report_path(destination, protected)
+        temporary_path.replace(destination)
+    finally:
+        temporary_path.unlink(missing_ok=True)
     return destination

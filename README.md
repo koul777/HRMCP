@@ -1,8 +1,11 @@
 # HRMCP — NCS 기반 HR 실무용 MCP
 
-> 운영 원칙(2026-09-11): 데이터 갱신과 Vercel 배포는 Windows NCS Data
-> Builder로 일원화합니다. GitHub Actions는 CI 검증만 수행하며, 별도
-> snapshot refresh workflow와 self-hosted runner는 운영하지 않습니다.
+> 운영 원칙(2026-09-11): production DB/API 갱신, 온톨로지 재구축, 경량
+> 패키지 생성, Vercel 반영, 기준본 승격은 Windows NCS Data Builder
+> (`run_ncs_builder.bat`) 한 경로로만 수행합니다. GitHub Actions는 CI
+> 검증만 수행하며, 별도 snapshot refresh/deploy workflow와 self-hosted
+> runner는 운영하지 않습니다. 자격/NCS006 수집만 기존 운영자 승인·재시도
+> 가드를 따르는 별도 예외이며 자동 Builder 단계가 아닙니다.
 
 > **HR 실무에서 NCS를 활용하는 가장 빠른 길.**
 > 채용 직무에 맞는 NCS 분류부터 능력단위 → 능력단위요소 → 수행준거 → 지식(K)·기술(S)·태도(A)까지,
@@ -90,6 +93,12 @@ AI의 검색과 결과물 작성을 뒷받침합니다.
 
 **실행:** 저장소의 `run_ncs_builder.bat`를 더블클릭합니다. 기존 프로젝트의 Python `.venv`와 설치된 의존성이 필요하며, 독립 설치형 EXE는 아닙니다. API 갱신에는 프로젝트에 설정된 해당 API 키가, Vercel 반영에는 Vercel CLI 로그인과 기존 MCP 프로젝트 연결 권한이 필요합니다. 키는 화면이나 보고서에 붙여 넣지 않습니다.
 
+이 실행 파일이 production lifecycle의 유일한 운영 진입점입니다. 개별 Python
+Builder/Publisher 스크립트와 Vercel CLI는 구현 구성요소이지 운영자가 우회 실행할
+두 번째 경로가 아닙니다. Preview 생성과 원격 상태 조회도 Builder가 선택 버전의
+검증·복구 기록 안에서 수행하며, 읽기 전용 상태 조회는 장애 진단용 비운영 작업으로만
+사용합니다.
+
 | 단계 | 사용자가 할 일 | 완료 결과 |
 | --- | --- | --- |
 | ① 원본 · 온톨로지 | 새 **전체** Excel을 선택하고 구조를 확인합니다. 비교 기준 DB를 확인한 뒤 전체 원본 체크 → `변경분 검토 · 온톨로지 만들기`를 누릅니다. | 추가·변경·제외·유지 건수와 검증된 후보 DB가 저장됩니다. |
@@ -119,7 +128,7 @@ AI의 검색과 결과물 작성을 뒷받침합니다.
 - **2026-08-30**: `ncs_search`·`ncs_unit_detail`·`ncs_training`·`ncs_analysis`의 도구 응답을 원시 JSON 문자열 대신 간결한 마크다운으로 제공합니다. 후속 호출에 필요한 `unit_code`·`element_id`·`criteria_id`·`training_course_id`·`concept_id`는 독립 식별자로 유지하고, 중복 `structuredContent`는 제거했습니다.
 - **2026-08-30**: 전체 canonical `ncs.db`를 Vercel에 직접 싣지 않고, 온톨로지·KSA·수행준거·교육추천 근거를 포함한 compact SQLite(425,758,720 bytes)와 배포 ZIP(120,785,873 bytes)으로 만드는 결정론적 Builder·Refresh Builder를 정리했습니다.
 - **2026-08-30**: Vercel 함수 검증기가 빌드 폴더의 물리 파일뿐 아니라 `.vc-config.json`의 `filePathMap`까지 확인하도록 강화했습니다. 원본 `.db`·SQLite sidecar·금지 디렉터리 참조가 하나라도 있거나 실제 매핑 총량이 상한을 넘으면 배포를 중단합니다.
-- **2026-08-30**: Vercel 릴리스 워크플로에 배포 후 원격 스모크 게이트를 추가했습니다. `GET 405 종료`, `initialize`, `tools/list`, 공개 7개 도구 호출, `ncs_analysis`의 `career_path`·`qualification`·`job_base`·`ontology` 4개 모드를 실제 URL에 대해 검증합니다.
+- **2026-08-30**: Builder 릴리스 단계에 배포 후 원격 스모크 게이트를 추가했습니다. `GET 405 종료`, `initialize`, `tools/list`, 공개 7개 도구 호출, `ncs_analysis`의 `career_path`·`qualification`·`job_base`·`ontology` 4개 모드를 실제 URL에 대해 검증합니다.
 - **2026-08-30**: qualification 스모크를 `광역 자격 조회 → 반환된 능력단위코드 정확 검색 → 해당 능력단위의 자격 조회` 체인으로 확장했습니다. 광역 결과만 존재하고 실제 단위별 조회가 깨진 배포는 승격하지 않으며, 검증 보고서에는 조회 코드와 응답 본문을 기록하지 않습니다.
 - **2026-08-30**: 운영 스모크는 `scripts/verify_remote_mcp_transport.py`가 담당합니다. 스냅샷 테이블 누락, raw exception 노출, 공개 도구 응답 회귀가 발생하면 production 승격 전에 릴리스를 중단합니다. 데이터 갱신·배포 실행은 현재 Windows NCS Data Builder로 일원화되어 있습니다.
 - **2026-08-30**: `initialize`의 `serverInfo.version`에 Git 커밋 SHA, Vercel 배포 ID 또는 스냅샷 해시를 포함해 신·구 배포를 식별할 수 있게 했습니다.
@@ -134,7 +143,7 @@ AI의 검색과 결과물 작성을 뒷받침합니다.
 
 ---
 
-## 📊 검색 성능·배포 상태 (2026-09-11)
+## 📊 검색 성능·배포 상태 (2026-09-12)
 
 공개 서비스는 DB 용량을 늘리는 FTS 인덱스 대신, 질의를 토큰으로 분해해 단계적으로 완화하는 검색 경로를
 사용합니다. 검색 순서는 `고특이도 실무어 intent alias → 문구 일치 → 토큰 AND → 확장 AND → 토큰 OR`이며,
@@ -153,13 +162,17 @@ intent alias가 없는 일반 질의는 기존 문구·토큰 순서를 그대�
 | 원격 readiness warm p50 | `1,434.019 ms → 235.134 ms` (`83.6%` 단축) |
 | 새 preview 3회 첫 요청 p50 | `5,186.377 ms` |
 | 첫 요청 중 snapshot bootstrap p50 | `4,554.211 ms` |
-| 전체 단위 테스트(로컬) | 총 `2,123개` 실행: `2,122개 통과`, `1개 skip` |
+| 전체 단위 테스트(로컬) | 총 `2,429개` 통과, `4개 skip` |
 
 `ncs_search`는 `offset`과 `next_offset`을 제공해 5건 이후 결과에도 접근할 수 있습니다.
 `scope="all"`은 능력단위, 능력단위요소, 수행준거, KSA가 한 유형에 선점되지 않도록 유형별 결과를
-균형 있게 구성합니다. 위 품질 수치는 실제 DB 코드로 정답을 검증한 별도 40개 HR 실무 질의 회귀
-세트의 Hit@1·Hit@3·MRR@10입니다. 기존 50개 `candidate_eval`은 여전히 사람 정답 라벨이 없으므로
-그 자료만으로 Recall, MRR, nDCG가 개선됐다고 주장하지 않습니다.
+균형 있게 구성합니다. 위 품질 수치는 실제 DB 코드로 실행하는 고정 40개 HR 실무 질의
+개발·회귀(in-sample) 세트의 Hit@1·Hit@3·MRR@10입니다. 독립 holdout 성능을 뜻하지 않습니다.
+holdout은 전후 비교에만 사용하며 결과를 보고 alias를 추가하지 않습니다. 기존 50개 `candidate_eval`도
+사람 정답 라벨이 없으므로 그 자료만으로 Recall, MRR, nDCG가 개선됐다고 주장하지 않습니다.
+
+`context_text`와 `job_scope` 입력은 현재 공개 스키마에 있지만 랭킹에는 반영하지 않는 shadow 단계입니다.
+실측 resolver 지연이 승격 기준을 넘었으므로 public reranking은 HOLD 상태입니다.
 
 Vercel에는 전체 원본 DB가 아니라 검증된 compact SQLite snapshot을 배포합니다. 현재 snapshot은
 `446,017,536 bytes`, 압축 ZIP은 `125,839,523 bytes`이며, 빌드 하드 캡은 `480 MB`, 소프트 캡은
@@ -466,27 +479,19 @@ NCS_MCP_MAX_CONCURRENT_RECOMMENDATIONS=2
 NCS_MCP_READINESS_EXTRA_TABLES=ontology_concepts,...,ncs_unit_standard_training
 ```
 
-```powershell
-cd deploy\vercel_mcp_app
-vercel deploy
-vercel deploy --prod
-```
-
-새 원천 DB로 교체할 때는 먼저 변경 인식형 Refresh Builder로 계획을 확인하고 별도 준비본을
-만듭니다. 성공 보고서의 `publisher_source.path`만 Publisher 입력으로 사용합니다.
+production 반영은 아래 단일 진입점에서 선택 버전의 ① 원본·온톨로지 → ② API
+갱신 → ③ 경량 DB 생성·검증 → ④ Vercel 반영을 순서대로 수행합니다.
 
 ```powershell
-python scripts\refresh_ncs_ontology.py data\processed\ncs.db --report reports\refresh-plan.json
-python scripts\refresh_ncs_ontology.py data\processed\ncs.db --output build\prepared\ncs.db --report reports\refresh-apply.json --apply
-python scripts\publish_vercel_snapshot.py --source <publisher_source.path>
+.\run_ncs_builder.bat
 ```
 
-필요하면 `--deploy-root`, `--dry-run`, `--report`를 추가할 수 있습니다. Publisher는
-검증된 ZIP과 manifest만 `deploy/vercel_mcp_app/api/`에 함께 publish하며, 자체적으로 API를
-수집하거나 Vercel을 배포하지 않습니다. 별도 출력 경로가 필요한 경우에만 low-level
-`build_vercel_snapshot.py`를 사용하세요. 전체 자동 갱신·staged 배포·원격 검증·기준본 승격은
-Windows NCS Data Builder의 버전 작업 흐름에서 수행합니다. 자격 API의 운영자 승인 절차는
-자동화 범위 밖에 그대로 유지됩니다.
+새 원천 DB도 Builder에서 전체 Excel과 비교 기준 DB를 선택해 별도 후보로 만듭니다.
+검증된 후보의 source identity, compact ZIP/manifest, preview MCP, production MCP가 모두
+일치할 때만 기준본을 승격합니다. Publisher와 low-level snapshot 스크립트는 이 단계의
+내부 구현이며 별도 운영 명령으로 실행하지 않습니다. 자격/NCS006 API는 Builder 자동
+갱신에 포함하지 않고 기존 retry-hygiene, coverage-plan, checkpoint, operator-ready
+조건을 만족한 경우에만 별도 운영자 절차로 다룹니다.
 
 ### API 키 발급
 

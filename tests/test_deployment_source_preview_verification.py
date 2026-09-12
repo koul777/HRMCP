@@ -241,7 +241,7 @@ class DeploymentSourcePreviewRuntimeSmokeTests(unittest.TestCase):
                 "returncode": returncode,
                 "timed_out": returncode == 124,
             }
-            for index, returncode in enumerate((0, 1, 0, 124, 0, 0, 0, 0), start=1)
+            for index, returncode in enumerate((0, 1, 0, 124, 0, 0, 0, 0, 0), start=1)
         ]
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -255,8 +255,8 @@ class DeploymentSourcePreviewRuntimeSmokeTests(unittest.TestCase):
                 report = runtime_smoke.run_preview_smoke(root)
 
         self.assertFalse(report["ok"])
-        self.assertEqual(run_mock.call_count, 8)
-        self.assertEqual(report["command_count"], 8)
+        self.assertEqual(run_mock.call_count, 9)
+        self.assertEqual(report["command_count"], 9)
         self.assertEqual(report["failed_command_count"], 2)
         self.assertEqual(report["timed_out_command_count"], 1)
         self.assertTrue(report["source_preview_unchanged"])
@@ -265,7 +265,7 @@ class DeploymentSourcePreviewRuntimeSmokeTests(unittest.TestCase):
         self.assertTrue(report["temporary_source_copies_cleaned_up"])
         self.assertEqual(
             [item["returncode"] for item in report["commands"]],
-            [0, 1, 0, 124, 0, 0, 0, 0],
+            [0, 1, 0, 124, 0, 0, 0, 0, 0],
         )
         command_args = [call.args[0] for call in run_mock.call_args_list]
         self.assertEqual(command_args[0][1:3], ["-m", "ncs_mcp.smoke_data"])
@@ -279,10 +279,20 @@ class DeploymentSourcePreviewRuntimeSmokeTests(unittest.TestCase):
         self.assertIn("package_install_smoke.py", command_args[6][1])
         self.assertEqual(command_args[6][2:4], ["--source-preview-dir", "."])
         self.assertEqual(command_args[7][-2:], ["scripts/ncs_harness.py", "smoke"])
+        self.assertEqual(command_args[8][1], "-c")
+        self.assertIn("ncs_mcp.search.core", command_args[8][2])
+        self.assertIn("ncs_mcp.server", command_args[8][2])
         call_cwds = [call.kwargs["cwd"] for call in run_mock.call_args_list]
         self.assertTrue(all(path != root for path in call_cwds))
         self.assertEqual(call_cwds[0], call_cwds[5])
         self.assertNotEqual(call_cwds[5], call_cwds[6])
+        deploy_env = run_mock.call_args_list[8].kwargs["env"]
+        self.assertEqual(
+            Path(deploy_env["PYTHONPATH"]).parts[-3:],
+            ("deploy", "vercel_mcp_app", "src"),
+        )
+        self.assertEqual(deploy_env["NCS_MCP_READ_ONLY"], "1")
+        self.assertEqual(deploy_env["NCS_MCP_ENABLE_OPERATOR_TOOLS"], "0")
 
     def test_preview_smoke_rejects_blocked_env_before_commands(self) -> None:
         with TemporaryDirectory() as tmp:

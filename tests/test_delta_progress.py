@@ -8,6 +8,7 @@ from openpyxl import Workbook
 
 from ncs_mcp.db import connect, initialize_database, now_utc
 from ncs_mcp.excel_delta_builder import build_excel_delta
+from ncs_mcp.data_builder import DataBuilder
 from ncs_mcp.ontology_refresh_builder import _run_pipeline, _sqlite_online_snapshot
 from ncs_mcp.preprocess_excel import HEADER_ALIASES, Normalizer
 
@@ -59,8 +60,12 @@ class DeltaProgressTests(unittest.TestCase):
         book.save(excel)
         book.close()
         events = []
-        result = build_excel_delta(excel, self.baseline, self.root / 'candidate.db', self.root,
-                                   progress=events.append)
+        builder = DataBuilder(self.root)
+        version = '20260912_abcd'
+        folder = builder.state / 'versions' / version
+        with builder.exclusive('build_delta', version) as context:
+            result = build_excel_delta(excel, self.baseline, folder / 'ncs.db', folder / 'delta',
+                                       progress=events.append, builder_context=context)
         structured = [event for event in events if isinstance(event, dict)]
         self.assertEqual(result['ontology_processing'], 'skipped_no_change')
         self.assertIn({'stage': '기존 원천 행 비교 준비', 'completed': 1, 'total': 1, 'unit': '행'}, structured)

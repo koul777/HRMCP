@@ -75,7 +75,7 @@ def _allowed_template_path(rel: str) -> str | None:
 
 
 def _allowed_secret_example(rel: str, pattern: str) -> str | None:
-    if pattern != "quoted_secret_assignment":
+    if pattern not in {"env_secret_assignment", "quoted_secret_assignment"}:
         return None
     if rel.startswith("tests/"):
         return "test/smoke/template placeholder"

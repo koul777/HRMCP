@@ -22,6 +22,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from ncs_mcp import server  # noqa: E402
+from ncs_mcp.search.core import _register_ncs_search_udfs  # noqa: E402
 
 
 DEFAULT_CANDIDATES = ROOT / "reports" / "ncs_search_eval_candidates_20260830.json"
@@ -320,6 +321,11 @@ class SearchHarness:
         uri = f"file:{self.db_path.as_posix()}?mode=ro&immutable=1"
         raw = sqlite3.connect(uri, uri=True)
         raw.row_factory = sqlite3.Row
+        # Search SQL uses the same boundary-aware predicate as production.
+        # Register it on the profiler's read-only connection; unlike
+        # ``server.open_db`` this direct sqlite connection does not inherit
+        # the production connection setup.
+        _register_ncs_search_udfs(raw)
         raw.execute("PRAGMA query_only = ON")
         self.recorder.connection = raw
         try:
@@ -336,15 +342,24 @@ class SearchHarness:
         server.open_db = self._original_open_db
         server._execute_ncs_search_tiers = self._original_executor
 
-    def normal_search(self, query: str, scope: str, limit: int) -> dict[str, Any]:
+    def normal_search(
+        self, query: str, scope: str, limit: int,
+        *, classification_filter: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         server._execute_ncs_search_tiers = self._original_executor
-        return server.search_ncs(query=query, scope=scope, limit=limit, offset=0)
+        return server.search_ncs(
+            query=query, scope=scope, limit=limit, offset=0,
+            classification_filter=classification_filter,
+        )
 
     def adaptive_limit_search(
-        self, query: str, scope: str, limit: int
+        self, query: str, scope: str, limit: int,
+        *, classification_filter: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], bool, int]:
         if scope != "all":
-            return self.normal_search(query, scope, limit), False, limit + 1
+            return self.normal_search(
+                query, scope, limit, classification_filter=classification_filter
+            ), False, limit + 1
         expected = expected_round_robin_counts(limit, SEARCH_TYPES)
         first_pass_limit = max(expected.values(), default=0) + 1
 
@@ -359,7 +374,10 @@ class SearchHarness:
             )
 
         server._execute_ncs_search_tiers = limited_executor
-        first = server.search_ncs(query=query, scope=scope, limit=limit, offset=0)
+        first = server.search_ncs(
+            query=query, scope=scope, limit=limit, offset=0,
+            classification_filter=classification_filter,
+        )
         enough = all(
             int(first.get("counts_by_type", {}).get(item_type, 0)) >= needed
             for item_type, needed in expected.items()
@@ -369,75 +387,83 @@ class SearchHarness:
             return first, False, first_pass_limit
         self.recorder.context["phase"] = "fallback_full_limit"
         server._execute_ncs_search_tiers = self._original_executor
-        return self.normal_search(query, scope, limit), True, first_pass_limit
+        return self.normal_search(
+            query, scope, limit, classification_filter=classification_filter
+        ), True, first_pass_limit
+
+    def _fast_reject_probe(
+        self,
+        query: str,
+        scope: str,
+        type_order: Iterable[str],
+        *,
+        classification_filter: dict[str, Any] | None = None,
+    ) -> tuple[bool, dict[str, Any]]:
+        """Probe the exact production plans, including every tier and filter.
+
+        Capturing the executor inputs avoids a second implementation of query
+        expansion, normalized-schema selection, classification joins, and intent
+        tiers. EXISTS lets SQLite omit result sorting/materialization; all
+        production WHERE guards and bound parameters are retained.
+        """
+        plans: dict[str, tuple[str, Any, dict[str, Any]]] = {}
+
+        def capture_executor(conn, sql_template, tiers, base_params):
+            plans[identify_search_type(sql_template)] = (
+                sql_template, tiers, dict(base_params)
+            )
+            return []
+
+        previous_executor = server._execute_ncs_search_tiers
+        previous_open_db = server.open_db
+        server._execute_ncs_search_tiers = capture_executor
+        server.open_db = self.open_db
+        try:
+            empty = server.search_ncs(
+                query=query, scope=scope, limit=1, offset=0,
+                classification_filter=classification_filter,
+            )
+        finally:
+            server._execute_ncs_search_tiers = previous_executor
+            server.open_db = previous_open_db
+
+        # A custom probe ordering must never remove requested result types.
+        ordered_types = list(dict.fromkeys([*type_order, *plans]))
+        with self.open_db() as conn:
+            for item_type in ordered_types:
+                if item_type not in plans:
+                    continue
+                template, tiers, base_params = plans[item_type]
+                for tier, where_clause, tier_params, score, meaningful in tiers:
+                    params = {**tier_params, **base_params, "match_tier": tier}
+                    params["candidate_limit"] = 1
+                    sql = template.format(
+                        where_clause=where_clause,
+                        fallback_filter_clause=(
+                            f" AND ({meaningful})" if meaningful else ""
+                        ),
+                        fallback_order_clause=f"({score}) DESC," if score else "",
+                    )
+                    probe_sql = (
+                        "/* profile_fast_reject */ SELECT 1 WHERE EXISTS ("
+                        + sql + ")"
+                    )
+                    if conn.execute(probe_sql, params).fetchone() is not None:
+                        return True, empty
+        return False, empty
 
     def fast_reject_has_any(
         self,
         query: str,
         scope: str,
         type_order: Iterable[str],
+        *,
+        classification_filter: dict[str, Any] | None = None,
     ) -> bool:
-        phrase, _, fallback_tokens = server._normalize_ncs_search_query(query)
-        if not phrase:
-            return False
-        requested = set(SEARCH_TYPES if scope == "all" else (scope,))
-        with self.open_db() as conn:
-            for item_type in type_order:
-                if item_type not in requested:
-                    continue
-                if item_type == "unit":
-                    columns = (
-                        "cu.unit_code",
-                        "cu.unit_name_raw",
-                        "cu.api_definition",
-                        "c.major_name",
-                        "c.middle_name",
-                        "c.small_name",
-                        "c.sub_name",
-                        "aliases.alias_search_text",
-                    )
-                    from_sql = """
-                        WITH alias_search AS (
-                            SELECT unit_code,
-                                   GROUP_CONCAT(
-                                       COALESCE(alias_text, '') || ' ' ||
-                                       COALESCE(normalized_query, ''), ' '
-                                   ) AS alias_search_text
-                            FROM ncs_query_aliases
-                            WHERE unit_code IS NOT NULL
-                            GROUP BY unit_code
-                        )
-                        SELECT 1
-                        FROM competency_units cu
-                        JOIN classifications c
-                          ON c.classification_id = cu.classification_id
-                        LEFT JOIN alias_search aliases
-                          ON aliases.unit_code = cu.unit_code
-                    """
-                elif item_type == "element":
-                    columns = ("ce.element_name_raw",)
-                    from_sql = "SELECT 1 FROM competency_elements ce"
-                elif item_type == "criteria":
-                    columns = ("pc.criteria_text_raw", "pc.criteria_text_refined")
-                    from_sql = "SELECT 1 FROM performance_criteria pc"
-                else:
-                    columns = ("ki.ksa_text_raw", "ki.ksa_text_refined")
-                    from_sql = "SELECT 1 FROM ksa_items ki"
-                tier, where_clause, tier_params = server._ncs_search_tier_predicates(
-                    columns, phrase, fallback_tokens
-                )[-1]
-                params = dict(tier_params)
-                params["match_tier"] = tier
-                sql = (
-                    "/* profile_fast_reject */\n"
-                    + from_sql
-                    + "\nWHERE "
-                    + where_clause
-                    + "\nLIMIT 1"
-                )
-                if conn.execute(sql, params).fetchone() is not None:
-                    return True
-        return False
+        found, _ = self._fast_reject_probe(
+            query, scope, type_order, classification_filter=classification_filter
+        )
+        return found
 
     def fast_reject_search(
         self,
@@ -445,35 +471,18 @@ class SearchHarness:
         scope: str,
         limit: int,
         type_order: Iterable[str],
+        *,
+        classification_filter: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], bool]:
-        if self.fast_reject_has_any(query, scope, type_order):
-            return self.normal_search(query, scope, limit), False
-        phrase, query_tokens, _ = server._normalize_ncs_search_query(query)
-        requested = SEARCH_TYPES if scope == "all" else (scope,)
-        counts = {item_type: 0 for item_type in requested}
-        more = {item_type: False for item_type in requested}
-        match_modes = {item_type: None for item_type in requested}
-        empty = {
-            "query": query,
-            "normalized_query": phrase,
-            "query_tokens": query_tokens,
-            "scope": scope,
-            "match_mode": None,
-            "match_mode_by_type": match_modes,
-            "counts_by_type": counts,
-            "has_more_by_type": more,
-            "returned": 0,
-            "offset": 0,
-            "next_offset": None,
-            "results": [],
-        }
-        empty["markdown_summary"] = server._ncs_search_markdown(
-            query,
-            [],
-            counts_by_type=counts,
-            offset=0,
-            next_offset=None,
+        found, empty = self._fast_reject_probe(
+            query, scope, type_order, classification_filter=classification_filter
         )
+        if found:
+            return self.normal_search(
+                query, scope, limit, classification_filter=classification_filter
+            ), False
+        # This is the production empty result, including classification context,
+        # expansion metadata, and its normal empty-query contract.
         return empty, True
 
 
@@ -493,6 +502,7 @@ def _run_strategy(
         case_id = str(candidate["case_id"])
         query = str(candidate["query"])
         scope = str(candidate.get("scope_candidate") or "all")
+        classification_filter = candidate.get("classification_filter")
         for run_index in range(runs):
             recorder.set_context(
                 strategy=strategy,
@@ -506,14 +516,17 @@ def _run_strategy(
             rejected = False
             first_pass_limit = None
             if strategy == "baseline":
-                result = harness.normal_search(query, scope, limit)
+                result = harness.normal_search(
+                    query, scope, limit, classification_filter=classification_filter
+                )
             elif strategy == "adaptive_limit_sizing":
                 result, fallback, first_pass_limit = harness.adaptive_limit_search(
-                    query, scope, limit
+                    query, scope, limit, classification_filter=classification_filter
                 )
             elif strategy == "no_result_fast_reject":
                 result, rejected = harness.fast_reject_search(
-                    query, scope, limit, fast_reject_order
+                    query, scope, limit, fast_reject_order,
+                    classification_filter=classification_filter,
                 )
             else:
                 raise ValueError(f"unknown strategy: {strategy}")

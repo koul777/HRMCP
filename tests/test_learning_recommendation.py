@@ -391,7 +391,7 @@ class LearningRecommendationTests(unittest.TestCase):
             self.assertIsNone(result["recommendations"][0]["learn_module_seq"])
             self.assertIn("ncs_fallback", result["recommendations"][0]["match"]["reasons"])
 
-    def test_learning_path_and_v1_review_tools_use_envelope(self) -> None:
+    def test_learning_path_is_readable_and_mcp_review_writes_are_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "ncs.db"
             conn = connect(db_path)
@@ -459,6 +459,10 @@ class LearningRecommendationTests(unittest.TestCase):
             concept_packet_hash = "sha256:" + hashlib.sha256(
                 concept_packet.read_bytes()
             ).hexdigest()
+            before_review = (
+                db_path.stat().st_size, db_path.stat().st_mtime_ns,
+                hashlib.sha256(db_path.read_bytes()).hexdigest(),
+            )
 
             blocked = server.review_sqf_ncs_match(
                 match_id=match_id,
@@ -466,7 +470,7 @@ class LearningRecommendationTests(unittest.TestCase):
                 reviewer_id="mcp",
             )
             self.assertFalse(blocked["ok"])
-            self.assertEqual(blocked["error"]["code"], "trusted_review_provenance_required")
+            self.assertEqual(blocked["error"]["code"], "builder_only_operation")
 
             reviewed = server.review_sqf_ncs_match(
                 match_id=match_id,
@@ -479,10 +483,10 @@ class LearningRecommendationTests(unittest.TestCase):
                 evidence_refs=[f"sqf_match:{match_id}"],
                 run_artifact="reports/sqf_match_review_run.json",
             )
-            self.assertTrue(reviewed["ok"])
+            self.assertFalse(reviewed["ok"])
             self.assertIn("data", reviewed)
             self.assertIn("audit", reviewed)
-            self.assertTrue(reviewed["recommendation_eligible"])
+            self.assertEqual(reviewed["error"]["code"], "builder_only_operation")
 
             concepts = server.search_ontology_concepts(query="workforce", concept_type="knowledge")
             self.assertTrue(concepts["ok"])
@@ -499,8 +503,13 @@ class LearningRecommendationTests(unittest.TestCase):
                 evidence_refs=["concept:workforce"],
                 run_artifact="reports/concept_review_run.json",
             )
-            self.assertTrue(concept_review["ok"])
-            self.assertEqual(concept_review["concept"]["definition_status"], "defined")
+            self.assertFalse(concept_review["ok"])
+            self.assertEqual(concept_review["error"]["code"], "builder_only_operation")
+            self.assertEqual(
+                (db_path.stat().st_size, db_path.stat().st_mtime_ns,
+                 hashlib.sha256(db_path.read_bytes()).hexdigest()),
+                before_review,
+            )
 
             evidence = server.get_concept_evidence(concept_id=concept_id)
             self.assertTrue(evidence["ok"])

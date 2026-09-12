@@ -156,7 +156,11 @@ def load_settings() -> Settings:
     # default for the public release. Set NCS_MCP_ENABLE_ADVANCED_TOOLS=1 to expose
     # them again once they are stabilized.
     advanced_tools_enabled = bool_for("NCS_MCP_ENABLE_ADVANCED_TOOLS")
-    read_only_mode = bool_for("NCS_MCP_READ_ONLY")
+    # ``NCS_MCP_READ_ONLY`` is the canonical deployment flag.  Several older
+    # report-only harnesses used the ``*_MODE`` spelling; accept it as a
+    # compatibility alias so those evaluations cannot accidentally open the
+    # production DB in writable mode.
+    read_only_mode = bool_for("NCS_MCP_READ_ONLY", "NCS_MCP_READ_ONLY_MODE")
     max_concurrent_recommendations = int_for(
         "NCS_MCP_MAX_CONCURRENT_RECOMMENDATIONS", 2, minimum=1, maximum=32
     )

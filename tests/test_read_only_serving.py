@@ -28,6 +28,108 @@ def _sha256(path: Path) -> str:
 
 
 class ReadOnlyServingTests(unittest.TestCase):
+    def test_public_and_operator_reads_preserve_snapshot_without_read_only_flag(self) -> None:
+        cases = (
+            (server.ncs_search, {"query": "HR planning", "scope": "unit"}),
+            (server.ncs_search, {}),
+            (server.ncs_unit_detail, {"unit_code": "0202020101_23v3"}),
+            (server.ncs_training, {"limit": 3}),
+            (server.ncs_analysis, {"mode": "ontology"}),
+            (server.get_quality_issues, {}),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "ncs.db"
+            create_ready_smoke_db(db_path)
+            before = (db_path.stat().st_size, db_path.stat().st_mtime_ns, _sha256(db_path))
+            before_files = sorted(Path(tmp).iterdir())
+            settings = type("SettingsWithoutReadOnlyFlag", (), {"db_path": db_path})()
+            with (
+                patch.object(server, "load_settings", return_value=settings),
+                patch.object(server, "connect", wraps=connect) as connect_mock,
+                patch.object(server, "initialize_database") as initialize_mock,
+            ):
+                for handler, params in cases:
+                    with self.subTest(tool=handler.__name__):
+                        result = handler(**params)
+                        if handler in (server.ncs_analysis, server.get_quality_issues):
+                            # The smoke snapshot has no ontology concepts or quality issues.
+                            self.assertEqual(result["error"]["code"], "NOT_FOUND")
+                        else:
+                            self.assertTrue(result["ok"], result)
+                self.assertGreaterEqual(connect_mock.call_count, len(cases))
+                for call in connect_mock.call_args_list:
+                    self.assertEqual(call.args, (db_path,))
+                    self.assertEqual(call.kwargs, {"read_only": True})
+                initialize_mock.assert_not_called()
+            self.assertEqual(
+                (db_path.stat().st_size, db_path.stat().st_mtime_ns, _sha256(db_path)), before
+            )
+            self.assertEqual(sorted(Path(tmp).iterdir()), before_files)
+
+    def test_public_reads_fail_closed_on_missing_or_unprepared_database(self) -> None:
+        cases = (
+            (server.ncs_search, {"query": "HR planning"}),
+            (server.ncs_search, {}),
+            (server.ncs_unit_detail, {"unit_code": "0202020101_23v3"}),
+            (server.ncs_training, {}),
+            (server.ncs_analysis, {"mode": "ontology"}),
+            (server.get_quality_issues, {}),
+        )
+        for prepared_file in (False, True):
+            with tempfile.TemporaryDirectory() as tmp:
+                db_path = Path(tmp) / ("unprepared.db" if prepared_file else "missing/ncs.db")
+                if prepared_file:
+                    conn = sqlite3.connect(db_path)
+                    conn.execute("CREATE TABLE unrelated (id INTEGER)")
+                    conn.close()
+                before = {
+                    path.name: (path.stat().st_size, path.stat().st_mtime_ns, _sha256(path))
+                    for path in Path(tmp).iterdir()
+                }
+                settings = type("SettingsWithoutReadOnlyFlag", (), {"db_path": db_path})()
+                with (
+                    patch.object(server, "load_settings", return_value=settings),
+                    patch.object(server, "initialize_database") as initialize_mock,
+                ):
+                    for handler, params in cases:
+                        with self.subTest(tool=handler.__name__, prepared_file=prepared_file):
+                            result = handler(**params)
+                            self.assertFalse(result["ok"])
+                            self.assertIsInstance(result["error"], dict)
+                            self.assertNotIn(str(db_path), json.dumps(result))
+                    initialize_mock.assert_not_called()
+                after = {
+                    path.name: (path.stat().st_size, path.stat().st_mtime_ns, _sha256(path))
+                    for path in Path(tmp).iterdir()
+                }
+                self.assertEqual(after, before)
+
+    def test_builder_only_operations_stop_before_database_or_api_access(self) -> None:
+        handlers = [
+            server.retry_qualification_errors,
+            server.build_training_course_ontology_links,
+            server.import_career_paths,
+            server.review_learning_module_ncs_link,
+            server.review_training_goal_concept_link,
+            server.review_task_ksa_concept_relation,
+            server.review_ontology_concept,
+            server.get_sqf_ontology_summary,
+            *(handler for name, handler in vars(server.LEGACY_OPERATION_HANDLERS).items()
+              if name != "recommend_learning_modules_by_ncs"),
+        ]
+        with (
+            patch.object(server, "load_settings", side_effect=AssertionError("settings accessed")),
+            patch.object(server, "open_db", side_effect=AssertionError("DB accessed")),
+            patch.object(server, "qualification_retry_error_units") as retry_mock,
+        ):
+            for handler in handlers:
+                with self.subTest(tool=handler.__name__):
+                    # Reject before parameter parsing, credentials, file I/O, or collector calls.
+                    result = handler()
+                    self.assertFalse(result["ok"])
+                    self.assertEqual(result["error"]["code"], "builder_only_operation")
+            retry_mock.assert_not_called()
+
     def test_connect_read_only_blocks_writes_and_preserves_database(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "ncs.db"
@@ -80,6 +182,132 @@ class ReadOnlyServingTests(unittest.TestCase):
 
         self.assertTrue(settings.read_only_mode)
 
+    def test_recommendations_are_read_only_without_serving_flag(self) -> None:
+        cases = (
+            ("recommend_training_for_task", {"query": "HR planning"}),
+            ("recommend_training_transition", {
+                "current_query": "HR planning", "target_query": "HR planning",
+            }),
+            ("plan_ncs_education_path", {
+                "current_query": "HR planning", "target_query": "HR planning",
+            }),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "ncs.db"
+            create_ready_smoke_db(db_path)
+            before = (db_path.stat().st_size, db_path.stat().st_mtime_ns, _sha256(db_path))
+            before_files = sorted(Path(tmp).iterdir())
+            with (
+                patch.dict(os.environ, {
+                    "NCS_DB_PATH": str(db_path),
+                    "NCS_MCP_READ_ONLY": "",
+                    "NCS_MCP_READ_ONLY_MODE": "",
+                    "NCS_MCP_ENABLE_ADVANCED_TOOLS": "1",
+                }),
+                patch.object(server, "connect", wraps=connect) as connect_mock,
+                patch.object(server, "initialize_database") as initialize_mock,
+            ):
+                self.assertFalse(server.load_settings().read_only_mode)
+                for tool_name, params in cases:
+                    for via_meta in (False, True):
+                        with self.subTest(tool=tool_name, via_meta=via_meta):
+                            kwargs = {**params, "save": True}
+                            result = (
+                                server.ncs_execute_tool(tool_name, kwargs)
+                                if via_meta else getattr(server, tool_name)(**kwargs)
+                            )
+                            self.assertTrue(result["ok"], result)
+                            connect_mock.assert_called_with(db_path, read_only=True)
+                self.assertEqual(connect_mock.call_count, 6)
+                initialize_mock.assert_not_called()
+            after = (db_path.stat().st_size, db_path.stat().st_mtime_ns, _sha256(db_path))
+            self.assertEqual(after, before)
+            self.assertEqual(sorted(Path(tmp).iterdir()), before_files)
+
+    def test_recommendation_connection_rejects_accidental_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "ncs.db"
+            create_ready_smoke_db(db_path)
+            with patch.dict(os.environ, {
+                "NCS_DB_PATH": str(db_path),
+                "NCS_MCP_READ_ONLY": "0",
+                "NCS_MCP_READ_ONLY_MODE": "0",
+            }):
+                with server.open_recommendation_db() as conn:
+                    self.assertEqual(conn.execute("PRAGMA query_only").fetchone()[0], 1)
+                    with self.assertRaises(sqlite3.OperationalError):
+                        conn.execute("CREATE TABLE forbidden_write (id INTEGER)")
+
+    def test_missing_recommendation_database_fails_without_creating_files(self) -> None:
+        cases = (
+            ("recommend_training_for_task", {"query": "HR planning"}),
+            ("recommend_training_transition", {
+                "current_query": "General affairs", "target_query": "HR planning",
+            }),
+            ("plan_ncs_education_path", {
+                "current_query": "General affairs", "target_query": "HR planning",
+            }),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "unprepared" / "ncs.db"
+            with (
+                patch.dict(os.environ, {
+                    "NCS_DB_PATH": str(db_path),
+                    "NCS_MCP_READ_ONLY": "0",
+                    "NCS_MCP_READ_ONLY_MODE": "0",
+                    "NCS_MCP_ENABLE_ADVANCED_TOOLS": "1",
+                }),
+                patch.object(server, "initialize_database") as initialize_mock,
+            ):
+                for tool_name, params in cases:
+                    for via_meta in (False, True):
+                        with self.subTest(tool=tool_name, via_meta=via_meta):
+                            result = (
+                                server.ncs_execute_tool(tool_name, params)
+                                if via_meta else getattr(server, tool_name)(**params)
+                            )
+                            self.assertFalse(result["ok"])
+                            self.assertEqual(result["error"]["code"], "tool_execution_failed")
+                            self.assertEqual(result["error"]["exception_type"], "OperationalError")
+                            self.assertNotIn(str(db_path), json.dumps(result))
+                initialize_mock.assert_not_called()
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+
+    def test_unprepared_recommendation_database_is_not_initialized(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "ncs.db"
+            conn = sqlite3.connect(db_path)
+            conn.execute("CREATE TABLE unrelated (id INTEGER)")
+            conn.close()
+            before = (db_path.stat().st_mtime_ns, _sha256(db_path))
+            with (
+                patch.dict(os.environ, {
+                    "NCS_DB_PATH": str(db_path),
+                    "NCS_MCP_READ_ONLY": "0",
+                    "NCS_MCP_READ_ONLY_MODE": "0",
+                }),
+                patch.object(server, "initialize_database") as initialize_mock,
+            ):
+                result = server.recommend_training_for_task(query="HR planning")
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["error"]["code"], "tool_execution_failed")
+                initialize_mock.assert_not_called()
+            self.assertEqual((db_path.stat().st_mtime_ns, _sha256(db_path)), before)
+            self.assertEqual(sorted(Path(tmp).iterdir()), [db_path])
+
+    def test_load_settings_accepts_legacy_read_only_mode_alias(self) -> None:
+        previous = os.environ.get("NCS_MCP_READ_ONLY_MODE")
+        os.environ["NCS_MCP_READ_ONLY_MODE"] = "true"
+        try:
+            with patch.dict(os.environ, {"NCS_MCP_READ_ONLY": ""}, clear=False):
+                settings = load_settings()
+            self.assertTrue(settings.read_only_mode)
+        finally:
+            if previous is None:
+                os.environ.pop("NCS_MCP_READ_ONLY_MODE", None)
+            else:
+                os.environ["NCS_MCP_READ_ONLY_MODE"] = previous
+
     def test_load_settings_bounds_recommendation_capacity(self) -> None:
         with patch.dict(
             os.environ,
@@ -103,7 +331,7 @@ class ReadOnlyServingTests(unittest.TestCase):
                 return False
 
         with (
-            patch.object(server, "open_db", return_value=DummyDb()),
+            patch.object(server, "open_recommendation_db", return_value=DummyDb()),
             patch.object(
                 server,
                 "training_recommend_for_task",
@@ -114,7 +342,7 @@ class ReadOnlyServingTests(unittest.TestCase):
         self.assertFalse(task_mock.call_args.kwargs["save"])
 
         with (
-            patch.object(server, "open_db", return_value=DummyDb()),
+            patch.object(server, "open_recommendation_db", return_value=DummyDb()),
             patch.object(
                 server,
                 "training_recommend_transition",
@@ -128,6 +356,27 @@ class ReadOnlyServingTests(unittest.TestCase):
             )
         self.assertFalse(transition_mock.call_args.kwargs["save"])
 
+    def test_public_recommendation_schemas_default_to_no_save(self) -> None:
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(SRC)
+        env["NCS_MCP_ENABLE_ADVANCED_TOOLS"] = "1"
+        script = (
+            "import asyncio, json; from ncs_mcp import server; "
+            "print(json.dumps({tool.name: {'schema': tool.inputSchema, "
+            "'description': tool.description} "
+            "for tool in asyncio.run(server.mcp.list_tools()) "
+            "if tool.name in ('recommend_training_for_task', 'recommend_training_transition')}))"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", script], cwd=ROOT, env=env,
+            capture_output=True, text=True, encoding="utf-8", check=True,
+        )
+        contracts = json.loads(completed.stdout)
+        for tool_name in ("recommend_training_for_task", "recommend_training_transition"):
+            with self.subTest(tool=tool_name):
+                self.assertIs(contracts[tool_name]["schema"]["properties"]["save"]["default"], False)
+                self.assertIn("MCP never saves results", contracts[tool_name]["description"])
+
     def test_public_education_plan_suppresses_save_request(self) -> None:
         class DummyDb:
             def __enter__(self):
@@ -137,7 +386,7 @@ class ReadOnlyServingTests(unittest.TestCase):
                 return False
 
         with (
-            patch.object(server, "open_db", return_value=DummyDb()),
+            patch.object(server, "open_recommendation_db", return_value=DummyDb()),
             patch.object(
                 server,
                 "training_recommend_transition",
@@ -186,7 +435,7 @@ class ReadOnlyServingTests(unittest.TestCase):
         for tool_name, handler_name, kwargs in cases:
             with self.subTest(tool_name=tool_name):
                 with (
-                    patch.object(server, "open_db", return_value=DummyDb()),
+                    patch.object(server, "open_recommendation_db", return_value=DummyDb()),
                     patch.object(
                         server,
                         handler_name,
@@ -259,6 +508,26 @@ class ReadOnlyServingTests(unittest.TestCase):
         self.assertTrue(surface["operator_tools_blocked_by_read_only"])
         self.assertFalse(surface["operator_tools_enabled"])
         self.assertEqual(surface["operator_tools"], [])
+
+    def test_operator_opt_in_preserves_audit_tools_but_cannot_enable_writes(self) -> None:
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(SRC)
+        env["NCS_MCP_READ_ONLY"] = "0"
+        env["NCS_MCP_READ_ONLY_MODE"] = "0"
+        env["NCS_MCP_ENABLE_OPERATOR_TOOLS"] = "1"
+        script = (
+            "import json; from ncs_mcp import server; "
+            "print(json.dumps({'surface': server.current_mcp_tool_surface(), "
+            "'review': server.review_ontology_concept(concept_id=1, review_status='candidate')}))"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", script], cwd=ROOT, env=env,
+            capture_output=True, text=True, check=True,
+        )
+        result = json.loads(completed.stdout)
+        self.assertIn("get_quality_issues", result["surface"]["operator_tools"])
+        self.assertIn("review_ontology_concept", result["surface"]["operator_tools"])
+        self.assertEqual(result["review"]["error"]["code"], "builder_only_operation")
 
     def test_http_transport_requires_explicit_remote_bind_opt_in(self) -> None:
         original_host = server.mcp.settings.host
@@ -335,7 +604,7 @@ class ReadOnlyServingTests(unittest.TestCase):
 
         with (
             patch.object(server, "load_settings", return_value=settings),
-            patch.object(server, "open_db", return_value=DummyDb()),
+            patch.object(server, "open_recommendation_db", return_value=DummyDb()),
             patch.object(
                 server,
                 "training_recommend_for_task",

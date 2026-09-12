@@ -417,6 +417,87 @@ class DeploymentSourceBoundaryTests(unittest.TestCase):
             self.assertEqual(report["summary"]["copy_error_count"], 1)
             self.assertIn("not an untracked source candidate", report["copy_errors"][0]["reason"])
 
+    def test_source_preview_export_rejects_one_sided_normalization_mirror(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            root_normalization = root / "src/ncs_mcp/search/normalization.py"
+            deploy_normalization = (
+                root / "deploy/vercel_mcp_app/src/ncs_mcp/search/normalization.py"
+            )
+            root_normalization.parent.mkdir(parents=True)
+            deploy_normalization.parent.mkdir(parents=True)
+            root_normalization.write_text("VALUE = 1\n", encoding="utf-8")
+            deploy_normalization.write_text("VALUE = 1\n", encoding="utf-8")
+            output_dir = root / "tmp" / "preview"
+            fake_manifest = {
+                "ok_for_preview_commit": False,
+                "errors": [],
+                "summary": {
+                    "tracked_source_count": 0,
+                    "tracked_blocker_count": 0,
+                    "untracked_source_candidate_count": 2,
+                    "untracked_blocker_count": 0,
+                },
+                "tracked_source_paths": [],
+                "untracked_source_candidates": [
+                    "src/ncs_mcp/search/normalization.py",
+                    "deploy/vercel_mcp_app/src/ncs_mcp/search/normalization.py",
+                ],
+            }
+            with (
+                patch.object(export_preview, "ROOT", root),
+                patch.object(export_preview, "build_manifest", return_value=fake_manifest),
+            ):
+                report = export_preview.export_preview(
+                    output_dir=output_dir,
+                    include_untracked_paths=["src/ncs_mcp/search/normalization.py"],
+                )
+
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["summary"]["copy_error_count"], 1)
+        self.assertEqual(
+            report["copy_errors"][0]["path"],
+            "deploy/vercel_mcp_app/src/ncs_mcp/search/normalization.py",
+        )
+        self.assertIn("required source mirror missing", report["copy_errors"][0]["reason"])
+
+    def test_source_preview_export_accepts_both_normalization_mirrors(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = [
+                "src/ncs_mcp/search/normalization.py",
+                "deploy/vercel_mcp_app/src/ncs_mcp/search/normalization.py",
+            ]
+            for relative_path in paths:
+                path = root / relative_path
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("VALUE = 1\n", encoding="utf-8")
+            output_dir = root / "tmp" / "preview"
+            fake_manifest = {
+                "ok_for_preview_commit": False,
+                "errors": [],
+                "summary": {
+                    "tracked_source_count": 0,
+                    "tracked_blocker_count": 0,
+                    "untracked_source_candidate_count": 2,
+                    "untracked_blocker_count": 0,
+                },
+                "tracked_source_paths": [],
+                "untracked_source_candidates": paths,
+            }
+            with (
+                patch.object(export_preview, "ROOT", root),
+                patch.object(export_preview, "build_manifest", return_value=fake_manifest),
+            ):
+                report = export_preview.export_preview(
+                    output_dir=output_dir,
+                    include_untracked_paths=paths,
+                )
+
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["summary"]["copied_file_count"], 2)
+        self.assertEqual(report["summary"]["copy_error_count"], 0)
+
     def test_source_preview_export_rejects_output_outside_tmp(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

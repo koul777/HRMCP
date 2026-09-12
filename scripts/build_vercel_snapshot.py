@@ -14,14 +14,27 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT / 'src') not in sys.path:
+    sys.path.insert(0, str(ROOT / 'src'))
+
+from ncs_mcp.builder_authorization import BuilderAuthorizationError, BuilderOperationContext
+from ncs_mcp.builder_release import package_guard, _write
 SQLITE_HEADER = b"SQLite format 3\x00"
 REPORT_SCHEMA = "ncs_vercel_snapshot_build_report_v1"
 STDIO_TAIL_BYTES = 16_384
+
+
+def _utc_timestamp(clock: Callable[[], datetime] | None = None) -> str:
+    value = clock() if clock is not None else datetime.now(timezone.utc)
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise SnapshotBuildError("clock must return a timezone-aware datetime")
+    return value.astimezone(timezone.utc).isoformat()
 
 
 class SnapshotBuildError(RuntimeError):
@@ -61,9 +74,25 @@ def _artifact(path: Path) -> dict[str, Any]:
     }
 
 
+def _validate_source_has_no_active_sqlite_sidecars(path: Path) -> None:
+    """Reject a source whose committed SQLite state may still be in a sidecar."""
+    sidecars = [
+        path.with_name(f"{path.name}{suffix}")
+        for suffix in ("-wal", "-journal")
+    ]
+    active = [candidate for candidate in sidecars if candidate.exists() or candidate.is_symlink()]
+    if active:
+        names = ", ".join(str(candidate) for candidate in active)
+        raise SnapshotBuildError(
+            "source SQLite has active transaction sidecar(s); checkpoint or close the "
+            f"database before snapshotting: {names}"
+        )
+
+
 def _source_artifact(path: Path) -> dict[str, Any]:
     if not path.is_file():
         raise SnapshotBuildError(f"source SQLite file does not exist: {path}")
+    _validate_source_has_no_active_sqlite_sidecars(path)
     with path.open("rb") as stream:
         header = stream.read(len(SQLITE_HEADER))
     if header != SQLITE_HEADER:
@@ -151,10 +180,44 @@ def build_plan(
     ]
 
 
-def _run_stage(stage: dict[str, Any]) -> dict[str, Any]:
+def _run_stage(stage: dict[str, Any], *, builder_context: BuilderOperationContext) -> dict[str, Any]:
+    """Keep mutation stages in the issuing process; argv is audit evidence only."""
+    from scripts.export_interview_serving_db import export_serving_db
+    from scripts.package_vercel_compact_snapshot import package_compact_snapshot
+
+    guard = package_guard(builder_context)
     started = time.perf_counter()
+    argv = stage['argv']
+    if stage['name'] != 'verify_archive_only':
+        try:
+            if stage['name'] == 'export_compact_snapshot':
+                result = guard.call(export_serving_db, Path(argv[argv.index('--source') + 1]),
+                                    Path(argv[argv.index('--destination') + 1]),
+                                    profile='vercel-ontology-compact', builder_context=builder_context)
+            elif stage['name'] == 'package_compact_snapshot':
+                result = guard.call(package_compact_snapshot,
+                                    Path(argv[argv.index('--database') + 1]),
+                                    Path(argv[argv.index('--archive') + 1]),
+                                    Path(argv[argv.index('--manifest') + 1]),
+                                    builder_context=builder_context)
+            else:
+                raise SnapshotBuildError('Unknown snapshot stage.')
+            returncode, message = 0, json.dumps(result, ensure_ascii=False)
+        except BuilderAuthorizationError:
+            raise
+        except Exception:
+            returncode, message = 1, 'Compact snapshot stage failed; inspect source schema and package inputs.'
+        guard.check()
+        data = message.encode('utf-8')
+        record = {'tail': data[-STDIO_TAIL_BYTES:].decode('utf-8', errors='replace'),
+                  'bytes': len(data), 'truncated': len(data) > STDIO_TAIL_BYTES}
+        return {**stage, 'execution': 'in_process',
+                'duration_ms': round((time.perf_counter() - started) * 1000, 3),
+                'returncode': returncode,
+                'stdout': record if returncode == 0 else {'tail': '', 'bytes': 0, 'truncated': False},
+                'stderr': record if returncode else {'tail': '', 'bytes': 0, 'truncated': False}}
     with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
-        completed = subprocess.run(
+        completed = guard.call(subprocess.run,
             stage["argv"],
             cwd=ROOT,
             stdin=subprocess.DEVNULL,
@@ -175,14 +238,6 @@ def _run_stage(stage: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _write_report(path: Path, report: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-
-
 def build_snapshot(
     *,
     source: Path,
@@ -192,8 +247,19 @@ def build_snapshot(
     report_path: Path,
     dry_run: bool = False,
     progress_file: Path | None = None,
+    clock: Callable[[], datetime] | None = None,
+    builder_context: BuilderOperationContext | None = None,
+    progress_callback: Callable[[dict], None] | None = None,
 ) -> dict[str, Any]:
     """Build the fixed compact snapshot pipeline and return its audit report."""
+    guard = None if dry_run else package_guard(builder_context)
+    if guard is not None:
+        guard.check(source)
+        if not source.resolve().is_relative_to(guard.version.resolve()):
+            raise BuilderAuthorizationError('Snapshot source is outside its Builder version.')
+        for path in (output_db, archive, manifest, report_path, progress_file):
+            if path is not None:
+                guard.output(path)
     source, output_db, archive, manifest, report_path = _validate_paths(
         source, output_db, archive, manifest, report_path
     )
@@ -203,24 +269,23 @@ def build_snapshot(
             raise SnapshotBuildError("progress path must be a new, distinct output")
 
     def progress(stage: str, completed: int, total: int | None = 3) -> None:
-        if progress_file is None or dry_run:
+        if dry_run:
             return
+        record = {"stage": stage, "completed": completed, "total": total, "unit": "공정 완료"}
+        if progress_callback is not None:
+            guard.call(progress_callback, record)
+        if progress_file is None:
+            return
+        guard.output(progress_file)
         progress_file.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=progress_file.parent,
-                                         prefix=".progress-", suffix=".tmp", delete=False) as stream:
-            temporary = Path(stream.name)
-            json.dump({"stage": stage, "completed": completed,
-                       "total": total, "unit": "공정 완료"}, stream, ensure_ascii=False)
-        try:
-            temporary.replace(progress_file)
-        finally:
-            temporary.unlink(missing_ok=True)
+        _write(progress_file, record, builder_context=builder_context, guard=guard)
 
-    progress("경량 DB 원본 검사 중", 0, None)
     source_record = _source_artifact(source)
+    progress("경량 DB 원본 검사 중", 0, None)
     plan = build_plan(source, output_db, archive, manifest)
     report: dict[str, Any] = {
         "schema": REPORT_SCHEMA,
+        "generated_at": _utc_timestamp(clock),
         "ok": False,
         "dry_run": dry_run,
         "source": source_record,
@@ -253,7 +318,7 @@ def build_snapshot(
     labels = ("경량 DB 생성 중", "경량 DB 압축 중", "압축 파일 검증 중")
     for index, stage in enumerate(plan):
         progress(labels[index], index)
-        stage_record = _run_stage(stage)
+        stage_record = guard.call(_run_stage, stage, builder_context=builder_context)
         report["stages"].append(stage_record)
         if stage_record["returncode"] != 0:
             report["error"] = {
@@ -300,6 +365,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="print the exact argv plan without execution or writes")
     parser.add_argument("--progress-file", type=Path, help="new atomic JSON file reporting completed build stages")
     args = parser.parse_args(argv)
+    if not args.dry_run:
+        parser.error('Snapshot mutation requires the live Windows NCS Data Builder package operation; use --dry-run for inspection.')
     try:
         report = build_snapshot(
             source=args.source,
@@ -312,12 +379,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     except (OSError, SnapshotBuildError) as exc:
         parser.error(str(exc))
-    if not args.dry_run:
-        try:
-            _write_report(_resolved_output_path(args.report), report)
-        except OSError as exc:
-            print(json.dumps({**report, "report_write_error": str(exc)}, ensure_ascii=False, indent=2))
-            return 1
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if report["ok"] else 1
 

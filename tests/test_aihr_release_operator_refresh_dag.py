@@ -26,7 +26,9 @@ from scripts.build_aihr_release_operator_refresh_dag import (  # noqa: E402
     audit_refresh_dag,
     build_refresh_dag,
     powershell_quote,
+    sha256_artifact,
     sha256_file,
+    source_hash_checks_from_payload,
 )
 
 
@@ -35,6 +37,100 @@ GENERATED_AT = "2026-07-12T05:05:00+00:00"
 
 
 class AihrReleaseOperatorRefreshDagTests(unittest.TestCase):
+    def test_embedded_source_hash_honors_cycle_safe_release_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            release_payload = {
+                "schema": "aihr_release_readiness_v1",
+                "sha256_scope": "cycle_safe_release_readiness",
+                "cycle_safe_content_sha256": "sha256:" + "0" * 64,
+                "delivery_metadata": {"generated_at": GENERATED_AT},
+                "release_ready": False,
+            }
+            cycle_safe_hash = _canonical_json_sha256(
+                {
+                    key: value
+                    for key, value in release_payload.items()
+                    if key not in {
+                        "artifact_lineage_contract",
+                        "cycle_safe_content_sha256",
+                        "cycle_safe_hash_excluded_fields",
+                        "sha256_scope",
+                    }
+                }
+            )
+            release_payload["cycle_safe_content_sha256"] = cycle_safe_hash
+            release = self._write_json(
+                root / "reports" / f"aihr_release_readiness_{STAMP}.json",
+                release_payload,
+            )
+            payload = {
+                "source_paths": {"release_readiness": release.relative_to(root).as_posix()},
+                "source_hashes": {"release_readiness": cycle_safe_hash},
+                "source_hash_scopes": {
+                    "release_readiness": "cycle_safe_release_readiness"
+                },
+            }
+
+            raw_hash = sha256_file(release)
+            check = source_hash_checks_from_payload(payload, root=root)["release_readiness"]
+
+        self.assertNotEqual(raw_hash, cycle_safe_hash)
+        self.assertEqual(check["sha256_scope"], "cycle_safe_release_readiness")
+        self.assertEqual(check["actual_sha256"], cycle_safe_hash)
+        self.assertTrue(check["hash_matches"])
+
+    def test_cycle_safe_hash_recomputes_projected_content_not_embedded_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            release_payload = {
+                "schema": "aihr_release_readiness_v1",
+                "sha256_scope": "cycle_safe_release_readiness",
+                "cycle_safe_content_sha256": "sha256:" + "a" * 64,
+                "release_ready": False,
+                "blockers": ["human_review_required"],
+            }
+            release = self._write_json(root / "reports" / "aihr_release_readiness.json", release_payload)
+            expected = sha256_artifact(release, scope="cycle_safe_release_readiness")
+            self.assertIsNotNone(expected)
+
+            # This field is deliberately excluded to make the digest non-self-referential.
+            release_payload["cycle_safe_content_sha256"] = "sha256:" + "b" * 64
+            self._write_json(release, release_payload)
+            self.assertEqual(
+                sha256_artifact(release, scope="cycle_safe_release_readiness"), expected
+            )
+            stale_declaration_check = source_hash_checks_from_payload(
+                {
+                    "source_paths": {"release_readiness": "reports/aihr_release_readiness.json"},
+                    "source_hashes": {"release_readiness": expected},
+                    "source_hash_scopes": {
+                        "release_readiness": "cycle_safe_release_readiness"
+                    },
+                },
+                root=root,
+            )["release_readiness"]
+
+            # Any projected content changes the recomputed actual hash even when
+            # the persisted digest is intentionally left stale.
+            release_payload["release_ready"] = True
+            self._write_json(release, release_payload)
+            check = source_hash_checks_from_payload(
+                {
+                    "source_paths": {"release_readiness": "reports/aihr_release_readiness.json"},
+                    "source_hashes": {"release_readiness": expected},
+                    "source_hash_scopes": {
+                        "release_readiness": "cycle_safe_release_readiness"
+                    },
+                },
+                root=root,
+            )["release_readiness"]
+
+        self.assertNotEqual(check["actual_sha256"], expected)
+        self.assertFalse(check["hash_matches"])
+        self.assertFalse(stale_declaration_check["stored_hash_matches_actual"])
+        self.assertFalse(stale_declaration_check["hash_matches"])
+
     def _write_json(self, path: Path, payload: dict[str, Any] | None = None) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
@@ -56,6 +152,11 @@ class AihrReleaseOperatorRefreshDagTests(unittest.TestCase):
         source_paths: dict[str, Path],
         extra: dict[str, Any] | None = None,
     ) -> Path:
+        source_hash_scopes = {
+            key: "cycle_safe_release_readiness"
+            for key in source_paths
+            if key == "release_readiness"
+        }
         payload = {
             "schema": schema,
             "ok": True,
@@ -64,10 +165,12 @@ class AihrReleaseOperatorRefreshDagTests(unittest.TestCase):
                 for key, value in source_paths.items()
             },
             "source_hashes": {
-                key: sha256_file(value)
+                key: sha256_artifact(value, scope=source_hash_scopes.get(key))
                 for key, value in source_paths.items()
             },
         }
+        if source_hash_scopes:
+            payload["source_hash_scopes"] = source_hash_scopes
         if extra:
             payload.update(extra)
         return self._write_json(path, payload)
@@ -101,8 +204,15 @@ class AihrReleaseOperatorRefreshDagTests(unittest.TestCase):
                 "schema": "aihr_release_readiness_v1",
                 "ok": True,
                 "agent_work_queue_path": queue.relative_to(root).as_posix(),
+                "sha256_scope": "cycle_safe_release_readiness",
+                "cycle_safe_content_sha256": "placeholder",
             },
         )
+        release_payload = json.loads(release.read_text(encoding="utf-8"))
+        release_payload["cycle_safe_content_sha256"] = sha256_artifact(
+            release, scope="cycle_safe_release_readiness"
+        )
+        self._write_json(release, release_payload)
         queue_sha = sha256_file(queue)
         queue_status_payload = build_agent_queue_status_from_file(queue, workspace=root)
         queue_status_snapshot_sha = _canonical_json_sha256(queue_status_payload)
@@ -486,6 +596,53 @@ class AihrReleaseOperatorRefreshDagTests(unittest.TestCase):
         codes = {issue["code"] for issue in audit["issues"]}
         self.assertFalse(audit["ok"])
         self.assertIn("current_artifact_hash_mismatch", codes)
+
+    def test_audit_refresh_dag_flags_stale_embedded_source_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self._fixture(root)
+            report = build_refresh_dag(
+                quality_report=paths["quality"],
+                contract=paths["contract"],
+                demo_json=paths["demo_json"],
+                demo_html=paths["demo_html"],
+                dashboard_verification=paths["dashboard"],
+                release_readiness=paths["release"],
+                agent_queue=paths["queue"],
+                queue_status=paths["queue_status"],
+                queue_run_dryrun=paths["queue_dryrun"],
+                queue_run=paths["queue_run"],
+                qualification_coverage_plan=paths["coverage_plan"],
+                qualification_retry_hygiene=paths["retry_hygiene"],
+                qualification_decision=paths["qualification"],
+                qualification_decision_audit=paths["qualification_audit"],
+                provenance_proofset_log=paths["proofset_log"],
+                transition_gap_json=paths["transition_gap_json"],
+                transition_gap_csv=paths["transition_gap_csv"],
+                provenance_decision_sheet_json=paths["decision_json"],
+                provenance_decision_sheet_csv=paths["decision_csv"],
+                provenance_decision_audit=paths["decision_audit"],
+                transition_crosswalk_json=paths["crosswalk"],
+                transition_crosswalk_csv=paths["crosswalk_csv"],
+                transition_crosswalk_audit=paths["crosswalk_audit"],
+                sprint_queue=paths["sprint"],
+                sprint_queue_audit=paths["sprint_audit"],
+                next_actions=paths["next_actions"],
+                operator_packet_integrity_audit=paths["operator_audit"],
+                handoff=paths["handoff"],
+                lineage_audit=paths["lineage"],
+                generated_at=GENERATED_AT,
+                root=root,
+                stamp=STAMP,
+            )
+            report["embedded_source_hash_checks"]["next_actions"][
+                "provenance_reconfirmation_proofset_log"
+            ]["hash_matches"] = False
+            audit = audit_refresh_dag(report, root=root)
+
+        codes = {issue["code"] for issue in audit["issues"]}
+        self.assertFalse(audit["ok"])
+        self.assertIn("embedded_source_hash_stale", codes)
 
     def test_audit_refresh_dag_flags_foreign_queue_source_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

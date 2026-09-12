@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -23,6 +22,17 @@ from ncs_mcp.smoke_data import create_ready_smoke_db
 
 
 class ChatbotReadinessBenchmarkTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from ncs_mcp import server
+
+        # The shared server may already have removed advanced tools during
+        # test collection. Give this advanced-workflow benchmark its own real
+        # registry without changing the running/default server's tool surface.
+        benchmark_mcp = server.FastMCP("chatbot-readiness-test")
+        for name in sorted(server.tool_registry.USER_MCP_TOOLS):
+            benchmark_mcp.add_tool(getattr(server, name), name=name)
+        self.enterContext(patch.object(server, "mcp", benchmark_mcp))
+
     def test_benchmark_runs_public_workflows_and_preserves_smoke_db(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "ncs-smoke.db"
@@ -127,31 +137,36 @@ class ChatbotReadinessBenchmarkTests(unittest.TestCase):
             create_ready_smoke_db(db_path)
             before = benchmark.snapshot_database(db_path)
 
-            output = io.StringIO()
-            with redirect_stdout(output):
-                exit_code = benchmark.main(
-                    [
-                        "--db",
-                        str(db_path),
-                        "--out",
-                        str(report_path),
-                        "--markdown-out",
-                        str(markdown_path),
-                        "--iterations",
-                        "1",
-                        "--warmup-iterations",
-                        "0",
-                        "--limit",
-                        "1",
-                    ]
-                )
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPTS / "benchmark_chatbot_readiness.py"),
+                    "--db",
+                    str(db_path),
+                    "--out",
+                    str(report_path),
+                    "--markdown-out",
+                    str(markdown_path),
+                    "--iterations",
+                    "1",
+                    "--warmup-iterations",
+                    "0",
+                    "--limit",
+                    "1",
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=60,
+            )
 
             after = benchmark.snapshot_database(db_path)
             stored = json.loads(report_path.read_text(encoding="utf-8"))
-            printed = json.loads(output.getvalue())
+            printed = json.loads(completed.stdout)
             markdown = markdown_path.read_text(encoding="utf-8")
 
-        self.assertEqual(exit_code, 0)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(before, after)
         self.assertEqual(stored, printed)
         self.assertTrue(stored["ok"])

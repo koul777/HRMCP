@@ -7,10 +7,9 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import sqlite3
 import sys
-import tempfile
+import uuid
 import zipfile
 from contextlib import closing
 from pathlib import Path
@@ -33,6 +32,8 @@ from ncs_mcp.vercel_snapshot import (  # noqa: E402
     MAX_SNAPSHOT_BYTES,
     inspect_compact_archive,
 )
+from ncs_mcp.builder_authorization import BuilderOperationContext  # noqa: E402
+from ncs_mcp.builder_release import package_guard  # noqa: E402
 
 
 _SQLITE_HEADER = b"SQLite format 3\x00"
@@ -167,9 +168,18 @@ def package_compact_snapshot(
     database_path: Path,
     archive_path: Path,
     manifest_path: Path,
+    *, builder_context: BuilderOperationContext | None = None,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     """Validate a raw compact DB and atomically emit the deployable pair."""
 
+    guard = None if dry_run else package_guard(builder_context)
+    if guard is not None:
+        guard.output(database_path)
+        guard.output(archive_path)
+        guard.output(manifest_path)
+    if len({path.resolve() for path in (database_path, archive_path, manifest_path)}) != 3:
+        raise ValueError('Compact database, archive and manifest paths must be distinct.')
     database_path = database_path.resolve()
     if not database_path.is_file():
         raise ValueError(f"compact SQLite does not exist: {database_path}")
@@ -197,43 +207,66 @@ def package_compact_snapshot(
         "servable_counts": servable_counts,
     }
 
+    if dry_run:
+        return {'ok': True, 'dry_run': True, 'manifest': manifest,
+                'database': str(database_path), 'archive': str(archive_path),
+                'manifest_path': str(manifest_path)}
+
+    guard.output(archive_path)
+    guard.output(manifest_path)
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    archive_fd, archive_temp_name = tempfile.mkstemp(
-        prefix=f".{archive_path.name}.", suffix=".tmp", dir=archive_path.parent
-    )
-    os.close(archive_fd)
-    archive_temp = Path(archive_temp_name)
-    manifest_fd, manifest_temp_name = tempfile.mkstemp(
-        prefix=f".{manifest_path.name}.", suffix=".tmp", dir=manifest_path.parent
-    )
-    os.close(manifest_fd)
-    manifest_temp = Path(manifest_temp_name)
+    archive_temp = archive_path.with_name('.' + archive_path.name + '.' + uuid.uuid4().hex + '.tmp')
+    manifest_temp = manifest_path.with_name('.' + manifest_path.name + '.' + uuid.uuid4().hex + '.tmp')
+    created = {}
     try:
         member = zipfile.ZipInfo(COMPACT_SNAPSHOT_NAME, date_time=(1980, 1, 1, 0, 0, 0))
         member.compress_type = zipfile.ZIP_DEFLATED
         member.external_attr = 0o600 << 16
-        with zipfile.ZipFile(
-            archive_temp,
-            "w",
+        guard.output(archive_temp)
+        with archive_temp.open('xb') as archive_stream, zipfile.ZipFile(
+            archive_stream, "w",
             compression=zipfile.ZIP_DEFLATED,
             compresslevel=6,
             allowZip64=True,
         ) as archive:
+            info = os.fstat(archive_stream.fileno())
+            created[archive_temp] = (info.st_dev, info.st_ino)
             with database_path.open("rb") as source, archive.open(
                 member, "w", force_zip64=True
             ) as destination:
-                shutil.copyfileobj(source, destination, length=1024 * 1024)
-        manifest_temp.write_text(
-            json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+                for chunk in iter(lambda: source.read(1024 * 1024), b''):
+                    guard.check(database_path, archive_temp)
+                    destination.write(chunk)
+        guard.output(manifest_temp)
+        with manifest_temp.open('x', encoding='utf-8') as stream:
+            info = os.fstat(stream.fileno())
+            created[manifest_temp] = (info.st_dev, info.st_ino)
+            stream.write(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + '\n')
+            stream.flush()
+            os.fsync(stream.fileno())
         inspect_compact_archive(archive_temp, manifest_temp)
+        guard.output(archive_path)
+        guard.check(archive_temp, manifest_temp)
+        for path, identity in created.items():
+            info = path.lstat()
+            if (info.st_dev, info.st_ino) != identity:
+                from ncs_mcp.builder_authorization import BuilderAuthorizationError
+                raise BuilderAuthorizationError('Compact package temporary identity changed.')
         os.replace(archive_temp, archive_path)
+        guard.output(manifest_path)
+        guard.check(manifest_temp)
         os.replace(manifest_temp, manifest_path)
     finally:
-        archive_temp.unlink(missing_ok=True)
-        manifest_temp.unlink(missing_ok=True)
+        guard.check()
+        for path, identity in created.items():
+            if path.exists():
+                guard.output(path)
+                info = path.lstat()
+                if (info.st_dev, info.st_ino) != identity:
+                    from ncs_mcp.builder_authorization import BuilderAuthorizationError
+                    raise BuilderAuthorizationError('Compact package temporary identity changed.')
+                path.unlink()
 
     return {
         "ok": True,
@@ -261,14 +294,17 @@ def main() -> int:
         default=CANONICAL_DEPLOY_ROOT / "api" / COMPACT_MANIFEST_NAME,
     )
     parser.add_argument("--out", type=Path)
+    parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+    if not args.dry_run:
+        parser.error('Compact packaging requires the live Windows NCS Data Builder; use --dry-run for inspection.')
 
     try:
-        result = package_compact_snapshot(args.database, args.archive, args.manifest)
+        result = package_compact_snapshot(args.database, args.archive, args.manifest, dry_run=True)
     except (OSError, sqlite3.DatabaseError, ValueError, zipfile.BadZipFile) as exc:
         result = {"ok": False, "error": str(exc)}
     rendered = json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True)
-    if args.out:
+    if args.out and not args.dry_run:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(rendered + "\n", encoding="utf-8")
     print(rendered)

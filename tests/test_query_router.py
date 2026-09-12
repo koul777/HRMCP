@@ -2,17 +2,119 @@ from __future__ import annotations
 
 import unittest
 import sys
+import json
+from contextlib import ExitStack
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from ncs_mcp.query_router import route_ncs_query, risk_flags_for_query
+from ncs_mcp.query_router import (
+    aihr_plan_route_evidence,
+    route_ncs_query,
+    risk_flags_for_query,
+)
 
 
 class NcsQueryRouterTests(unittest.TestCase):
+    def test_no_context_structure_route_keeps_v1_fingerprint_exactly(self) -> None:
+        route = route_ncs_query("워크숍 행사 준비")
+        whitespace = route_ncs_query(
+            "워크숍 행사 준비",
+            context_text="  ",
+            job_scope="\t",
+        )
+
+        self.assertEqual(route["route_fingerprint"], "03217e16805204af6cf48e1d")
+        self.assertEqual(route["route_contract"]["fingerprint_version"], "route-fingerprint-v1")
+        self.assertEqual(whitespace["route_fingerprint"], route["route_fingerprint"])
+        self.assertNotIn("job_scope", route["params"])
+        self.assertIsNone(route["classification_context"]["filter"])
+
+    def test_explicit_context_uses_v2_without_query_only_scope_inference(self) -> None:
+        plain = route_ncs_query("워크숍 행사 준비")
+        contextual = route_ncs_query(
+            "워크숍 행사 준비",
+            context_text="총무팀 내부 행사 운영 배경",
+            job_scope="총무",
+        )
+        repeated = route_ncs_query(
+            "워크숍 행사 준비",
+            context_text="  총무팀   내부 행사 운영 배경  ",
+            job_scope=" 총무 ",
+        )
+
+        self.assertEqual(contextual["route_contract"]["fingerprint_version"], "route-fingerprint-v2")
+        self.assertEqual(contextual["classification_context"]["schema"], "ncs_search_context_v1")
+        self.assertFalse(contextual["classification_context"]["policy"]["query_inference_allowed"])
+        self.assertEqual(contextual["params"]["job_scope"], "총무")
+        self.assertEqual(contextual["route_fingerprint"], repeated["route_fingerprint"])
+        self.assertNotEqual(contextual["route_fingerprint"], plain["route_fingerprint"])
+        serialized = json.dumps(contextual, ensure_ascii=False)
+        self.assertNotIn("총무팀 내부 행사 운영 배경", serialized)
+        self.assertNotIn("context_text\": \"", serialized)
+
+    def test_context_changes_are_bound_to_v2_fingerprint(self) -> None:
+        base = route_ncs_query("능력단위 검색", job_scope="총무")
+        changed_scope = route_ncs_query("능력단위 검색", job_scope="회계")
+        changed_context = route_ncs_query(
+            "능력단위 검색", job_scope="총무", context_text="별도 조직 배경"
+        )
+
+        self.assertNotEqual(base["route_fingerprint"], changed_scope["route_fingerprint"])
+        self.assertNotEqual(base["route_fingerprint"], changed_context["route_fingerprint"])
+
+    def test_aihr_plan_route_evidence_binds_explicit_scope_to_fingerprint(self) -> None:
+        unscoped = aihr_plan_route_evidence("labor management", "HR planning")
+        scoped = aihr_plan_route_evidence(
+            "labor management",
+            "HR planning",
+            major_code="02",
+            current_major_code="01",
+            target_major_code="02",
+            target_middle_code="02",
+        )
+        repeated = aihr_plan_route_evidence(
+            "labor management",
+            "HR planning",
+            major_code="02",
+            current_major_code="01",
+            target_major_code="02",
+            target_middle_code="02",
+        )
+
+        self.assertTrue(unscoped["classification_context"]["supported"])
+        self.assertFalse(unscoped["classification_context"]["provided"])
+        self.assertTrue(scoped["classification_context"]["provided"])
+        self.assertEqual(
+            scoped["classification_context"]["current_filter"],
+            {"major_code": "01"},
+        )
+        self.assertEqual(
+            scoped["classification_context"]["target_filter"],
+            {"major_code": "02", "middle_code": "02"},
+        )
+        self.assertEqual(scoped["params"]["current_major_code"], "01")
+        self.assertEqual(scoped["params"]["target_middle_code"], "02")
+        self.assertIn(
+            "current_major_code",
+            scoped["route_contract"]["provided_params"],
+        )
+        self.assertIn(
+            "target_middle_code",
+            scoped["route_contract"]["provided_params"],
+        )
+        self.assertNotEqual(scoped["route_fingerprint"], unscoped["route_fingerprint"])
+        self.assertEqual(scoped["route_fingerprint"], repeated["route_fingerprint"])
+        self.assertEqual(
+            scoped["route_contract"]["route_fingerprint"],
+            scoped["route_fingerprint"],
+        )
+
     def test_routes_education_system_transition_to_plan_tool(self) -> None:
         query = (
             "\ub178\ubb34\uad00\ub9ac\uc5d0\uc11c "
@@ -379,6 +481,124 @@ class NcsQueryRouterTests(unittest.TestCase):
         self.assertIn("current_query", route["missing_params"])
         guard = next(flag for flag in route["guard_flags"] if flag["code"] == "missing_required_params")
         self.assertIn("current_query", guard["params"])
+
+
+class PlannerMetaRouteLineageTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from ncs_mcp import server, tool_registry
+
+        self.server = server
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.stack.enter_context(patch.object(
+            server, "current_mcp_tool_surface",
+            return_value={"all_tools": sorted(tool_registry.NCS_EXECUTABLE_TOOL_NAMES)},
+        ))
+        self.stack.enter_context(patch.object(
+            server, "load_settings", return_value=SimpleNamespace(advanced_tools_enabled=True),
+        ))
+        self.stack.enter_context(patch.object(server, "open_recommendation_db"))
+        self.recommend = self.stack.enter_context(patch.object(
+            server, "training_recommend_transition", return_value={"ok": True},
+        ))
+        self.stack.enter_context(patch.object(
+            server, "training_compact_transition_response", side_effect=lambda result, **_: result,
+        ))
+        self.stack.enter_context(patch.object(
+            server, "training_compact_education_plan_response", side_effect=lambda result, **_: result,
+        ))
+        self.intent = "노무관리에서 인사기획으로 교육훈련체계 수립"
+
+    def test_scoped_discovery_and_meta_plan_share_one_fingerprint(self) -> None:
+        scopes = (
+            {"major_code": "02", "middle_code": "02", "small_code": "02", "sub_code": "01"},
+            {
+                "current_major_code": "01", "current_middle_code": "02",
+                "current_small_code": "03", "current_sub_code": "04",
+                "target_major_code": "02", "target_middle_code": "03",
+                "target_small_code": "04", "target_sub_code": "05",
+            },
+        )
+        for scope in scopes:
+            for use_general_filter in (False, True):
+                with self.subTest(scope=scope, use_general_filter=use_general_filter):
+                    discovery = self.server.ncs_discover_tools(self.intent, classification_filter=scope)
+                    route = discovery["query_route"]
+                    params = {
+                        "current_query": route["params"]["current_query"],
+                        "target_query": route["params"]["target_query"],
+                        "_route_query": self.intent,
+                        "_route_fingerprint": route["route_fingerprint"],
+                    }
+                    if use_general_filter:
+                        params["classification_filter"] = scope
+                    else:
+                        params.update(route["params"])
+                    result = self.server.ncs_execute_tool("plan_ncs_education_path", params)
+                    self.assertTrue(result["ok"], result)
+                    for observed in (
+                        result["route_fingerprint"],
+                        result["query_route"]["route_fingerprint"],
+                        result["query_route"]["route_contract"]["route_fingerprint"],
+                        result["meta_execution"]["route_fingerprint"],
+                        result["data"]["query_route"]["route_fingerprint"],
+                    ):
+                        self.assertEqual(observed, route["route_fingerprint"])
+                    for field, value in route["params"].items():
+                        if field.endswith("_code"):
+                            self.assertEqual(self.recommend.call_args.kwargs[field], value)
+                    self.assertNotIn("classification_filter", self.recommend.call_args.kwargs)
+
+    def test_unscoped_fingerprint_cannot_authorize_scoped_plan(self) -> None:
+        route = self.server.ncs_discover_tools(self.intent)["query_route"]
+        fields = ["major_code"] + [
+            f"{side}_{level}_code"
+            for side in ("current", "target") for level in ("major", "middle", "small", "sub")
+        ]
+        for field in fields:
+            with self.subTest(field=field):
+                result = self.server.ncs_execute_tool("plan_ncs_education_path", {
+                    **route["params"], field: "02", "_route_query": self.intent,
+                    "_route_fingerprint": route["route_fingerprint"],
+                })
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["error"]["code"], "route_fingerprint_mismatch")
+        result = self.server.ncs_execute_tool("plan_ncs_education_path", {
+            **route["params"], "classification_filter": {"major_code": "02"},
+            "_route_query": self.intent, "_route_fingerprint": route["route_fingerprint"],
+        })
+        self.assertEqual(result["error"]["code"], "route_fingerprint_mismatch")
+        self.recommend.assert_not_called()
+
+    def test_empty_explicit_scope_does_not_override_validated_general_filter(self) -> None:
+        route = self.server.ncs_discover_tools(
+            self.intent, classification_filter={"major_code": "02"},
+        )["query_route"]
+        result = self.server.ncs_execute_tool("plan_ncs_education_path", {
+            "classification_filter": {"major_code": "02"},
+            "target_major_code": "", "current_query": None,
+            "_route_query": self.intent, "_route_fingerprint": route["route_fingerprint"],
+        })
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self.recommend.call_args.kwargs["target_major_code"], "02")
+        self.assertEqual(self.recommend.call_args.kwargs["current_query"], route["params"]["current_query"])
+
+    def test_meta_plan_without_discovery_uses_the_facade_route(self) -> None:
+        result = self.server.ncs_execute_tool("plan_ncs_education_path", {
+            "current_query": "노무관리", "target_query": "인사기획", "major_code": "02",
+        })
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(
+            result["query_route"]["route_fingerprint"],
+            result["meta_execution"]["route_fingerprint"],
+        )
+
+    def test_planner_does_not_silently_drop_classification_name_filter(self) -> None:
+        result = self.server.ncs_discover_tools(
+            self.intent, classification_filter={"major_name": "경영·회계·사무"},
+        )
+        self.assertFalse(result["ok"])
+        self.recommend.assert_not_called()
 
 
 if __name__ == "__main__":

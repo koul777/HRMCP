@@ -2,19 +2,28 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from contextlib import closing
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
+import ncs_mcp.refresh_release_state as release_state
+from ncs_mcp.data_builder import DataBuilder
 from ncs_mcp.db import connect, initialize_database
 from ncs_mcp.ontology_refresh_builder import (
     RefreshBuilderError,
     build_ontology_refresh,
     resolve_managed_baseline,
 )
-from ncs_mcp.refresh_release_state import promote_refresh_baseline
+from ncs_mcp.refresh_release_state import (
+    RefreshReleaseStateError,
+    promote_refresh_baseline,
+    write_promotion_report,
+)
 from scripts import promote_ncs_refresh_baseline as promotion_cli
 
 
@@ -22,14 +31,22 @@ class RefreshReleaseStateTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
+        self.builder = DataBuilder(self.root)
         self.source = self._source_db("source.db")
-        self.publisher = self.root / "publisher.db"
-        self.refresh = build_ontology_refresh(
-            self.source,
-            state_dir=self.root / "builder-state",
-            prepared_output=self.publisher,
-            apply=True,
+        refresh_version = "aabbcc01"
+        self.publisher = (
+            self.builder.state / "versions" / refresh_version / "ncs.db"
         )
+        with self.builder.exclusive(
+            "build_delta", refresh_version
+        ) as builder_context:
+            self.refresh = build_ontology_refresh(
+                self.source,
+                state_dir=self.root / "builder-state",
+                prepared_output=self.publisher,
+                apply=True,
+                builder_context=builder_context,
+            )
         self.assertTrue(self.refresh["ok"])
         self.refresh_path = self._write("refresh.json", self.refresh)
         self.publish_path = self._write("publish.json", self._publish_report())
@@ -101,6 +118,12 @@ class RefreshReleaseStateTests(unittest.TestCase):
             "ok": True,
             "dry_run": False,
             "source": dict(self.refresh["publisher_source"]),
+            "targets": {
+                "archive": str(self.root / "deploy" / "api" / "snapshot.zip"),
+                "manifest": str(
+                    self.root / "deploy" / "api" / "snapshot.manifest.json"
+                ),
+            },
             "publication": {"attempted": True},
             "policy": {
                 "stage_verified_before_publish": True,
@@ -121,12 +144,16 @@ class RefreshReleaseStateTests(unittest.TestCase):
         }
 
     def _promote(self) -> dict:
-        return promote_refresh_baseline(
-            refresh_report_path=self.refresh_path,
-            publish_report_path=self.publish_path,
-            remote_verification_path=self.verify_path,
-            state_dir=self.state,
-        )
+        with self.builder.exclusive(
+            "promote_refresh_baseline"
+        ) as builder_context:
+            return promote_refresh_baseline(
+                refresh_report_path=self.refresh_path,
+                publish_report_path=self.publish_path,
+                remote_verification_path=self.verify_path,
+                state_dir=self.state,
+                builder_context=builder_context,
+            )
 
     def test_failed_publish_never_promotes(self) -> None:
         publish = self._publish_report()
@@ -164,13 +191,17 @@ class RefreshReleaseStateTests(unittest.TestCase):
         staged["failures"] = ["tools_call_ontology"]
         staged_path = self._write("staged-failed.json", staged)
 
-        report = promote_refresh_baseline(
-            refresh_report_path=self.refresh_path,
-            publish_report_path=self.publish_path,
-            staged_verification_path=staged_path,
-            remote_verification_path=self.verify_path,
-            state_dir=self.state,
-        )
+        with self.builder.exclusive(
+            "promote_refresh_baseline"
+        ) as builder_context:
+            report = promote_refresh_baseline(
+                refresh_report_path=self.refresh_path,
+                publish_report_path=self.publish_path,
+                staged_verification_path=staged_path,
+                remote_verification_path=self.verify_path,
+                state_dir=self.state,
+                builder_context=builder_context,
+            )
 
         self.assertFalse(report["ok"])
         self.assertIn(
@@ -221,6 +252,15 @@ class RefreshReleaseStateTests(unittest.TestCase):
         self.assertFalse(Path(pointer["baseline"]["path"]).is_absolute())
         lineage = baseline.with_suffix(baseline.suffix + ".refresh.json")
         self.assertTrue(lineage.is_file())
+        lineage_payload = json.loads(lineage.read_text(encoding="utf-8"))
+        self.assertEqual(
+            lineage_payload["builder_operation"]["action"],
+            "promote_refresh_baseline",
+        )
+        self.assertEqual(
+            report["builder_operation"]["operation_id"],
+            lineage_payload["builder_operation"]["operation_id"],
+        )
         self.assertFalse(report["safety"]["automatic_deletion"])
 
     def test_success_records_staged_and_production_verification_lineage(self) -> None:
@@ -229,13 +269,17 @@ class RefreshReleaseStateTests(unittest.TestCase):
             self._verification_report("https://staged.example/api/mcp"),
         )
 
-        report = promote_refresh_baseline(
-            refresh_report_path=self.refresh_path,
-            publish_report_path=self.publish_path,
-            staged_verification_path=staged_path,
-            remote_verification_path=self.verify_path,
-            state_dir=self.state,
-        )
+        with self.builder.exclusive(
+            "promote_refresh_baseline"
+        ) as builder_context:
+            report = promote_refresh_baseline(
+                refresh_report_path=self.refresh_path,
+                publish_report_path=self.publish_path,
+                staged_verification_path=staged_path,
+                remote_verification_path=self.verify_path,
+                state_dir=self.state,
+                builder_context=builder_context,
+            )
 
         self.assertTrue(report["ok"])
         self.assertEqual(
@@ -272,13 +316,18 @@ class RefreshReleaseStateTests(unittest.TestCase):
         promotion = self._promote()
         self.assertTrue(promotion["ok"])
 
-        report = build_ontology_refresh(
-            self.source,
-            state_dir=self.state,
-            apply=True,
-            full_rebuild_change_ratio_threshold=1.0,
-            per_table_change_ratio_threshold=1.0,
-        )
+        version = "aabbcc02"
+        prepared_output = self.builder.state / "versions" / version / "ncs.db"
+        with self.builder.exclusive("build_delta", version) as builder_context:
+            report = build_ontology_refresh(
+                self.source,
+                state_dir=self.state,
+                prepared_output=prepared_output,
+                apply=True,
+                full_rebuild_change_ratio_threshold=1.0,
+                per_table_change_ratio_threshold=1.0,
+                builder_context=builder_context,
+            )
 
         self.assertEqual(report["selected_strategy"], "no_rebuild")
         self.assertEqual(report["status"], "completed")
@@ -298,17 +347,22 @@ class RefreshReleaseStateTests(unittest.TestCase):
 
         self.assertEqual(resolve_managed_baseline(legacy_state), legacy)
 
-        report = build_ontology_refresh(
-            self.source,
-            state_dir=legacy_state,
-            apply=True,
-            full_rebuild_change_ratio_threshold=1.0,
-            per_table_change_ratio_threshold=1.0,
-        )
+        version = "aabbcc03"
+        prepared_output = self.builder.state / "versions" / version / "ncs.db"
+        with self.builder.exclusive("build_delta", version) as builder_context:
+            report = build_ontology_refresh(
+                self.source,
+                state_dir=legacy_state,
+                prepared_output=prepared_output,
+                apply=True,
+                full_rebuild_change_ratio_threshold=1.0,
+                per_table_change_ratio_threshold=1.0,
+                builder_context=builder_context,
+            )
         self.assertEqual(report["selected_strategy"], "no_rebuild")
         self.assertEqual(report["publisher_source"]["path"], str(legacy.resolve()))
 
-    def test_promotion_cli_writes_machine_readable_report(self) -> None:
+    def test_promotion_cli_is_retired_with_machine_readable_auth_error(self) -> None:
         out = self.root / "promotion-report.json"
         staged = self._write(
             "staged-cli.json",
@@ -332,13 +386,289 @@ class RefreshReleaseStateTests(unittest.TestCase):
                 ]
             )
 
-        self.assertEqual(return_code, 0)
+        self.assertEqual(return_code, 2)
         payload = json.loads(out.read_text(encoding="utf-8"))
-        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["ok"])
         self.assertEqual(
             payload["schema"],
             "ncs_ontology_refresh_baseline_promotion_report_v1",
         )
+        self.assertEqual(
+            payload["blockers"][0]["code"], "builder_authorization_required"
+        )
+        self.assertFalse((self.state / "current.json").exists())
+
+    def test_valid_promotion_rejects_missing_and_forged_builder_context(self) -> None:
+        for forged in (None, False, True, {}, {"action": "promote_refresh_baseline"}):
+            with self.subTest(forged=forged):
+                report = promote_refresh_baseline(
+                    refresh_report_path=self.refresh_path,
+                    publish_report_path=self.publish_path,
+                    remote_verification_path=self.verify_path,
+                    state_dir=self.state,
+                    builder_context=forged,  # type: ignore[arg-type]
+                )
+                self.assertFalse(report["ok"])
+                self.assertEqual(
+                    report["blockers"][0]["code"],
+                    "builder_authorization_required",
+                )
+                self.assertFalse((self.state / "current.json").exists())
+                self.assertFalse((self.state / "baselines").exists())
+
+    def test_invalid_evidence_remains_report_only_without_builder_context(self) -> None:
+        publish = self._publish_report()
+        publish["ok"] = False
+        publish_path = self._write("publish-invalid-report-only.json", publish)
+
+        report = promote_refresh_baseline(
+            refresh_report_path=self.refresh_path,
+            publish_report_path=publish_path,
+            remote_verification_path=self.verify_path,
+            state_dir=self.state,
+        )
+
+        self.assertFalse(report["ok"])
+        self.assertIn(
+            "publish_not_successful_non_dry",
+            {item["code"] for item in report["blockers"]},
+        )
+        self.assertNotIn(
+            "builder_authorization_required",
+            {item["code"] for item in report["blockers"]},
+        )
+        self.assertFalse(self.state.exists())
+
+    def test_promotion_context_binds_target_and_evidence_to_builder_root(self) -> None:
+        unrelated_builder = DataBuilder(self.root / "unrelated")
+        with unrelated_builder.exclusive(
+            "promote_refresh_baseline"
+        ) as builder_context:
+            report = promote_refresh_baseline(
+                refresh_report_path=self.refresh_path,
+                publish_report_path=self.publish_path,
+                remote_verification_path=self.verify_path,
+                state_dir=self.state,
+                builder_context=builder_context,
+            )
+
+        self.assertFalse(report["ok"])
+        self.assertEqual(
+            report["blockers"][0]["code"], "builder_authorization_required"
+        )
+        self.assertFalse((self.state / "current.json").exists())
+
+    def test_promotion_rejects_mismatched_publisher_builder_lineage(self) -> None:
+        publish = self._publish_report()
+        publish["lineage"] = {
+            "builder_operation": {
+                "schema": "ncs_data_builder_operation_v1",
+                "owner": "windows_ncs_data_builder",
+                "action": "publish_snapshot",
+                "root": str((self.root / "other-root").resolve()),
+            }
+        }
+        publish_path = self._write("publish-wrong-builder-root.json", publish)
+
+        with self.builder.exclusive(
+            "promote_refresh_baseline"
+        ) as builder_context:
+            report = promote_refresh_baseline(
+                refresh_report_path=self.refresh_path,
+                publish_report_path=publish_path,
+                remote_verification_path=self.verify_path,
+                state_dir=self.state,
+                builder_context=builder_context,
+            )
+
+        self.assertFalse(report["ok"])
+        self.assertEqual(
+            report["blockers"][0]["code"], "builder_authorization_required"
+        )
+        self.assertFalse((self.state / "current.json").exists())
+
+    def test_promotion_lease_is_rechecked_before_lineage_and_pointer_writes(self) -> None:
+        real_copy = release_state._copy_exact_immutable
+
+        with self.builder.exclusive(
+            "promote_refresh_baseline"
+        ) as builder_context:
+            def copy_then_expire(
+                source: Path,
+                target: Path,
+                expected: dict,
+                *,
+                mutation_guard,
+            ) -> dict:
+                artifact = real_copy(
+                    source,
+                    target,
+                    expected,
+                    mutation_guard=mutation_guard,
+                )
+                lock = self.builder.state / "operation.lock"
+                payload = json.loads(lock.read_text(encoding="utf-8"))
+                payload["operation_id"] = "expired-before-pointer"
+                lock.write_text(json.dumps(payload), encoding="utf-8")
+                return artifact
+
+            with patch(
+                "ncs_mcp.refresh_release_state._copy_exact_immutable",
+                side_effect=copy_then_expire,
+            ):
+                report = promote_refresh_baseline(
+                    refresh_report_path=self.refresh_path,
+                    publish_report_path=self.publish_path,
+                    remote_verification_path=self.verify_path,
+                    state_dir=self.state,
+                    builder_context=builder_context,
+                )
+
+        self.assertFalse(report["ok"])
+        self.assertEqual(
+            report["blockers"][0]["code"], "builder_authorization_required"
+        )
+        self.assertFalse((self.state / "current.json").exists())
+
+    def test_promotion_report_rejects_evidence_publisher_and_sidecar_paths(self) -> None:
+        report = promote_refresh_baseline(
+            refresh_report_path=self.refresh_path,
+            publish_report_path=self.publish_path,
+            remote_verification_path=self.verify_path,
+            state_dir=self.state,
+        )
+        self.assertEqual(
+            report["blockers"][0]["code"], "builder_authorization_required"
+        )
+
+        refresh_before = self.refresh_path.read_bytes()
+        with self.assertRaisesRegex(
+            RefreshReleaseStateError, "protected artifact"
+        ):
+            write_promotion_report(self.refresh_path, report)
+        self.assertEqual(self.refresh_path.read_bytes(), refresh_before)
+
+        publisher_before = self.publisher.read_bytes()
+        with self.assertRaisesRegex(
+            RefreshReleaseStateError, "protected artifact"
+        ):
+            write_promotion_report(self.publisher, report)
+        self.assertEqual(self.publisher.read_bytes(), publisher_before)
+
+        sidecar = self.publisher.with_name(self.publisher.name + "-wal")
+        with self.assertRaisesRegex(
+            RefreshReleaseStateError, "protected artifact"
+        ):
+            write_promotion_report(sidecar, report)
+        self.assertFalse(sidecar.exists())
+
+        archive = Path(self._publish_report()["targets"]["archive"])
+        with self.assertRaisesRegex(
+            RefreshReleaseStateError, "protected artifact"
+        ):
+            write_promotion_report(archive, report)
+        self.assertFalse(archive.exists())
+
+        baseline_report = self.state / "baselines" / "report.json"
+        with self.assertRaisesRegex(
+            RefreshReleaseStateError, "protected directory"
+        ):
+            write_promotion_report(baseline_report, report)
+        self.assertFalse(self.state.exists())
+
+    def test_authorization_blocked_cli_does_not_write_managed_pointer(self) -> None:
+        out = self.state / "current.json"
+        with redirect_stdout(io.StringIO()):
+            return_code = promotion_cli.main(
+                [
+                    "--refresh-report",
+                    str(self.refresh_path),
+                    "--publish-report",
+                    str(self.publish_path),
+                    "--remote-verification",
+                    str(self.verify_path),
+                    "--state-dir",
+                    str(self.state),
+                    "--out",
+                    str(out),
+                ]
+            )
+
+        self.assertEqual(return_code, 2)
+        self.assertFalse(out.exists())
+        self.assertFalse(self.state.exists())
+
+    def test_managed_baselines_reparse_escape_is_blocked(self) -> None:
+        self.state.mkdir(parents=True)
+        with tempfile.TemporaryDirectory() as external_dir:
+            external = Path(external_dir)
+            baselines = self.state / "baselines"
+            if os.name == "nt":
+                created = subprocess.run(
+                    ["cmd", "/c", "mklink", "/J", str(baselines), str(external)],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if created.returncode != 0:
+                    self.skipTest("directory junction unavailable")
+            else:
+                os.symlink(external, baselines, target_is_directory=True)
+
+            with self.builder.exclusive(
+                "promote_refresh_baseline"
+            ) as builder_context:
+                report = promote_refresh_baseline(
+                    refresh_report_path=self.refresh_path,
+                    publish_report_path=self.publish_path,
+                    remote_verification_path=self.verify_path,
+                    state_dir=self.state,
+                    builder_context=builder_context,
+                )
+
+            self.assertFalse(report["ok"])
+            self.assertIn(
+                "baselines_dir_invalid",
+                {item["code"] for item in report["blockers"]},
+            )
+            self.assertEqual(list(external.iterdir()), [])
+            self.assertFalse((self.state / "current.json").exists())
+
+    def test_expired_promotion_lease_after_copy_performs_no_baseline_link(self) -> None:
+        real_copyfile = release_state.shutil.copyfile
+
+        with self.builder.exclusive(
+            "promote_refresh_baseline"
+        ) as builder_context:
+            def copy_then_expire(source: object, target: object) -> object:
+                result = real_copyfile(source, target)
+                lock = self.builder.state / "operation.lock"
+                payload = json.loads(lock.read_text(encoding="utf-8"))
+                payload["operation_id"] = "expired-before-baseline-link"
+                lock.write_text(json.dumps(payload), encoding="utf-8")
+                return result
+
+            with patch.object(
+                release_state.shutil,
+                "copyfile",
+                side_effect=copy_then_expire,
+            ):
+                report = promote_refresh_baseline(
+                    refresh_report_path=self.refresh_path,
+                    publish_report_path=self.publish_path,
+                    remote_verification_path=self.verify_path,
+                    state_dir=self.state,
+                    builder_context=builder_context,
+                )
+
+        self.assertFalse(report["ok"])
+        self.assertEqual(
+            report["blockers"][0]["code"], "builder_authorization_required"
+        )
+        baselines = self.state / "baselines"
+        self.assertFalse(any(path.suffix == ".db" for path in baselines.iterdir()))
+        self.assertFalse(any(".incoming." in path.name for path in baselines.iterdir()))
+        self.assertFalse((self.state / "current.json").exists())
 
 
 if __name__ == "__main__":

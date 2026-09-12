@@ -15,14 +15,23 @@ import os
 import shutil
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
 from scripts import build_vercel_snapshot as builder  # noqa: E402
+from ncs_mcp.builder_authorization import (  # noqa: E402
+    BuilderAuthorizationError,
+    BuilderOperationContext,
+    require_builder_context,
+)
 
 
 DEFAULT_DEPLOY_ROOT = ROOT / "deploy" / "vercel_mcp_app"
@@ -33,6 +42,66 @@ REPORT_SCHEMA = "ncs_vercel_snapshot_publish_report_v1"
 
 class SnapshotPublishError(RuntimeError):
     """Raised when the snapshot pair cannot be published safely."""
+
+
+class LegacySnapshotPublisherRetired(SnapshotPublishError):
+    """Raised when the removed one-off mutation path is requested."""
+
+
+def _require_builder_path(
+    builder_context: BuilderOperationContext,
+    path: Path,
+    *,
+    label: str,
+) -> Path:
+    """Bind a legacy publication path to the live Builder root."""
+
+    resolved = path.expanduser().resolve(strict=False)
+    try:
+        relative = resolved.relative_to(Path(builder_context.root))
+    except ValueError as exc:
+        raise BuilderAuthorizationError(
+            f"{label} is outside the authorized Builder root."
+        ) from exc
+    if not relative.parts:
+        raise BuilderAuthorizationError(
+            f"{label} must be below the authorized Builder root."
+        )
+    return resolved
+
+
+def _authorize_publication(
+    builder_context: BuilderOperationContext | None,
+    *,
+    source: Path,
+    deploy_root: Path,
+) -> BuilderOperationContext:
+    """Validate a live capability and bind source/deploy paths to its root."""
+
+    context = require_builder_context(
+        builder_context,
+        action="publish_snapshot",
+    )
+    resolved_source = _require_builder_path(context, source, label="snapshot source")
+    _require_builder_path(context, deploy_root, label="deploy root")
+    if context.version is not None:
+        require_builder_context(
+            context,
+            action="publish_snapshot",
+            version_dir=resolved_source.parent,
+        )
+        if resolved_source.name != "ncs.db":
+            raise BuilderAuthorizationError(
+                "A version-bound snapshot source must be the Builder version ncs.db."
+            )
+    return context
+
+
+def _utc_timestamp(clock: Callable[[], datetime] | None = None) -> str:
+    value = clock() if clock is not None else datetime.now(timezone.utc)
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise SnapshotPublishError("clock must return a timezone-aware datetime")
+    return value.astimezone(timezone.utc).isoformat()
 
 
 def _absolute_path(path: Path) -> Path:
@@ -82,6 +151,78 @@ def _require_contained(root: Path, candidate: Path, *, label: str) -> Path:
     return absolute_candidate
 
 
+def _paths_collide(left: Path, right: Path) -> bool:
+    if left.expanduser().resolve(strict=False) == right.expanduser().resolve(
+        strict=False
+    ):
+        return True
+    try:
+        return left.exists() and right.exists() and os.path.samefile(left, right)
+    except OSError:
+        return False
+
+
+def _sqlite_sidecar_paths(database: Path) -> tuple[Path, ...]:
+    return tuple(
+        database.with_name(database.name + suffix)
+        for suffix in ("-wal", "-shm", "-journal")
+    )
+
+
+def _validate_report_destination(
+    report_path: Path,
+    *,
+    protected_files: Sequence[Path],
+    protected_dirs: Sequence[Path],
+) -> Path:
+    supplied = report_path.expanduser()
+    resolved = supplied.resolve(strict=False)
+    if supplied.is_symlink() or (resolved.exists() and not resolved.is_file()):
+        raise SnapshotPublishError(
+            f"report path must be a regular, non-symlink file path: {resolved}"
+        )
+    for protected in protected_files:
+        if _paths_collide(supplied, protected):
+            raise SnapshotPublishError(
+                f"report path collides with protected artifact: {protected}"
+            )
+    for protected_dir in protected_dirs:
+        canonical_dir = protected_dir.expanduser().resolve(strict=False)
+        try:
+            resolved.relative_to(canonical_dir)
+        except ValueError:
+            continue
+        raise SnapshotPublishError(
+            f"report path must be outside deploy root/protected directory: {canonical_dir}"
+        )
+    return resolved
+
+
+def _validate_report_from_publish_report(
+    path: Path, report: dict[str, Any]
+) -> Path:
+    protected_files: list[Path] = []
+    source = report.get("source") or {}
+    if isinstance(source, dict) and source.get("path"):
+        source_path = Path(str(source["path"]))
+        protected_files.extend([source_path, *_sqlite_sidecar_paths(source_path)])
+    targets = report.get("targets") or {}
+    if isinstance(targets, dict):
+        protected_files.extend(
+            Path(str(targets[name]))
+            for name in ("archive", "manifest")
+            if targets.get(name)
+        )
+    protected_dirs = []
+    if report.get("deploy_root"):
+        protected_dirs.append(Path(str(report["deploy_root"])))
+    return _validate_report_destination(
+        path,
+        protected_files=protected_files,
+        protected_dirs=protected_dirs,
+    )
+
+
 def _validate_paths(
     source: Path,
     deploy_root: Path,
@@ -92,6 +233,13 @@ def _validate_paths(
         raise SnapshotPublishError(
             f"source must be a regular, non-symlink SQLite file: {resolved_source}"
         )
+    try:
+        # Reject before any build, source hash, or publication state can be
+        # observed.  A WAL/journal can contain committed data absent from the
+        # main database file.
+        builder._validate_source_has_no_active_sqlite_sidecars(resolved_source)
+    except builder.SnapshotBuildError as exc:
+        raise SnapshotPublishError(str(exc)) from exc
 
     if deploy_root.exists() and (deploy_root.is_symlink() or not deploy_root.is_dir()):
         raise SnapshotPublishError(
@@ -117,21 +265,16 @@ def _validate_paths(
 
     resolved_report: Path | None = None
     if report_path is not None:
-        resolved_report = report_path.expanduser().resolve(strict=False)
-        if resolved_report == resolved_source:
-            raise SnapshotPublishError("report path must not be the source database")
-        try:
-            resolved_report.relative_to(absolute_root.resolve(strict=False))
-        except ValueError:
-            pass
-        else:
-            raise SnapshotPublishError(
-                "report path must be outside deploy root; only the snapshot pair may be published"
-            )
-        if resolved_report.is_symlink() or (
-            resolved_report.exists() and not resolved_report.is_file()
-        ):
-            raise SnapshotPublishError(f"report path must be a regular file path: {resolved_report}")
+        resolved_report = _validate_report_destination(
+            report_path,
+            protected_files=[
+                resolved_source,
+                *_sqlite_sidecar_paths(resolved_source),
+                archive,
+                manifest,
+            ],
+            protected_dirs=[absolute_root],
+        )
     return resolved_source, absolute_root, archive, manifest, resolved_report
 
 
@@ -167,10 +310,19 @@ def _reserve_temp_path(directory: Path, *, prefix: str) -> Path:
     return Path(raw_path)
 
 
-def _copy_verified(source: Path, target_dir: Path, *, prefix: str) -> Path:
+def _copy_verified(
+    source: Path,
+    target_dir: Path,
+    *,
+    prefix: str,
+    mutation_guard: Callable[[], None],
+) -> Path:
+    mutation_guard()
     incoming = _reserve_temp_path(target_dir, prefix=prefix)
     try:
+        mutation_guard()
         shutil.copyfile(source, incoming)
+        mutation_guard()
         source_record = _artifact(source)
         incoming_record = _artifact(incoming)
         if (
@@ -184,6 +336,52 @@ def _copy_verified(source: Path, target_dir: Path, *, prefix: str) -> Path:
         raise
 
 
+def _guard_publication_targets(
+    builder_context: BuilderOperationContext | None,
+    *,
+    source: Path,
+    deploy_root: Path,
+    target_archive: Path,
+    target_manifest: Path,
+) -> None:
+    _authorize_publication(
+        builder_context,
+        source=source,
+        deploy_root=deploy_root,
+    )
+    canonical_root = deploy_root.expanduser().resolve(strict=False)
+    canonical_api = (deploy_root / "api").expanduser().resolve(strict=False)
+    try:
+        api_relative = canonical_api.relative_to(canonical_root)
+    except ValueError as exc:
+        raise BuilderAuthorizationError(
+            "Deploy api directory escaped the authorized deploy root."
+        ) from exc
+    if api_relative.parts != ("api",):
+        raise BuilderAuthorizationError(
+            "Deploy api directory is not the canonical api child."
+        )
+    for target, expected_name in (
+        (target_archive, ARCHIVE_NAME),
+        (target_manifest, MANIFEST_NAME),
+    ):
+        if target.is_symlink():
+            raise BuilderAuthorizationError(
+                f"Snapshot target became a symlink: {target}"
+            )
+        resolved_target = target.expanduser().resolve(strict=False)
+        try:
+            target_relative = resolved_target.relative_to(canonical_api)
+        except ValueError as exc:
+            raise BuilderAuthorizationError(
+                f"Snapshot target escaped its canonical destination: {target}"
+            ) from exc
+        if target_relative.parts != (expected_name,):
+            raise BuilderAuthorizationError(
+                f"Snapshot target escaped its canonical destination: {target}"
+            )
+
+
 def _publish_pair(
     *,
     staged_archive: Path,
@@ -191,10 +389,25 @@ def _publish_pair(
     target_archive: Path,
     target_manifest: Path,
     expected_old: dict[str, Any],
+    source: Path,
+    deploy_root: Path,
+    builder_context: BuilderOperationContext | None,
 ) -> dict[str, Any]:
     """Replace a verified pair, restoring the complete old pair on failure."""
+    def mutation_guard() -> None:
+        _guard_publication_targets(
+            builder_context,
+            source=source,
+            deploy_root=deploy_root,
+            target_archive=target_archive,
+            target_manifest=target_manifest,
+        )
+
+    mutation_guard()
     target_dir = target_archive.parent
+    mutation_guard()
     target_dir.mkdir(parents=True, exist_ok=True)
+    mutation_guard()
     if target_manifest.parent != target_dir:
         raise SnapshotPublishError("snapshot targets must share one publication directory")
 
@@ -204,32 +417,44 @@ def _publish_pair(
             "deploy artifacts changed while the snapshot was building; refusing publication"
         )
 
-    incoming = {
-        target_archive: _copy_verified(
-            staged_archive, target_dir, prefix=f".{ARCHIVE_NAME}.incoming."
-        ),
-        target_manifest: _copy_verified(
-            staged_manifest, target_dir, prefix=f".{MANIFEST_NAME}.incoming."
-        ),
-    }
+    incoming: dict[Path, Path] = {}
     backups: dict[Path, Path] = {}
     moved_old: list[Path] = []
     published: list[Path] = []
     rollback_errors: list[str] = []
-    publication_ok = False
     try:
+        incoming[target_archive] = _copy_verified(
+            staged_archive,
+            target_dir,
+            prefix=f".{ARCHIVE_NAME}.incoming.",
+            mutation_guard=mutation_guard,
+        )
+        incoming[target_manifest] = _copy_verified(
+            staged_manifest,
+            target_dir,
+            prefix=f".{MANIFEST_NAME}.incoming.",
+            mutation_guard=mutation_guard,
+        )
         for target in (target_archive, target_manifest):
             if current_old["archive" if target == target_archive else "manifest"] is None:
                 continue
+            mutation_guard()
             backup = _reserve_temp_path(target_dir, prefix=f".{target.name}.backup.")
-            backup.unlink()
+            try:
+                mutation_guard()
+                backup.unlink()
+            except Exception:
+                backup.unlink(missing_ok=True)
+                raise
             backups[target] = backup
+            mutation_guard()
             os.replace(target, backup)
             moved_old.append(target)
 
         # The manifest is the commit marker: consumers verify it against the
         # archive, so it is replaced only after the archive is in place.
         for target in (target_archive, target_manifest):
+            mutation_guard()
             os.replace(incoming[target], target)
             published.append(target)
 
@@ -243,22 +468,33 @@ def _publish_pair(
         }
         if not _same_artifacts(staged_records, published_records):
             raise SnapshotPublishError("published snapshot hashes differ from verified staging")
-        publication_ok = True
+        mutation_guard()
+        for backup in backups.values():
+            mutation_guard()
+            backup.unlink(missing_ok=True)
+        mutation_guard()
         return {
             "ok": True,
             "rollback_performed": False,
             "rollback_ok": None,
             "published_artifacts": published_records,
         }
+    except BuilderAuthorizationError:
+        # Once the lease or canonical target binding is lost, do not perform a
+        # further protected mutation. Incoming temps remain safe to clean in
+        # the finally block; completed immutable backups remain for recovery.
+        raise
     except Exception as exc:
         for target in reversed(published):
             try:
+                mutation_guard()
                 target.unlink(missing_ok=True)
             except OSError as rollback_exc:
                 rollback_errors.append(f"remove {target}: {rollback_exc}")
         for target in reversed(moved_old):
             backup = backups[target]
             try:
+                mutation_guard()
                 os.replace(backup, target)
             except OSError as rollback_exc:
                 rollback_errors.append(f"restore {target}: {rollback_exc}")
@@ -272,9 +508,6 @@ def _publish_pair(
     finally:
         for path in incoming.values():
             path.unlink(missing_ok=True)
-        if publication_ok:
-            for path in backups.values():
-                path.unlink(missing_ok=True)
 
 
 def _source_after_build(source: Path, expected: dict[str, Any]) -> dict[str, Any]:
@@ -290,8 +523,21 @@ def publish_snapshot(
     deploy_root: Path = DEFAULT_DEPLOY_ROOT,
     report_path: Path | None = None,
     dry_run: bool = False,
+    clock: Callable[[], datetime] | None = None,
+    builder_context: BuilderOperationContext | None = None,
 ) -> dict[str, Any]:
-    """Build and publish one canonical DB, returning complete audit evidence."""
+    """Inspect a legacy publication plan without providing a mutation path.
+
+    Non-dry publication was retired when package and deploy ownership moved to
+    the version-bound :class:`DataBuilder` workflow.  Keep dry-run support for
+    diagnostics, but fail before inspecting or staging any mutation request.
+    """
+    if not dry_run:
+        raise LegacySnapshotPublisherRetired(
+            "Legacy snapshot publication is retired; use the version-bound "
+            "DataBuilder package and deploy actions."
+        )
+    authorized_context = None
     source, deploy_root, target_archive, target_manifest, resolved_report = _validate_paths(
         source, deploy_root, report_path
     )
@@ -322,6 +568,7 @@ def publish_snapshot(
                 manifest=staged_manifest,
                 report_path=stage_report_path,
                 dry_run=dry_run,
+                clock=clock,
             )
         except (OSError, builder.SnapshotBuildError) as exc:
             build_report = {
@@ -335,6 +582,7 @@ def publish_snapshot(
             }
         report: dict[str, Any] = {
             "schema": REPORT_SCHEMA,
+            "generated_at": _utc_timestamp(clock),
             "ok": False,
             "dry_run": dry_run,
             "source": build_report.get("source"),
@@ -350,6 +598,17 @@ def publish_snapshot(
             "would_replace_old_artifacts": pair_state == "complete",
             "published_artifacts": {},
             "build": build_report,
+            "lineage": {
+                "build_generated_at": build_report.get("generated_at"),
+                "source": build_report.get("source"),
+                "archive": None,
+                "manifest": None,
+                "builder_operation": (
+                    authorized_context.lineage()
+                    if authorized_context is not None
+                    else None
+                ),
+            },
             "publication": {
                 "attempted": False,
                 "rollback_performed": False,
@@ -397,12 +656,22 @@ def publish_snapshot(
                         f"builder {name} evidence does not match staged artifact"
                     )
             report["publication"]["attempted"] = True
+            # Recheck the live lease and path bindings immediately before the
+            # only deploy-root mutation boundary.
+            _authorize_publication(
+                authorized_context,
+                source=source,
+                deploy_root=deploy_root,
+            )
             publication = _publish_pair(
                 staged_archive=staged_archive,
                 staged_manifest=staged_manifest,
                 target_archive=target_archive,
                 target_manifest=target_manifest,
                 expected_old=old_artifacts,
+                source=source,
+                deploy_root=deploy_root,
+                builder_context=authorized_context,
             )
         except (OSError, builder.SnapshotBuildError, SnapshotPublishError) as exc:
             message = str(exc)
@@ -421,12 +690,17 @@ def publish_snapshot(
             "rollback_ok": publication["rollback_ok"],
         }
         report["published_artifacts"] = publication["published_artifacts"]
+        report["lineage"].update(
+            archive=report["published_artifacts"]["archive"],
+            manifest=report["published_artifacts"]["manifest"],
+        )
         report["old_artifacts_replaced"] = pair_state == "complete"
         report["ok"] = True
         return report
 
 
 def _write_report(path: Path, report: dict[str, Any]) -> None:
+    path = _validate_report_from_publish_report(path, report)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = _reserve_temp_path(path.parent, prefix=f".{path.name}.")
     try:
@@ -460,9 +734,34 @@ def main(argv: Sequence[str] | None = None) -> int:
             report_path=args.report,
             dry_run=args.dry_run,
         )
+    except BuilderAuthorizationError as exc:
+        report = {
+            "schema": REPORT_SCHEMA,
+            "generated_at": _utc_timestamp(),
+            "ok": False,
+            "dry_run": args.dry_run,
+            "error": {
+                "code": "builder_authorization_required",
+                "stage": "authorization",
+                "message": str(exc),
+            },
+        }
+    except LegacySnapshotPublisherRetired as exc:
+        report = {
+            "schema": REPORT_SCHEMA,
+            "generated_at": _utc_timestamp(),
+            "ok": False,
+            "dry_run": args.dry_run,
+            "error": {
+                "code": "legacy_publisher_retired",
+                "stage": "authorization",
+                "message": str(exc),
+            },
+        }
     except (OSError, builder.SnapshotBuildError, SnapshotPublishError) as exc:
         report = {
             "schema": REPORT_SCHEMA,
+            "generated_at": _utc_timestamp(),
             "ok": False,
             "dry_run": args.dry_run,
             "error": {"stage": "preflight", "message": str(exc)},

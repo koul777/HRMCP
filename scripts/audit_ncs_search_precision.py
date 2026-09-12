@@ -160,7 +160,7 @@ def is_off_scope_candidate(case: dict[str, Any]) -> bool:
 
 def load_runtime_search(db_path: Path) -> SearchFunction:
     os.environ["NCS_DB_PATH"] = str(db_path.resolve())
-    os.environ["NCS_MCP_READ_ONLY_MODE"] = "true"
+    os.environ["NCS_MCP_READ_ONLY"] = "true"
     os.environ["NCS_MCP_OPERATOR_TOOLS"] = "false"
     from ncs_mcp.server import search_ncs
 
@@ -176,7 +176,7 @@ def load_stage1_baseline_search(db_path: Path) -> SearchFunction:
     stage 1.
     """
     os.environ["NCS_DB_PATH"] = str(db_path.resolve())
-    os.environ["NCS_MCP_READ_ONLY_MODE"] = "true"
+    os.environ["NCS_MCP_READ_ONLY"] = "true"
     os.environ["NCS_MCP_OPERATOR_TOOLS"] = "false"
     from ncs_mcp import server
     from ncs_mcp.search import core as search_core

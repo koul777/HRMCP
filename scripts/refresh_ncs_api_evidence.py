@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -13,6 +14,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from ncs_mcp.api_refresh_builder import (  # noqa: E402
     ALLOWED_SOURCES,
     refresh_ncs_api_evidence,
+    validate_refresh_report_path,
     write_refresh_evidence,
 )
 
@@ -24,7 +26,7 @@ def _default_report_path() -> Path:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Plan or explicitly apply the all-major append-only NCS API refresh."
+        description="Plan the all-major append-only NCS API refresh; apply through NCS Data Builder."
     )
     parser.add_argument(
         "--db", type=Path, default=ROOT / "data" / "processed" / "ncs.db"
@@ -33,7 +35,7 @@ def parse_args() -> argparse.Namespace:
         "--source", action="append", choices=ALLOWED_SOURCES, dest="sources"
     )
     parser.add_argument(
-        "--apply", action="store_true", help="Permit local append-only API collection."
+        "--apply", action="store_true", help="Reserved; apply requires NCS Data Builder."
     )
     output_group = parser.add_mutually_exclusive_group()
     output_group.add_argument(
@@ -57,6 +59,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.apply:
+        print(json.dumps({"ok": False, "error": "builder_authorization_required"}))
+        return 2
+    try:
+        validate_refresh_report_path(args.out, (args.db,))
+    except (OSError, ValueError) as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}))
+        return 2
     report = refresh_ncs_api_evidence(
         args.db,
         sources=args.sources or ALLOWED_SOURCES,
@@ -65,7 +75,11 @@ def main() -> int:
         state_dir=args.state_dir,
         retain_failed_output=args.retain_failed_output,
     )
-    destination = write_refresh_evidence(report, args.out)
+    try:
+        destination = write_refresh_evidence(report, args.out, protected_databases=(args.db,))
+    except (OSError, ValueError) as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}))
+        return 2
     print(destination)
     return (
         0

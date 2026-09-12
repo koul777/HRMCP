@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -17,9 +18,18 @@ from .api_refresh_builder import (
     file_sha256,
     refresh_ncs_api_evidence,
     raw_ksa_sha256,
+    trusted_review_status_identity_digest,
     trusted_review_status_counts,
 )
 from .config import PROJECT_ROOT, load_settings
+from .builder_authorization import (
+    BuilderAuthorizationError,
+    BuilderOperationContext,
+    _bind_operation_version,
+    _exclusive_operation,
+    require_builder_context,
+    validate_builder_paths,
+)
 from .ontology_refresh_builder import _sqlite_online_snapshot
 from .preprocess_excel import build_header_map
 
@@ -141,30 +151,30 @@ class DataBuilder:
         # Individual containment checks still use resolved paths.
         self.root = _absolute_path(root)
         self.state = self.root / ".state/ncs-data-builder"
+        validate_builder_paths(self.root, self.state)
         self.state.mkdir(parents=True, exist_ok=True)
+        validate_builder_paths(self.root, self.state)
         self.progress = progress or (lambda message: None)
 
     @contextmanager
-    def exclusive(self):
-        lock = self.state / "operation.lock"
+    def exclusive(self, action: str = "exclusive", version: str | None = None):
         try:
-            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError as exc:
+            with _exclusive_operation(
+                root=self.root, state_dir=self.state, action=action, version=version
+            ) as context:
+                yield context
+        except BuilderAuthorizationError as exc:
             raise BuilderError(
-                "다른 Builder 작업이 실행 중입니다. 비정상 종료했다면 실행 프로세스 확인 후 operation.lock을 정리하세요."
+                "Builder 작업 권한을 확인하지 못했습니다. 다른 작업이 실행 중이거나 "
+                "operation.lock이 변경되었습니다. 비정상 종료했다면 실행 프로세스를 먼저 확인하세요."
             ) from exc
-        try:
-            with os.fdopen(fd, "w") as stream:
-                stream.write(str(os.getpid()))
-            yield
-        finally:
-            lock.unlink(missing_ok=True)
 
     def _version_dir(self, version: str) -> Path:
         if not version or any(c not in "0123456789abcdef_-" for c in version):
             raise BuilderError("올바르지 않은 버전 ID입니다.")
-        directory = (self.state / "versions" / version).resolve()
-        directory.relative_to((self.state / "versions").resolve())
+        directory = self.state / "versions" / version
+        validate_builder_paths(self.root, self.state, directory)
+        directory = directory.resolve()
         return directory
 
     def versions(self) -> list[dict]:
@@ -178,13 +188,22 @@ class DataBuilder:
                 continue
         return result
 
-    def _new(self, kind: str) -> tuple[Path, dict]:
+    def _new(
+        self, kind: str, builder_context: BuilderOperationContext
+    ) -> tuple[Path, dict]:
+        require_builder_context(
+            builder_context,
+            action={"excel-delta": "build_delta", "api": "refresh_api", "current-copy": "copy_current"}[kind],
+            root=self.root, state_dir=self.state,
+        )
         version = (
             datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
             + "_"
             + uuid.uuid4().hex[:8]
         )
         folder = self._version_dir(version)
+        _bind_operation_version(builder_context, version)
+        require_builder_context(builder_context, action=builder_context.action, version_dir=folder)
         folder.mkdir(parents=True)
         report = {
             "schema": "ncs_data_builder_version_v1",
@@ -193,9 +212,47 @@ class DataBuilder:
             "status": "building",
             "created_at": datetime.now(timezone.utc).isoformat(),
             "human_approval_claim": False,
+            "operation_lineage": builder_context.lineage(),
         }
-        atomic_json(folder / "build.json", report)
+        self._write_version_json(folder, "build.json", report, builder_context,
+                                 action=builder_context.action, version=version)
         return folder, report
+
+    def _write_version_json(
+        self, folder: Path, filename: str, payload: dict,
+        builder_context: BuilderOperationContext, *, action: str | tuple[str, ...], version: str,
+    ) -> None:
+        """Write Builder reports only while their exact version lease is live."""
+        if filename not in {"build.json", "api-refresh.json"}:
+            raise BuilderAuthorizationError("Unsupported Builder version report.")
+
+        def authorize() -> None:
+            require_builder_context(
+                builder_context, action=action, root=self.root, state_dir=self.state,
+                version=version, version_dir=folder,
+            )
+
+        authorize()
+        path = folder / filename
+        temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+        text = json.dumps(payload, ensure_ascii=False, indent=2)
+        try:
+            authorize()
+            with temporary.open("x", encoding="utf-8") as stream:
+                stream.write(text)
+                stream.flush()
+                os.fsync(stream.fileno())
+            authorize()
+            os.replace(temporary, path)
+        finally:
+            # Losing a lease can also mean losing the folder. Preserve a pending
+            # temp as evidence instead of mutating a replacement owner's path.
+            try:
+                authorize()
+            except BuilderAuthorizationError:
+                pass
+            else:
+                temporary.unlink(missing_ok=True)
 
     def _space(self, required: int) -> None:
         if shutil.disk_usage(self.state).free < required:
@@ -203,25 +260,47 @@ class DataBuilder:
                 f"작업 공간이 부족합니다. 최소 {required / 1024**3:.1f} GB 여유 공간이 필요합니다."
             )
 
-    def _finish(self, folder: Path, report: dict) -> dict:
+    def _finish(self, folder: Path, report: dict,
+                builder_context: BuilderOperationContext) -> dict:
         from .builder_validation import validate_candidate
 
+        def authorize():
+            require_builder_context(
+                builder_context, action=("build_delta", "refresh_api", "copy_current", "resume"),
+                root=self.root, state_dir=self.state, version=report["version"], version_dir=folder,
+            )
+
+        authorize()
         report["checkpoint"] = "final_validation"
-        atomic_json(folder / "build.json", report)
+        self._write_version_json(folder, "build.json", report, builder_context,
+                                 action=builder_context.action, version=report["version"])
         try:
+            authorize()
             result = validate_candidate(
-                folder / "ncs.db", folder / "validation-checkpoint.json", self.progress
+                folder / "ncs.db", folder / "validation-checkpoint.json", self.progress,
+                builder_context=builder_context,
             )
         except ValueError as exc:
             raise BuilderError(str(exc)) from exc
+        authorize()
         report.update(status="ready", **result)
-        atomic_json(folder / "build.json", report)
+        self._write_version_json(folder, "build.json", report, builder_context,
+                                 action=builder_context.action, version=report["version"])
         return report
 
-    def _failed(self, folder: Path, report: dict, exc: Exception) -> None:
+    def _failed(self, folder: Path, report: dict, exc: Exception,
+                builder_context: BuilderOperationContext) -> None:
         # Do not serialize arbitrary exceptions: requests exceptions can contain service keys.
-        report.update(status="failed", error_type=type(exc).__name__)
-        atomic_json(folder / "build.json", report)
+        try:
+            require_builder_context(builder_context,
+                                    action=("build_delta", "refresh_api", "resume", "copy_current"),
+                                    root=self.root, state_dir=self.state,
+                                    version=report["version"], version_dir=folder)
+            report.update(status="failed", error_type=type(exc).__name__)
+            self._write_version_json(folder, "build.json", report, builder_context,
+                                     action=builder_context.action, version=report["version"])
+        except BuilderAuthorizationError:
+            return
 
     def candidate(self, version: str) -> Path:
         folder = self._version_dir(version)
@@ -266,7 +345,7 @@ class DataBuilder:
             prepare_builder_gold,
         )
 
-        with self.exclusive():
+        with self.exclusive("prepare_gold", version) as builder_context:
             db = self.candidate(version)
             folder = self._version_dir(version)
             report = json.loads((folder / "build.json").read_text(encoding="utf-8"))
@@ -317,7 +396,7 @@ class DataBuilder:
 
         from .builder_gold import sync_builder_gold
 
-        with self.exclusive():
+        with self.exclusive("sync_gold", version) as builder_context:
             self.candidate(version)
             folder = self._version_dir(version)
             report = json.loads((folder / "build.json").read_text(encoding="utf-8"))
@@ -359,7 +438,7 @@ class DataBuilder:
         from .embedding_batches import SUPPORTED_ENTITY_TYPES
         from .local_embeddings import SentenceTransformerEmbeddingProvider
 
-        with self.exclusive():
+        with self.exclusive("prepare_gold_embeddings", version) as builder_context:
             db = self.candidate(version)
             folder = self._version_dir(version)
             report = json.loads((folder / "build.json").read_text(encoding="utf-8"))
@@ -426,7 +505,7 @@ class DataBuilder:
 
         from .builder_gold import sync_builder_gold_embeddings
 
-        with self.exclusive():
+        with self.exclusive("sync_gold_embeddings", version) as builder_context:
             self.candidate(version)
             folder = self._version_dir(version)
             report = json.loads((folder / "build.json").read_text(encoding="utf-8"))
@@ -471,7 +550,7 @@ class DataBuilder:
         from .embedding_batches import SUPPORTED_ENTITY_TYPES
         from .local_embeddings import SentenceTransformerEmbeddingProvider
 
-        with self.exclusive():
+        with self.exclusive("prepare_gold_embedding_shards", version) as builder_context:
             db = self.candidate(version)
             folder = self._version_dir(version)
             report = json.loads((folder / "build.json").read_text(encoding="utf-8"))
@@ -538,7 +617,7 @@ class DataBuilder:
 
         from .builder_gold import sync_builder_gold_embedding_shards
 
-        with self.exclusive():
+        with self.exclusive("sync_gold_embedding_shards", version) as builder_context:
             self.candidate(version)
             folder = self._version_dir(version)
             report = json.loads((folder / "build.json").read_text(encoding="utf-8"))
@@ -561,16 +640,17 @@ class DataBuilder:
     def build_delta(self, source: Path, baseline: Path) -> dict:
         from .excel_delta_builder import build_excel_delta
 
-        with self.exclusive():
+        with self.exclusive("build_delta") as builder_context:
             preview = inspect_workbook(source)
             baseline = Path(baseline).resolve(strict=True)
             self._space(
                 baseline.stat().st_size * 2 + max(1024**3, preview["bytes"] * 10)
             )
-            folder, report = self._new("excel-delta")
+            folder, report = self._new("excel-delta", builder_context)
             try:
                 original = folder / "source.xlsx"
                 self.progress("새 Excel 원본 보관 및 능력단위 변경분 비교")
+                require_builder_context(builder_context, action="build_delta", version_dir=folder)
                 shutil.copyfile(source, original)
                 report.update(
                     source=preview,
@@ -583,7 +663,9 @@ class DataBuilder:
                     folder / "ncs.db",
                     folder / "delta",
                     self.progress,
+                    builder_context=builder_context,
                 )
+                require_builder_context(builder_context, action="build_delta", version_dir=folder)
                 atomic_json(folder / "delta.json", delta)
                 if not delta.get("ok"):
                     raise BuilderError(
@@ -591,9 +673,9 @@ class DataBuilder:
                     )
                 report["source_delta"] = delta.get("source_delta")
                 report["ontology_processing"] = delta.get("ontology_processing")
-                return self._finish(folder, report)
+                return self._finish(folder, report, builder_context)
             except Exception as exc:
-                self._failed(folder, report, exc)
+                self._failed(folder, report, exc, builder_context)
                 if isinstance(exc, ValueError):
                     raise BuilderError(str(exc)) from exc
                 raise
@@ -601,7 +683,7 @@ class DataBuilder:
     def package(self, version: str, deploy_root: Path) -> dict:
         from .builder_release import build_release
 
-        with self.exclusive():
+        with self.exclusive("package", version) as builder_context:
             db = self.candidate(version)
             report = build_release(
                 self._version_dir(version),
@@ -609,6 +691,7 @@ class DataBuilder:
                 deploy_root=deploy_root,
                 expected_source_sha256=file_sha256(db),
                 progress=self.progress,
+                builder_context=builder_context,
             )
             if not report.get("ok"):
                 raise BuilderError(
@@ -617,9 +700,11 @@ class DataBuilder:
             return {"version": version, "package": report}
 
     def deploy(self, version: str, deploy_root: Path, production_url: str) -> dict:
-        from .builder_release import deploy_release
+        from .builder_release import ReleaseGuard, _write, deploy_release
 
-        with self.exclusive():
+        with self.exclusive("deploy", version) as builder_context:
+            release_guard = ReleaseGuard(builder_context, action="deploy",
+                                         version_dir=self._version_dir(version), repo_root=self.root)
             self.candidate(version)
             folder = self._version_dir(version)
             release_path = folder / "release.json"
@@ -636,32 +721,49 @@ class DataBuilder:
             if bound_project.get("projectId") != project.get("projectId"):
                 raise BuilderError("패키지를 만든 프로젝트와 선택 프로젝트가 다릅니다.")
             report = deploy_release(
-                folder, production_mcp_url=production_url, progress=self.progress
+                folder, production_mcp_url=production_url, progress=self.progress,
+                builder_context=builder_context,
             )
             if not report.get("ok"):
+                if report.get("status") == "reconciliation_failed":
+                    raise BuilderError(
+                        "완료된 운영 배포의 재검증에 실패했습니다. 기존 완료 기록과 로컬 기준점은 "
+                        "보존했습니다. 운영 배포와 패키지 무결성을 확인한 뒤 다시 시도하세요."
+                    )
                 raise BuilderError(
                     "Vercel 갱신 검증을 완료하지 못했습니다. release.json의 배포 상태를 확인하세요."
                 )
-            atomic_json(
+            _write(
                 self.state / "deployed.json",
                 {
                     "version": version,
                     "production_url": production_url,
                     "deploy_root": str(Path(deploy_root).resolve()),
+                    "operation_lineage": builder_context.lineage(),
+                    "build_id": report.get("build_id"),
+                    "source_sha256": report.get("source_sha256"),
+                    "deployment_identity": report.get("production_after_promotion"),
+                    "release_report_sha256": file_sha256(release_path),
                 },
+                builder_context=builder_context, guard=release_guard,
             )
             return {"version": version, "deployment": report}
 
     def refresh_api(self, source: Path, sources: list[str]) -> dict:
-        with self.exclusive():
+        with self.exclusive("refresh_api") as builder_context:
             source = Path(source).resolve(strict=True)
             self._space(source.stat().st_size * 2 + 1024**3)
-            folder, report = self._new("api")
+            folder, report = self._new("api", builder_context)
             try:
                 self.progress("API 사전 점검 및 별도 작업 DB 생성")
                 report["parent_database"] = str(source)
                 report["sources"] = sources
-                atomic_json(folder / "build.json", report)
+                self._write_version_json(folder, "build.json", report, builder_context,
+                                         action="refresh_api", version=report["version"])
+                require_builder_context(
+                    builder_context, action="refresh_api", root=self.root, state_dir=self.state,
+                    version=report["version"], version_dir=folder,
+                )
                 evidence = refresh_ncs_api_evidence(
                     source,
                     sources=sources,
@@ -669,8 +771,10 @@ class DataBuilder:
                     output_path=folder / "ncs.db",
                     progress=self.progress,
                     checkpoint_dir=folder / "api-checkpoint",
+                    builder_context=builder_context,
                 )
-                atomic_json(folder / "api-refresh.json", evidence)
+                self._write_version_json(folder, "api-refresh.json", evidence, builder_context,
+                                         action="refresh_api", version=report["version"])
                 if evidence.get("outcome") not in {
                     "succeeded_append_only",
                     "completed_with_warnings",
@@ -691,9 +795,9 @@ class DataBuilder:
                     for field in ("source_delta", "ontology_processing"):
                         if field in parent:
                             report[field] = parent[field]
-                return self._finish(folder, report)
+                return self._finish(folder, report, builder_context)
             except Exception as exc:
-                self._failed(folder, report, exc)
+                self._failed(folder, report, exc, builder_context)
                 raise
 
     def current_db(self) -> Path:
@@ -706,7 +810,7 @@ class DataBuilder:
         return self.root / "data/processed/ncs.db"
 
     def resume_kind(self, version: str) -> str | None:
-        """Read only the saved work evidence; never claim the DB is ready here."""
+        """Read saved evidence and verify Excel digests without declaring readiness."""
         folder = self._version_dir(version)
         try:
             report = json.loads((folder / "build.json").read_text(encoding="utf-8"))
@@ -719,32 +823,86 @@ class DataBuilder:
                     if evidence_path.exists()
                     else {}
                 )
+                if not isinstance(evidence, dict):
+                    return None
+                working_invariants = evidence.get("working_copy_invariants_after")
+                if not isinstance(working_invariants, dict):
+                    working_invariants = {}
+                source_invariants_after = evidence.get("source_invariants_after")
+                if not isinstance(source_invariants_after, dict):
+                    source_invariants_after = {}
                 if (
                     evidence.get("outcome")
                     in {"succeeded_append_only", "completed_with_warnings"}
                     and evidence.get("working_copy_invariants_unchanged") is True
-                    and (evidence.get("source_invariants_after") or {}).get("unchanged")
-                    is True
+                    and source_invariants_after.get("unchanged") is True
+                    and isinstance(
+                        working_invariants.get(
+                            "trusted_review_status_identity_digest"
+                        ),
+                        dict,
+                    )
                     and Path(evidence.get("prepared_output", "")).resolve()
                     == (folder / "ncs.db").resolve()
                 ):
                     return "api-validation"
-                if (
-                    (folder / "api-checkpoint/api_checkpoint.json").is_file()
-                    and report.get("parent_database")
-                    and report.get("sources")
-                ):
-                    return "api-collection"
+                checkpoint_path = folder / "api-checkpoint/api_checkpoint.json"
+                if checkpoint_path.is_file() and report.get("parent_database") and report.get("sources"):
+                    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+                    if not isinstance(checkpoint, dict):
+                        return None
+                    checkpoint_baseline = checkpoint.get("baseline") or {}
+                    checkpoint_identity = checkpoint.get("identity") or {}
+                    if not isinstance(checkpoint_identity, dict):
+                        return None
+                    source_invariants = checkpoint_identity.get("source_invariants") or {}
+                    if not isinstance(checkpoint_baseline, dict) or not isinstance(
+                        source_invariants, dict
+                    ):
+                        return None
+                    if (
+                        isinstance(
+                            checkpoint_baseline.get(
+                                "trusted_review_status_identity_digest"
+                            ),
+                            dict,
+                        )
+                        and isinstance(
+                            source_invariants.get(
+                                "trusted_review_status_identity_digest"
+                            ),
+                            dict,
+                        )
+                    ):
+                        return "api-collection"
             if report.get("kind") == "excel-delta":
                 delta = json.loads((folder / "delta.json").read_text(encoding="utf-8"))
-                if delta.get("ok") is True:
+                if delta.get("ok") is True and self._excel_evidence_matches(folder, delta):
                     return "excel-validation"
-        except (OSError, ValueError, TypeError):
+        except (OSError, ValueError, TypeError, sqlite3.DatabaseError):
             return None
         return None
 
+    def _excel_evidence_matches(self, folder: Path, evidence: dict) -> bool:
+        expected = evidence.get("candidate_integrity")
+        if not isinstance(expected, dict) or not isinstance(
+            expected.get("trusted_review_status_identity_digest"), dict
+        ):
+            return False
+        db = folder / "ncs.db"
+        actual = {
+            "sha256": file_sha256(db),
+            "raw_ksa_sha256": raw_ksa_sha256(db),
+            "trusted_review_status_identity_digest": trusted_review_status_identity_digest(db),
+        }
+        return (
+            Path(evidence.get("candidate_db", "")).resolve() == db.resolve()
+            and all(actual[key] == expected.get(key) for key in actual)
+            and file_sha256(db) == actual["sha256"]
+        )
+
     def resume(self, version: str) -> dict:
-        with self.exclusive():
+        with self.exclusive("resume", version) as builder_context:
             folder = self._version_dir(version)
             kind = self.resume_kind(version)
             if not kind:
@@ -752,12 +910,21 @@ class DataBuilder:
                     "재개할 완료 기록이 없습니다. 이 버전을 완료로 사용하지 않습니다."
                 )
             report = json.loads((folder / "build.json").read_text(encoding="utf-8"))
+            previous_operation = report.get("operation_lineage")
+            if previous_operation:
+                report.setdefault("operation_history", []).append(previous_operation)
+            report["operation_lineage"] = builder_context.lineage()
             report.update(
                 status="building", resumed_at=datetime.now(timezone.utc).isoformat()
             )
-            atomic_json(folder / "build.json", report)
+            self._write_version_json(folder, "build.json", report, builder_context,
+                                     action="resume", version=version)
             try:
                 if kind == "api-collection":
+                    require_builder_context(
+                        builder_context, action="resume", root=self.root, state_dir=self.state,
+                        version=version, version_dir=folder,
+                    )
                     evidence = refresh_ncs_api_evidence(
                         Path(report["parent_database"]),
                         sources=report["sources"],
@@ -765,9 +932,11 @@ class DataBuilder:
                         output_path=folder / "ncs.db",
                         checkpoint_dir=folder / "api-checkpoint",
                         resume=True,
+                        builder_context=builder_context,
                         progress=self.progress,
                     )
-                    atomic_json(folder / "api-refresh.json", evidence)
+                    self._write_version_json(folder, "api-refresh.json", evidence, builder_context,
+                                             action="resume", version=version)
                     if evidence.get("outcome") not in {
                         "succeeded_append_only",
                         "completed_with_warnings",
@@ -781,11 +950,22 @@ class DataBuilder:
                         "저장된 API 결과 재사용: 원문·검토 상태 보존 확인 (재수집 없음)"
                     )
                     expected = evidence.get("working_copy_invariants_after") or {}
+                    expected_identity = expected.get(
+                        "trusted_review_status_identity_digest"
+                    )
+                    if not isinstance(expected_identity, dict):
+                        raise BuilderError(
+                            "저장된 API 검토 상태 identity digest가 없어 안전한 재개를 중단했습니다. "
+                            "새 API 수집을 시작하세요."
+                        )
                     if raw_ksa_sha256(folder / "ncs.db") != expected.get(
                         "raw_ksa_sha256"
                     ) or trusted_review_status_counts(
                         folder / "ncs.db"
-                    ) != expected.get("trusted_review_status_counts"):
+                    ) != expected.get("trusted_review_status_counts") or (
+                        trusted_review_status_identity_digest(folder / "ncs.db")
+                        != expected_identity
+                    ):
                         raise BuilderError(
                             "저장된 API 결과와 후보 DB의 원문·검토 상태가 달라 재개를 중단했습니다."
                         )
@@ -809,28 +989,32 @@ class DataBuilder:
                     evidence = json.loads(
                         (folder / "delta.json").read_text(encoding="utf-8")
                     )
+                    if not self._excel_evidence_matches(folder, evidence):
+                        raise BuilderError("저장된 Excel 결과와 후보 DB 무결성 증거가 달라 재개를 중단했습니다.")
                     report.update(
                         source_delta=evidence.get("source_delta"),
                         ontology_processing=evidence.get("ontology_processing"),
                     )
-                atomic_json(folder / "build.json", report)
-                return self._finish(folder, report)
+                self._write_version_json(folder, "build.json", report, builder_context,
+                                         action="resume", version=version)
+                return self._finish(folder, report, builder_context)
             except Exception as exc:
-                self._failed(folder, report, exc)
+                self._failed(folder, report, exc, builder_context)
                 raise
 
     def copy_current(self) -> dict:
-        with self.exclusive():
+        with self.exclusive("copy_current") as builder_context:
             source = self.current_db()
             self._space(source.stat().st_size * 2 + 1024**3)
-            folder, report = self._new("current-copy")
+            folder, report = self._new("current-copy", builder_context)
             try:
                 self.progress(
                     "현재 MCP DB의 일관된 복사본 생성 (기존 API·검토 데이터 포함)"
                 )
-                _sqlite_online_snapshot(source, folder / "ncs.db")
+                _sqlite_online_snapshot(source, folder / "ncs.db", authorize=lambda: require_builder_context(
+                    builder_context, action="copy_current", version_dir=folder))
                 report["parent_database"] = str(source)
-                return self._finish(folder, report)
+                return self._finish(folder, report, builder_context)
             except Exception as exc:
-                self._failed(folder, report, exc)
+                self._failed(folder, report, exc, builder_context)
                 raise

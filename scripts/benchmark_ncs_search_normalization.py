@@ -147,6 +147,55 @@ def integer_summary(values: list[int]) -> dict[str, Any]:
     }
 
 
+def build_query_pattern_expansion_tier_predicates(
+    original: Any,
+    server: Any,
+    columns: tuple[str, ...],
+    phrase: str,
+    fallback_tokens: list[str],
+    *args: Any,
+    **kwargs: Any,
+) -> list[tuple[Any, ...]]:
+    """Adapt the separator-expansion candidate to the production tier contract."""
+    # The production search tier contract gained optional expansion/weight
+    # arguments and two ranking clauses after this benchmark was introduced.
+    # Forward them so the normalization ablation remains a valid read-only
+    # control.
+    tiers = original(columns, phrase, fallback_tokens, *args, **kwargs)
+    if len(fallback_tokens) < 2:
+        return tiers
+    first_tier = tiers[0][0]
+    phrase_clause = tiers[0][1]
+    phrase_params = tiers[0][2]
+    expanded_params = dict(phrase_params)
+    expanded_params["separator_variant_pattern"] = "%" + "%".join(
+        server._escape_ncs_search_like(token) for token in fallback_tokens
+    ) + "%"
+    variant_clause = server._ncs_search_like_any(
+        columns, "separator_variant_pattern"
+    )
+    if len(tiers[0]) == 3:
+        return [
+            (
+                first_tier,
+                f"({variant_clause} OR {phrase_clause})",
+                expanded_params,
+            ),
+            *tiers[1:],
+        ]
+    score_clause, meaningful_clause = tiers[0][3:5]
+    return [
+        (
+            first_tier,
+            f"({variant_clause} OR {phrase_clause})",
+            expanded_params,
+            score_clause,
+            meaningful_clause,
+        ),
+        *tiers[1:],
+    ]
+
+
 def result_ids(payload: dict[str, Any]) -> list[str]:
     rows = payload.get("results")
     if not isinstance(rows, list):
@@ -215,27 +264,18 @@ class RuntimeSearchHarness:
                 columns: tuple[str, ...],
                 phrase: str,
                 fallback_tokens: list[str],
-            ) -> list[tuple[int, str, dict[str, Any]]]:
-                tiers = original(columns, phrase, fallback_tokens)
-                if len(fallback_tokens) < 2:
-                    return tiers
-                first_tier, phrase_clause, phrase_params = tiers[0]
-                expanded_params = dict(phrase_params)
-                expanded_params["separator_variant_pattern"] = "%" + "%".join(
-                    server._escape_ncs_search_like(token)
-                    for token in fallback_tokens
-                ) + "%"
-                variant_clause = server._ncs_search_like_any(
-                    columns, "separator_variant_pattern"
+                *args: Any,
+                **kwargs: Any,
+            ) -> list[tuple[Any, ...]]:
+                return build_query_pattern_expansion_tier_predicates(
+                    original,
+                    server,
+                    columns,
+                    phrase,
+                    fallback_tokens,
+                    *args,
+                    **kwargs,
                 )
-                return [
-                    (
-                        first_tier,
-                        f"({variant_clause} OR {phrase_clause})",
-                        expanded_params,
-                    ),
-                    *tiers[1:],
-                ]
 
             self.server._ncs_search_tier_predicates = expanded_tier_predicates
             return
@@ -533,7 +573,7 @@ def build_report(
     if not db_path.is_file():
         raise FileNotFoundError(db_path)
     os.environ["NCS_DB_PATH"] = str(db_path.resolve())
-    os.environ["NCS_MCP_READ_ONLY_MODE"] = "true"
+    os.environ["NCS_MCP_READ_ONLY"] = "true"
     os.environ["NCS_MCP_OPERATOR_TOOLS"] = "false"
     from ncs_mcp import server
 

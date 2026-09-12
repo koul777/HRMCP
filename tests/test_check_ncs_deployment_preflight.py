@@ -17,6 +17,22 @@ SPEC.loader.exec_module(preflight)
 
 
 class DeploymentPreflightTests(unittest.TestCase):
+    def test_required_source_mirrors_exist_and_match(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        deploy_root = repo_root / "deploy" / "vercel_mcp_app"
+        self.assertIn(
+            ("search_normalization_source_mirror", "search/normalization.py"),
+            preflight.SOURCE_MIRRORS,
+        )
+        for check_id, relative_path in preflight.SOURCE_MIRRORS:
+            with self.subTest(check_id=check_id):
+                check = preflight._mirror_check(
+                    check_id,
+                    repo_root / "src" / "ncs_mcp" / relative_path,
+                    deploy_root / "src" / "ncs_mcp" / relative_path,
+                )
+                self.assertEqual(check["status"], "pass", check)
+
     def test_literal_string_set_reads_only_named_literal(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "registry.py"

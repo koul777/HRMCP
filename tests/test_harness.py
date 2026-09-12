@@ -64,6 +64,7 @@ from ncs_harness import (
     build_report_grounded_transferability_review,
     build_training_necessity_review_audit_from_files,
     _agent_queue_status_snapshot_sha256,
+    _aihr_public_route_evidence,
     build_agent_queue_status_from_file,
     default_aihr_dashboard_static_artifacts,
     AIHR_DASHBOARD_STATIC_ARTIFACT_ENV,
@@ -1496,6 +1497,24 @@ AIHR_TEST_ISOLATION_ENV_VARS = tuple(
 
 
 class HarnessTests(unittest.TestCase):
+    def test_aihr_public_route_evidence_forwards_explicit_classification_scope(self) -> None:
+        with patch("ncs_harness.aihr_plan_route_evidence", return_value={"ok": True}) as route:
+            result = _aihr_public_route_evidence(
+                "labor management",
+                "HR planning",
+                major_code="02",
+                current_major_code="01",
+                target_major_code="02",
+                target_middle_code="02",
+            )
+
+        self.assertEqual(result, {"ok": True})
+        kwargs = route.call_args.kwargs
+        self.assertEqual(kwargs["major_code"], "02")
+        self.assertEqual(kwargs["current_major_code"], "01")
+        self.assertEqual(kwargs["target_major_code"], "02")
+        self.assertEqual(kwargs["target_middle_code"], "02")
+
     def setUp(self) -> None:
         self._saved_aihr_env = {
             key: os.environ.pop(key, None) for key in AIHR_TEST_ISOLATION_ENV_VARS
@@ -1610,8 +1629,14 @@ class HarnessTests(unittest.TestCase):
             sys.argv = [
                 "ncs_harness.py",
                 "retry-qualification-errors",
+                "--max-pages", "1",
+                "--request-delay", "3",
+                "--max-retries", "1",
+                "--retry-backoff-seconds", "120",
+                "--stop-after-rate-limit-errors", "2",
                 "--ncs006-checkpoint-path",
                 str(checkpoint_path),
+                "--limit-units", "10",
                 "--report-path",
                 str(tmp_path / "qualification_error_report.md"),
             ]
@@ -1621,7 +1646,7 @@ class HarnessTests(unittest.TestCase):
             )
             try:
                 with contextlib.redirect_stdout(stdout):
-                    with patch("ncs_harness.load_settings", return_value=settings):
+                    with patch("ncs_harness.load_settings", return_value=settings), patch("ncs_harness.ROOT", tmp_path):
                         with patch(
                             "ncs_harness.retry_qualification_error_units",
                             return_value={"ok": True, "error_report": {}},
@@ -1631,6 +1656,8 @@ class HarnessTests(unittest.TestCase):
                 sys.argv = previous_argv
 
         payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["operation_context"]["owner"], "qualification_operator")
+        self.assertNotIn("version", payload["operation_context"])
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["qualification_retry_allowed_now"])
         self.assertEqual(payload["api_execution_guard"]["status"], "allowed")
@@ -1709,6 +1736,11 @@ class HarnessTests(unittest.TestCase):
                 "19",
                 "--limit-units",
                 "1",
+                "--max-pages", "1",
+                "--request-delay", "3",
+                "--max-retries", "1",
+                "--retry-backoff-seconds", "120",
+                "--stop-after-rate-limit-errors", "2",
                 "--ncs006-checkpoint-path",
                 str(checkpoint_path),
             ]
@@ -1718,7 +1750,7 @@ class HarnessTests(unittest.TestCase):
             )
             try:
                 with contextlib.redirect_stdout(stdout):
-                    with patch("ncs_harness.load_settings", return_value=settings):
+                    with patch("ncs_harness.load_settings", return_value=settings), patch("ncs_harness.ROOT", tmp_path):
                         with patch(
                             "ncs_harness.collect_qualification_links",
                             return_value={"ok": True, "units_processed": 1},
@@ -1728,6 +1760,8 @@ class HarnessTests(unittest.TestCase):
                 sys.argv = previous_argv
 
         payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["operation_context"]["owner"], "qualification_operator")
+        self.assertNotIn("version", payload["operation_context"])
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["qualification_retry_allowed_now"])
         self.assertFalse(payload["api_call_allowed_now"])
@@ -15793,8 +15827,9 @@ ChatGPT 프롬프트 예시: 노무관리 담당자가 인사기획으로 전환
         try:
             with (
                 patch("ncs_harness.load_settings", return_value=SimpleNamespace(db_path=Path("ncs.db"))),
-                patch("ncs_harness.connect", return_value=DummyConn()),
-                patch("ncs_harness.initialize_database"),
+                patch("ncs_harness._connect_readonly_sqlite", return_value=DummyConn()) as readonly_mock,
+                patch("ncs_harness.connect") as connect_mock,
+                patch("ncs_harness.initialize_database") as initialize_mock,
                 patch("ncs_harness.recommend_training_for_task", return_value=full_result) as recommend_mock,
                 patch("ncs_harness.compact_training_task_response", return_value=compact_result) as compact_mock,
                 contextlib.redirect_stdout(stdout),
@@ -15805,8 +15840,125 @@ ChatGPT 프롬프트 예시: 노무관리 담당자가 인사기획으로 전환
 
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["view"], "compact_training_task")
+        readonly_mock.assert_called_once_with(Path("ncs.db"))
+        connect_mock.assert_not_called()
+        initialize_mock.assert_not_called()
         recommend_mock.assert_called_once()
         compact_mock.assert_called_once_with(full_result, recommendation_limit=2)
+
+    def test_recommend_training_for_task_cli_no_save_uses_readonly_connection(self) -> None:
+        class DummyConn:
+            def close(self) -> None:
+                pass
+
+        previous_argv = sys.argv[:]
+        stdout = io.StringIO()
+        sys.argv = [
+            "ncs_harness.py",
+            "recommend-training-for-task",
+            "--query",
+            "인사기획",
+            "--no-save",
+        ]
+        try:
+            with (
+                patch("ncs_harness.load_settings", return_value=SimpleNamespace(db_path=Path("ncs.db"))),
+                patch("ncs_harness._connect_readonly_sqlite", return_value=DummyConn()) as readonly_mock,
+                patch("ncs_harness.connect") as connect_mock,
+                patch("ncs_harness.initialize_database") as initialize_mock,
+                patch(
+                    "ncs_harness.recommend_training_for_task",
+                    return_value={"ok": True, "recommendations": []},
+                ) as recommend_mock,
+                contextlib.redirect_stdout(stdout),
+            ):
+                main()
+        finally:
+            sys.argv = previous_argv
+
+        self.assertTrue(json.loads(stdout.getvalue())["ok"])
+        readonly_mock.assert_called_once_with(Path("ncs.db"))
+        connect_mock.assert_not_called()
+        initialize_mock.assert_not_called()
+        recommend_mock.assert_called_once()
+        self.assertFalse(recommend_mock.call_args.kwargs["save"])
+
+    def test_recommend_training_for_task_cli_no_save_preserves_database_file(self) -> None:
+        previous_argv = sys.argv[:]
+        stdout = io.StringIO()
+        sys.argv = [
+            "ncs_harness.py",
+            "recommend-training-for-task",
+            "--query",
+            "인사기획",
+            "--no-save",
+        ]
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db_path = Path(tmpdir) / "ncs.db"
+                seed_conn = sqlite3.connect(db_path)
+                try:
+                    seed_conn.execute("CREATE TABLE sentinel (id INTEGER PRIMARY KEY)")
+                    seed_conn.commit()
+                finally:
+                    seed_conn.close()
+                before_bytes = db_path.read_bytes()
+                before_mtime_ns = db_path.stat().st_mtime_ns
+
+                with (
+                    patch("ncs_harness.load_settings", return_value=SimpleNamespace(db_path=db_path)),
+                    patch(
+                        "ncs_harness.recommend_training_for_task",
+                        return_value={"ok": True, "recommendations": []},
+                    ),
+                    contextlib.redirect_stdout(stdout),
+                ):
+                    main()
+
+                self.assertEqual(db_path.read_bytes(), before_bytes)
+                self.assertEqual(db_path.stat().st_mtime_ns, before_mtime_ns)
+        finally:
+            sys.argv = previous_argv
+
+        self.assertTrue(json.loads(stdout.getvalue())["ok"])
+
+    def test_recommend_training_for_task_cli_save_blocks_before_writable_connection(self) -> None:
+        class DummyConn:
+            def close(self) -> None:
+                pass
+
+        previous_argv = sys.argv[:]
+        stdout = io.StringIO()
+        sys.argv = [
+            "ncs_harness.py",
+            "recommend-training-for-task",
+            "--query",
+            "인사기획",
+            "--save",
+        ]
+        try:
+            with (
+                patch("ncs_harness.load_settings", return_value=SimpleNamespace(db_path=Path("ncs.db"))),
+                patch("ncs_harness._connect_readonly_sqlite") as readonly_mock,
+                patch("ncs_harness.connect", return_value=DummyConn()) as connect_mock,
+                patch("ncs_harness.initialize_database") as initialize_mock,
+                patch(
+                    "ncs_harness.recommend_training_for_task",
+                    return_value={"ok": True, "recommendations": []},
+                ) as recommend_mock,
+                contextlib.redirect_stdout(stdout),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                main()
+        finally:
+            sys.argv = previous_argv
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(json.loads(stdout.getvalue())["error"], "builder_authorization_required")
+        readonly_mock.assert_not_called()
+        connect_mock.assert_not_called()
+        initialize_mock.assert_not_called()
+        recommend_mock.assert_not_called()
 
     def test_recommend_training_transition_cli_uses_compact_transform(self) -> None:
         class DummyConn:
@@ -15827,13 +15979,13 @@ ChatGPT 프롬프트 예시: 노무관리 담당자가 인사기획으로 전환
             "--limit",
             "3",
             "--compact",
-            "--no-save",
         ]
         try:
             with (
                 patch("ncs_harness.load_settings", return_value=SimpleNamespace(db_path=Path("ncs.db"))),
-                patch("ncs_harness.connect", return_value=DummyConn()),
-                patch("ncs_harness.initialize_database"),
+                patch("ncs_harness._connect_readonly_sqlite", return_value=DummyConn()) as readonly_mock,
+                patch("ncs_harness.connect") as connect_mock,
+                patch("ncs_harness.initialize_database") as initialize_mock,
                 patch("ncs_harness.recommend_training_transition", return_value=full_result) as recommend_mock,
                 patch("ncs_harness.compact_training_transition_response", return_value=compact_result) as compact_mock,
                 contextlib.redirect_stdout(stdout),
@@ -15844,7 +15996,11 @@ ChatGPT 프롬프트 예시: 노무관리 담당자가 인사기획으로 전환
 
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["view"], "compact_training_transition")
+        readonly_mock.assert_called_once_with(Path("ncs.db"))
+        connect_mock.assert_not_called()
+        initialize_mock.assert_not_called()
         recommend_mock.assert_called_once()
+        self.assertFalse(recommend_mock.call_args.kwargs["save"])
         compact_mock.assert_called_once_with(full_result, recommendation_limit=3)
 
     def test_plan_ncs_education_path_cli_uses_transition_and_plan_transform(self) -> None:
@@ -15904,7 +16060,7 @@ ChatGPT 프롬프트 예시: 노무관리 담당자가 인사기획으로 전환
             recommendation_limit=3,
         )
 
-    def test_plan_ncs_education_path_cli_save_uses_writable_connection(self) -> None:
+    def test_plan_ncs_education_path_cli_save_blocks_before_writable_connection(self) -> None:
         class DummyConn:
             def close(self) -> None:
                 pass
@@ -15931,18 +16087,19 @@ ChatGPT 프롬프트 예시: 노무관리 담당자가 인사기획으로 전환
                 patch("ncs_harness.recommend_training_transition", return_value=full_result) as recommend_mock,
                 patch("ncs_harness.compact_ncs_education_plan_response", return_value=plan_result),
                 contextlib.redirect_stdout(stdout),
+                self.assertRaises(SystemExit) as raised,
             ):
                 main()
         finally:
             sys.argv = previous_argv
 
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["view"], "ncs_education_plan")
+        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(payload["error"], "builder_authorization_required")
         readonly_mock.assert_not_called()
-        connect_mock.assert_called_once_with(Path("ncs.db"))
-        initialize_mock.assert_called_once()
-        recommend_mock.assert_called_once()
-        self.assertTrue(recommend_mock.call_args.kwargs["save"])
+        connect_mock.assert_not_called()
+        initialize_mock.assert_not_called()
+        recommend_mock.assert_not_called()
 
     def test_plan_ncs_education_path_cli_fails_before_db_when_route_contract_missing(self) -> None:
         previous_argv = sys.argv[:]
@@ -15954,7 +16111,7 @@ ChatGPT 프롬프트 예시: 노무관리 담당자가 인사기획으로 전환
             "current",
             "--target-query",
             "target",
-            "--save",
+            "--no-save",
         ]
         try:
             with (

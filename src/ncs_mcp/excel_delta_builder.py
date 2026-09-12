@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import stat
 import tempfile
 from contextlib import closing
 from pathlib import Path
@@ -17,6 +18,10 @@ from typing import Any, Callable
 from openpyxl import load_workbook
 
 from .db import connect, initialize_database, now_utc
+from .api_refresh_builder import file_sha256, raw_ksa_sha256, trusted_review_status_identity_digest
+from .builder_authorization import (
+    BuilderAuthorizationError, BuilderOperationContext, require_builder_context,
+)
 from .ontology_refresh_builder import _run_pipeline, _sqlite_online_snapshot
 from .preprocess_excel import HEADER_ALIASES, Normalizer, build_header_map, get
 from .sqlite_diagnostics import is_dbstat_table
@@ -119,7 +124,8 @@ def _stage(excel: Path, baseline: Path, staging: Path,
         raise
 
 
-def _retire(conn: sqlite3.Connection, affected: list[str], removed: list[str]) -> dict[str, int]:
+def _retire(conn: sqlite3.Connection, affected: list[str], removed: list[str],
+            *, authorize: Callable[[], None] = lambda: None) -> dict[str, int]:
     """Follow actual foreign keys rather than maintaining an incomplete table list."""
     tables = [row[0] for row in conn.execute("SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'builder_%'") if not is_dbstat_table(row[1])]
     conn.execute('CREATE TEMP TABLE delta_units(unit TEXT PRIMARY KEY)')
@@ -195,52 +201,92 @@ def _retire(conn: sqlite3.Connection, affected: list[str], removed: list[str]) -
             original = item.pop('__rowid__')
             conn.execute('INSERT INTO builder_retired_rows(retired_at,table_name,original_rowid,row_json) VALUES (?,?,?,?)',
                          (now_utc(), table, original, json.dumps(item, ensure_ascii=False, default=str)))
+    authorize()
     conn.commit()
     conn.execute('PRAGMA foreign_keys=OFF')
     for table in retired:
+        authorize()
         conn.execute(f'DELETE FROM {_q(table)} WHERE rowid IN (SELECT id FROM {_q("retire_" + table)})')
+    authorize()
     conn.commit()
     conn.execute('PRAGMA foreign_keys=ON')
     return retired
 
 
 def build_excel_delta(excel_path: Path, baseline_db: Path, output_db: Path,
-                      work_dir: Path, progress: Callable[[str | dict[str, Any]], None] | None = None) -> dict[str, Any]:
+                      work_dir: Path, progress: Callable[[str | dict[str, Any]], None] | None = None,
+                      *, builder_context: BuilderOperationContext) -> dict[str, Any]:
     """Treat the uploaded workbook as a complete replacement source snapshot.
 
     Source normalization is unit-incremental. Existing ontology algorithms skip
     existing atomic KSA but recompute cross-unit/task/training aggregates globally.
     A candidate is published at output_db only after foreign-key/integrity checks.
     """
-    excel, baseline, output = (Path(path).resolve() for path in (excel_path, baseline_db, output_db))
+    output_path = Path(os.path.abspath(output_db))
+    requested_work_dir = Path(work_dir)
+    work_path = Path(os.path.abspath(requested_work_dir))
+
+    def authorize() -> None:
+        context = require_builder_context(
+            builder_context, action="build_delta", version_dir=output_path.parent,
+        )
+        expected_work_dir = Path(context.state_dir) / 'versions' / context.version / 'delta'
+        if ('..' in requested_work_dir.parts
+                or work_path != output_path.parent / 'delta'
+                or work_path.resolve() != expected_work_dir):
+            raise BuilderAuthorizationError('Excel work directory must be the exact Builder version delta directory.')
+        try:
+            info = work_path.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                    or getattr(info, 'st_file_attributes', 0) & 0x400):
+                raise BuilderAuthorizationError('Excel work directory must not be a link or reparse point.')
+        try:
+            output_path.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            raise ValueError('Candidate output must be a new path separate from input files')
+
+    authorize()
+    excel, baseline, output = (Path(path).resolve() for path in (excel_path, baseline_db, output_path))
     if not excel.is_file() or not baseline.is_file():
         raise FileNotFoundError('Excel and baseline database must exist')
     if output.exists() or output in (excel, baseline):
         raise ValueError('Candidate output must be a new path separate from input files')
     emit = progress or (lambda message: None)
-    Path(work_dir).mkdir(parents=True, exist_ok=True)
+    authorize()
+    work_path.mkdir(parents=True, exist_ok=True)
+    authorize()
     output.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix='excel-delta-', dir=work_dir) as temporary:
+    authorize()
+    with tempfile.TemporaryDirectory(prefix='excel-delta-', dir=work_path) as temporary:
         candidate = Path(temporary) / 'candidate.db'
         emit('Creating a consistent read-only baseline snapshot')
-        _sqlite_online_snapshot(baseline, candidate, progress=progress)
+        _sqlite_online_snapshot(baseline, candidate, progress=progress, authorize=authorize)
         emit('Comparing workbook content by competency unit')
+        authorize()
         plan, stage = _stage(excel, candidate, Path(temporary) / 'rows.db', progress=progress)
         try:
             affected = sorted(set(plan['inserted_units'] + plan['updated_units'] + plan['deleted_units']))
             stages, retired = [], {}
             if affected:
                 emit(f'Normalizing {len(affected)} changed units in a separate candidate')
+                authorize()
                 conn = connect(candidate)
                 try:
                     initialize_database(conn)
                     emit({'stage': '변경 원천 의존 관계 정리', 'completed': 0, 'total': None, 'unit': '단계'})
-                    retired = _retire(conn, affected, plan['deleted_units'])
+                    authorize()
+                    retired = _retire(conn, affected, plan['deleted_units'], authorize=authorize)
                     normalizer = Normalizer(conn, excel.name)
                     timestamp = now_utc()
                     units_to_normalize = plan['inserted_units'] + plan['updated_units']
                     emit({'stage': '변경 능력단위 정규화', 'completed': 0, 'total': len(units_to_normalize), 'unit': '능력단위'})
                     for unit_number, unit in enumerate(units_to_normalize, 1):
+                        authorize()
                         for payload, sheet, number in stage.execute('SELECT payload,sheet,row_number FROM incoming WHERE unit=?', (unit,)):
                             values = dict(zip(FIELDS, json.loads(payload)))
                             classification_id = normalizer.get_classification_id(values)
@@ -252,11 +298,12 @@ def build_excel_delta(excel_path: Path, baseline_db: Path, output_db: Path,
                                          (*(values[key] for key in ('major_name','middle_name','small_name','sub_name')), classification_id))
                             normalizer.ingest(sheet, number, values, timestamp)
                         emit({'stage': '변경 능력단위 정규화', 'completed': unit_number, 'total': len(units_to_normalize), 'unit': '능력단위'})
+                    authorize()
                     conn.commit()
                 finally:
                     conn.close()
                 emit('Rebuilding missing ontology nodes and reconciling dependent global relations')
-                stages, invariants = _run_pipeline(candidate, bootstrap=True, progress=progress)
+                stages, invariants = _run_pipeline(candidate, bootstrap=True, progress=progress, authorize=authorize)
             else:
                 invariants = {'raw_ksa_preserved': True, 'trusted_statuses_preserved': True}
                 emit('No content changes; ontology preprocessing skipped')
@@ -268,13 +315,22 @@ def build_excel_delta(excel_path: Path, baseline_db: Path, output_db: Path,
                 violations = check.execute('PRAGMA foreign_key_check').fetchmany(20)
                 if integrity != 'ok' or violations:
                     raise ValueError(f'Candidate validation failed: {integrity}; foreign keys: {violations}')
+                authorize()
                 check.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+                authorize()
                 check.execute('PRAGMA journal_mode=DELETE')
+            candidate_integrity = {
+                'sha256': file_sha256(candidate),
+                'raw_ksa_sha256': raw_ksa_sha256(candidate),
+                'trusted_review_status_identity_digest': trusted_review_status_identity_digest(candidate),
+            }
+            authorize()
             os.replace(candidate, output)
             return {'schema': 'ncs_excel_delta_build_v1', 'ok': True, 'success': True,
                     'status': 'candidate_ready', 'candidate_db': str(output), 'output_db': str(output),
                     'baseline_db': str(baseline), 'source_delta': plan, 'affected_units': affected,
                     'retired_rows': retired, 'stages': stages, 'invariants': invariants,
+                    'candidate_integrity': candidate_integrity,
                     'source_normalization': 'changed_units_only',
                     'ontology_processing': 'incremental_nodes_global_dependent_relations' if affected else 'skipped_no_change',
                     'source_snapshot_semantics': 'complete_workbook_replacement',

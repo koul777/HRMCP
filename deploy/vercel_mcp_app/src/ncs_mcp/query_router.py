@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Any
 
@@ -35,6 +36,11 @@ OPERATOR_REVIEW = "operator_review"
 
 ROUTE_CONTRACT_SCHEMA = QUERY_ROUTE_SCHEMA
 ROUTE_FINGERPRINT_VERSION = "route-fingerprint-v1"
+CONTEXT_ROUTE_FINGERPRINT_VERSION = "route-fingerprint-v2"
+NCS_SEARCH_CONTEXT_SCHEMA = "ncs_search_context_v1"
+NCS_SEARCH_CONTEXT_RESOLVER_VERSION = "ncs-classification-context-resolver-v1"
+NCS_SEARCH_CONTEXT_TEXT_MAX_LENGTH = 500
+NCS_SEARCH_JOB_SCOPE_MAX_LENGTH = 100
 ROUTE_META_SAVE_FORCED_TOOLS = {
     "recommend_training_for_task",
     "recommend_training_transition",
@@ -503,6 +509,8 @@ def route_ncs_query(
     *,
     available_tool_names: set[str] | None = None,
     classification_filter: dict[str, Any] | None = None,
+    context_text: str | None = None,
+    job_scope: str | None = None,
 ) -> dict[str, Any]:
     normalized = normalize_query(query)
     internal_role_request = _is_internal_role_request(normalized)
@@ -530,8 +538,20 @@ def route_ncs_query(
     normalized_classification_filter = _normalize_route_classification_filter(
         classification_filter
     )
+    normalized_context_text, normalized_job_scope = normalize_search_context_inputs(
+        context_text=context_text,
+        job_scope=job_scope,
+    )
+    context_requested = bool(
+        pattern.tool == "ncs_search"
+        and (normalized_context_text or normalized_job_scope)
+    )
     if pattern.tool == "ncs_search" and normalized_classification_filter:
         params["classification_filter"] = normalized_classification_filter
+    if pattern.tool == "ncs_search" and normalized_job_scope:
+        # job_scope is a short, caller-supplied product field.  Free-form
+        # context_text is deliberately represented only by its digest below.
+        params["job_scope"] = normalized_job_scope
     required_params = list(pattern.required_params)
     if (
         pattern.scenario == EVIDENCE_ANALYSIS
@@ -564,10 +584,17 @@ def route_ncs_query(
     classification_context = _classification_context_contract(
         pattern,
         normalized_classification_filter,
+        context_text=normalized_context_text,
+        job_scope=normalized_job_scope,
+    )
+    fingerprint_version = (
+        CONTEXT_ROUTE_FINGERPRINT_VERSION
+        if context_requested
+        else ROUTE_FINGERPRINT_VERSION
     )
     route_contract = {
         "schema": ROUTE_CONTRACT_SCHEMA,
-        "fingerprint_version": ROUTE_FINGERPRINT_VERSION,
+        "fingerprint_version": fingerprint_version,
         "route_first": True,
         "primary_tool": pattern.tool,
         "allowed_tools": allowed_tools,
@@ -605,7 +632,7 @@ def route_ncs_query(
     route_fingerprint = route_fingerprint_for_payload(
         {
             "schema": ROUTE_CONTRACT_SCHEMA,
-            "version": ROUTE_FINGERPRINT_VERSION,
+            "version": fingerprint_version,
             "query": normalized,
             "scenario": pattern.scenario,
             "tool": pattern.tool,
@@ -661,15 +688,99 @@ def aihr_plan_route_evidence(
     target_query: str,
     *,
     available_tool_names: set[str] | None = None,
+    major_code: str | None = None,
+    current_major_code: str | None = None,
+    target_major_code: str | None = None,
+    current_middle_code: str | None = None,
+    target_middle_code: str | None = None,
+    current_small_code: str | None = None,
+    target_small_code: str | None = None,
+    current_sub_code: str | None = None,
+    target_sub_code: str | None = None,
 ) -> dict[str, Any]:
     route_query = f"{current_query}에서 {target_query}으로 교육훈련체계"
     route = route_ncs_query(route_query, available_tool_names=available_tool_names)
+    scope_inputs = {
+        "major_code": major_code,
+        "current_major_code": current_major_code,
+        "target_major_code": target_major_code,
+        "current_middle_code": current_middle_code,
+        "target_middle_code": target_middle_code,
+        "current_small_code": current_small_code,
+        "target_small_code": target_small_code,
+        "current_sub_code": current_sub_code,
+        "target_sub_code": target_sub_code,
+    }
+    scope_params = {
+        key: text
+        for key, value in scope_inputs.items()
+        if value is not None and (text := str(value).strip())
+    }
+    current_filter = {
+        key: value
+        for key, value in {
+            "major_code": scope_params.get("current_major_code")
+            or scope_params.get("major_code"),
+            "middle_code": scope_params.get("current_middle_code"),
+            "small_code": scope_params.get("current_small_code"),
+            "sub_code": scope_params.get("current_sub_code"),
+        }.items()
+        if value
+    }
+    target_filter = {
+        key: value
+        for key, value in {
+            "major_code": scope_params.get("target_major_code")
+            or scope_params.get("major_code"),
+            "middle_code": scope_params.get("target_middle_code"),
+            "small_code": scope_params.get("target_small_code"),
+            "sub_code": scope_params.get("target_sub_code"),
+        }.items()
+        if value
+    }
+    classification_context = {
+        "supported": True,
+        "parameter": "current/target classification code fields",
+        "mode": "explicit_current_target_filters",
+        "source": "caller_supplied",
+        "fields": list(scope_inputs),
+        "provided": bool(scope_params),
+        "filter": None,
+        "shared_filter": (
+            {"major_code": scope_params["major_code"]}
+            if "major_code" in scope_params
+            else None
+        ),
+        "current_filter": current_filter or None,
+        "target_filter": target_filter or None,
+    }
+    params = dict(route.get("params") or {})
+    params.update(scope_params)
+    route_contract = dict(route.get("route_contract") or {})
+    route_contract["classification_context"] = classification_context
+    route_contract["provided_params"] = list(
+        dict.fromkeys(
+            [
+                *(route_contract.get("provided_params") or []),
+                *scope_params,
+            ]
+        )
+    )
+    route_fingerprint = route_fingerprint_for_payload(
+        {
+            "schema": ROUTE_CONTRACT_SCHEMA,
+            "version": ROUTE_FINGERPRINT_VERSION,
+            "base_route_fingerprint": route.get("route_fingerprint"),
+            "classification_context": classification_context,
+        }
+    )
+    route_contract["route_fingerprint"] = route_fingerprint
     return {
         "schema": route.get("schema"),
         "query": route.get("query"),
         "scenario": route.get("scenario"),
         "tool": route.get("tool"),
-        "params": route.get("params") or {},
+        "params": params,
         "required_params": route.get("required_params") or [],
         "missing_params": route.get("missing_params") or [],
         "available": route.get("available"),
@@ -677,9 +788,9 @@ def aihr_plan_route_evidence(
         "expected_tool_chain": route.get("expected_tool_chain") or [],
         "guard_flags": route.get("guard_flags") or [],
         "risk_flags": route.get("risk_flags") or [],
-        "route_contract": route.get("route_contract") or {},
-        "route_fingerprint": route.get("route_fingerprint"),
-        "classification_context": route.get("classification_context") or {},
+        "route_contract": route_contract,
+        "route_fingerprint": route_fingerprint,
+        "classification_context": classification_context,
         "guide_reference": route.get("guide_reference") or {},
         "guide_prompt_template": route.get("guide_prompt_template") or {},
     }
@@ -939,6 +1050,9 @@ def _normalize_route_classification_filter(
 def _classification_context_contract(
     pattern: RoutePattern,
     classification_filter: dict[str, str] | None = None,
+    *,
+    context_text: str | None = None,
+    job_scope: str | None = None,
 ) -> dict[str, Any]:
     """Describe the explicit classification scope supported by structure search.
 
@@ -949,6 +1063,35 @@ def _classification_context_contract(
     """
     supported = pattern.tool == "ncs_search"
     normalized_filter = classification_filter if supported else {}
+    if supported and (context_text or job_scope):
+        return {
+            "schema": NCS_SEARCH_CONTEXT_SCHEMA,
+            "resolver_version": NCS_SEARCH_CONTEXT_RESOLVER_VERSION,
+            "supported": True,
+            "parameter": "classification_filter",
+            "mode": "soft_prior_shadow",
+            "source": "caller_supplied_context",
+            "fields": list(SEARCH_CLASSIFICATION_FILTER_FIELDS),
+            "context_fields": ["context_text", "job_scope"],
+            "provided": True,
+            "filter": normalized_filter or None,
+            "requested": search_context_request_contract(
+                context_text=context_text,
+                job_scope=job_scope,
+                classification_filter=normalized_filter,
+            ),
+            "resolution": None,
+            "policy": {
+                "query_inference_allowed": False,
+                "soft_prior_source": "caller_supplied_context",
+                "hard_filter_source": (
+                    "caller_supplied" if normalized_filter else None
+                ),
+                "lexical_tier_preserved": True,
+                "rollout_phase": "shadow",
+            },
+            "prior_applied": False,
+        }
     return {
         "supported": supported,
         "parameter": "classification_filter" if supported else None,
@@ -957,6 +1100,64 @@ def _classification_context_contract(
         "fields": list(SEARCH_CLASSIFICATION_FILTER_FIELDS) if supported else [],
         "provided": bool(normalized_filter),
         "filter": normalized_filter or None,
+    }
+
+
+def normalize_search_context_inputs(
+    *,
+    context_text: Any = None,
+    job_scope: Any = None,
+) -> tuple[str | None, str | None]:
+    """Canonicalize explicit context without deriving it from the search query."""
+
+    def normalize(value: Any, *, max_length: int, field: str) -> str | None:
+        if value is None:
+            return None
+        text = unicodedata.normalize("NFKC", str(value))
+        text = " ".join(text.strip().split()).casefold()
+        if not text:
+            return None
+        if len(text) > max_length:
+            raise ValueError(f"{field} exceeds maxLength={max_length}")
+        return text
+
+    return (
+        normalize(
+            context_text,
+            max_length=NCS_SEARCH_CONTEXT_TEXT_MAX_LENGTH,
+            field="context_text",
+        ),
+        normalize(
+            job_scope,
+            max_length=NCS_SEARCH_JOB_SCOPE_MAX_LENGTH,
+            field="job_scope",
+        ),
+    )
+
+
+def search_context_request_contract(
+    *,
+    context_text: Any = None,
+    job_scope: Any = None,
+    classification_filter: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return the public-safe request binding for explicit search context."""
+    normalized_context, normalized_scope = normalize_search_context_inputs(
+        context_text=context_text,
+        job_scope=job_scope,
+    )
+    return {
+        "context_text_present": bool(normalized_context),
+        "context_text_length": len(normalized_context or ""),
+        "context_text_digest": (
+            hashlib.sha256(normalized_context.encode("utf-8")).hexdigest()[:16]
+            if normalized_context
+            else None
+        ),
+        "job_scope": normalized_scope,
+        "classification_filter": (
+            _normalize_route_classification_filter(classification_filter) or None
+        ),
     }
 
 

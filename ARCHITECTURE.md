@@ -30,6 +30,7 @@ KSA ontology layer:
 - `ksa_atomic_items`
 - `ontology_concepts`
 - `ontology_concept_aliases`
+- `ontology_concept_relations`
 - `ksa_concept_links`
 - `ksa_atomic_concept_links`
 - `criteria_concept_links`
@@ -109,7 +110,45 @@ When those triggers appear, split serving from ingestion by moving the active
 planner store to a server-grade database or a replicated read model while
 keeping raw-source preservation and ontology invariants unchanged.
 
-## Processing Pipeline
+## Production Lifecycle Authority
+
+This section defines the target contract implemented in the current working
+tree. It is not by itself evidence that the currently deployed Vercel build was
+produced by that contract. Until the exact source commit is packaged, deployed,
+and verified through the Builder, deployment evidence must keep
+`builder_tracked_source_release_claim=false` and describe later working-tree
+changes as undeployed.
+
+Windows NCS Data Builder is the single production lifecycle authority. Operators
+start it with `run_ncs_builder.bat`; production DB/API refresh, ontology rebuild,
+compact package creation, Vercel release, remote MCP verification, and verified
+baseline promotion must remain in that versioned Builder session.
+
+```text
+run_ncs_builder.bat
+  -> source delta and ontology candidate
+  -> selected all-major training/job-base API refresh
+  -> compact DB/ZIP/manifest build and verification
+  -> isolated preview deployment and exact MCP/build verification
+  -> guarded production promotion and post-promotion verification
+  -> verified baseline promotion
+```
+
+GitHub Actions is CI-only. The repository must not add a scheduled refresh or
+deployment job, and Vercel Git deployment and cron execution stay disabled.
+Qualification and NCS006 collection are the only data-refresh exception: they
+remain a separate operator-guarded workflow with retry hygiene, coverage plan,
+checkpoint, cooldown, and operator-ready evidence. They do not grant another
+package, deploy, or baseline-promotion authority.
+
+Preview and read-only remote inspection outside a Builder session are
+non-operational diagnostics only. They cannot publish a snapshot, change the
+production alias, or satisfy baseline-promotion evidence.
+
+## Internal Component Map
+
+The following names describe implementation ownership inside the Builder and
+serving stack. They are not standalone production run instructions.
 
 ```text
 preprocess_excel.py
@@ -130,8 +169,12 @@ preprocess-ncs-ontology
   -> build task similarity links
   -> build training-course unit, element, concept, goal, and delivery links
 
-collect-job-base / collect-qualification-items
-  -> collect supporting evidence without making official eligibility decisions
+data_builder.py selected API stage
+  -> refresh all-major training-course and job-base evidence on the version copy
+
+operator-guarded qualification / NCS006 exception
+  -> collect supporting evidence only after retry and operator gates
+  -> never package, deploy, or promote a Builder baseline
 
 query_router.py
   -> map natural-language requests to NCS task, transition, evidence, review, or education-system scenarios

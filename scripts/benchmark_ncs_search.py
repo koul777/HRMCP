@@ -223,7 +223,7 @@ def measure_cold_start(archive_path: Path, manifest_path: Path) -> dict[str, Any
 
 def load_runtime_search(db_path: Path) -> SearchFunction:
     os.environ["NCS_DB_PATH"] = str(db_path.resolve())
-    os.environ["NCS_MCP_READ_ONLY_MODE"] = "true"
+    os.environ["NCS_MCP_READ_ONLY"] = "true"
     os.environ["NCS_MCP_OPERATOR_TOOLS"] = "false"
     from ncs_mcp.server import search_ncs
 

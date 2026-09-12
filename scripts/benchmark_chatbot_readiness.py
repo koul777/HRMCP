@@ -574,10 +574,13 @@ def _execute_scenario(server: Any, scenario: BenchmarkScenario) -> dict[str, Any
     errors: list[str] = []
     exception: dict[str, str] | None = None
     try:
-        route = server.route_ncs_query(
-            scenario.route_query,
-            available_tool_names=server.tool_registry.NCS_EXECUTABLE_TOOL_NAMES,
-        )
+        # Exercise the same public discovery contract that agents use before
+        # meta execution.  In particular, education-plan discovery binds the
+        # effective current/target classification scope into the route
+        # fingerprint; a raw router fingerprint is intentionally rejected by
+        # ``ncs_execute_tool`` once that scope has been derived.
+        discovery = server.ncs_discover_tools(scenario.route_query)
+        route = _payload_value(discovery, "query_route")
         errors.extend(_validate_route(route, scenario))
         if not errors:
             params = dict(scenario.params)

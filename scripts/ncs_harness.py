@@ -696,12 +696,34 @@ REQUIRED_AIHR_RECOMMENDED_PATH_GUIDE_STAGES = {
 }
 
 
-def _aihr_public_route_evidence(current_query: str, target_query: str) -> dict[str, Any]:
+def _aihr_public_route_evidence(
+    current_query: str,
+    target_query: str,
+    *,
+    major_code: str | None = None,
+    current_major_code: str | None = None,
+    target_major_code: str | None = None,
+    current_middle_code: str | None = None,
+    target_middle_code: str | None = None,
+    current_small_code: str | None = None,
+    target_small_code: str | None = None,
+    current_sub_code: str | None = None,
+    target_sub_code: str | None = None,
+) -> dict[str, Any]:
     public_tools = mcp_tools_for_mode(operator_tools_enabled=False)
     return aihr_plan_route_evidence(
         current_query,
         target_query,
         available_tool_names=public_tools,
+        major_code=major_code,
+        current_major_code=current_major_code,
+        target_major_code=target_major_code,
+        current_middle_code=current_middle_code,
+        target_middle_code=target_middle_code,
+        current_small_code=current_small_code,
+        target_small_code=target_small_code,
+        current_sub_code=current_sub_code,
+        target_sub_code=target_sub_code,
     )
 
 
@@ -11880,8 +11902,7 @@ def build_aihr_plan_review_seedpack(
     course_meta_by_id: dict[int, dict[str, Any]] = {}
     course_review_basis_by_id: dict[int, dict[str, Any]] = {}
 
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    conn = _connect_readonly_sqlite(db_path)
     try:
         for course_id in sorted_course_ids:
             course = conn.execute(
@@ -21272,7 +21293,7 @@ def build_aihr_official_learning_module_gap_audit(
     limit = clamp_limit(sample_limit, default=5, maximum=20)
     unit_packet_lookup = _aihr_unit_packet_by_code(unit_evidence_packet)
     units: list[dict[str, Any]] = []
-    conn = connect(db_path)
+    conn = _connect_readonly_sqlite(db_path)
     try:
         for code in unit_codes:
             classification = _aihr_unit_classification_for_audit(conn, code)
@@ -27834,15 +27855,16 @@ def run_smoke_check(
 
 def plan_element_batches(batch_size: int, concurrency: int) -> dict[str, Any]:
     settings = load_settings()
-    conn = connect(settings.db_path)
-    initialize_database(conn)
-    total = int(conn.execute("SELECT COUNT(*) FROM competency_elements").fetchone()[0])
-    remaining = int(
-        conn.execute(
-            "SELECT COUNT(*) FROM competency_elements WHERE api_match_status != 'matched'"
-        ).fetchone()[0]
-    )
-    conn.close()
+    conn = _connect_readonly_sqlite(Path(settings.db_path))
+    try:
+        total = int(conn.execute("SELECT COUNT(*) FROM competency_elements").fetchone()[0])
+        remaining = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM competency_elements WHERE api_match_status != 'matched'"
+            ).fetchone()[0]
+        )
+    finally:
+        conn.close()
     command = (
         "python src\\ncs_mcp\\collect_api.py --mode elements "
         f"--element-limit {batch_size} --only-uncollected --timeout 90 "
@@ -29033,7 +29055,19 @@ def parse_args() -> argparse.Namespace:
     recommend_training.add_argument("--preferred-method", action="append", default=[])
     recommend_training.add_argument("--limit", type=int, default=5)
     recommend_training.add_argument("--compact", action="store_true")
-    recommend_training.add_argument("--no-save", action="store_true")
+    recommend_training.add_argument(
+        "--save",
+        dest="save",
+        action="store_true",
+        help="Persist the recommendation audit run. Requires an explicit opt-in.",
+    )
+    recommend_training.add_argument(
+        "--no-save",
+        dest="save",
+        action="store_false",
+        help="Keep the recommendation read-only. This is the default.",
+    )
+    recommend_training.set_defaults(save=False)
 
     recommend_transition = subparsers.add_parser(
         "recommend-training-transition",
@@ -29056,7 +29090,19 @@ def parse_args() -> argparse.Namespace:
     recommend_transition.add_argument("--preferred-facility", action="append", default=[])
     recommend_transition.add_argument("--limit", type=int, default=5)
     recommend_transition.add_argument("--compact", action="store_true")
-    recommend_transition.add_argument("--no-save", action="store_true")
+    recommend_transition.add_argument(
+        "--save",
+        dest="save",
+        action="store_true",
+        help="Persist the recommendation audit run. Requires an explicit opt-in.",
+    )
+    recommend_transition.add_argument(
+        "--no-save",
+        dest="save",
+        action="store_false",
+        help="Keep the recommendation read-only. This is the default.",
+    )
+    recommend_transition.set_defaults(save=False)
 
     education_plan = subparsers.add_parser(
         "plan-ncs-education-path",
@@ -30870,8 +30916,276 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# Explicit inventory: new commands remain blocked until their side effects are reviewed.
+# "read_only" permits report/CSV/export files, never canonical DB mutation.
+# workspace-hygiene also retains its independently guarded cache cleanup path.
+# Legacy refine and MVP dry runs still initialize schema internally; they remain
+# Builder-only until their read-only behavior is independently established.
+HARNESS_COMMAND_POLICIES = {
+    "inspect": "read_only",
+    "smoke": "read_only",
+    "plan-elements": "read_only",
+    "dashboard": "read_only",
+    "build-sqf-mappings": "builder_required",
+    "mvp-bootstrap": "builder_required",
+    "query-study-modules": "read_only",
+    "collect-study-modules": "builder_required",
+    "query-training-courses": "read_only",
+    "collect-training-courses": "builder_required",
+    "query-qualification-items": "read_only",
+    "collect-qualification-items": "qualification_operator",
+    "qualification-error-report": "read_only",
+    "qualification-retry-hygiene": "apply",
+    "qualification-coverage-plan": "read_only",
+    "recommendation-evidence-hygiene": "apply",
+    "api-quality-hygiene": "apply",
+    "api-unmatched-diagnosis": "read_only",
+    "retry-qualification-errors": "qualification_operator",
+    "qualification-summary": "read_only",
+    "query-job-base": "read_only",
+    "collect-job-base": "builder_required",
+    "job-base-summary": "read_only",
+    "api-linkage-summary": "read_only",
+    "quality-gates": "read_only",
+    "report-ksa-label-candidates": "read_only",
+    "ksa-short-label-family-report": "read_only",
+    "ksa-short-label-pattern-report": "read_only",
+    "ksa-label-auto-triage-report": "read_only",
+    "ksa-label-policy-v2-sampling-plan": "read_only",
+    "llm-preprocessing-backlog-map": "read_only",
+    "llm-preprocessing-work-plan": "read_only",
+    "llm-preprocessing-runbook": "read_only",
+    "audit-readonly-refresh-path-contract": "read_only",
+    "rewrite-readonly-refresh-queue": "read_only",
+    "ksa-label-policy-v2-scope-diff": "read_only",
+    "ksa-missing-label-gap-review-pack": "read_only",
+    "report-ksa-definition-promotion": "read_only",
+    "report-retract-boilerplate-definitions": "apply",
+    "audit-ksa-immutability": "read_only",
+    "ksa-definition-candidate-family-report": "read_only",
+    "ksa-definition-priority-report": "read_only",
+    "ksa-definition-priority-review-pack": "read_only",
+    "ksa-definition-review-operator-packet": "read_only",
+    "audit-ksa-definition-review-decisions": "read_only",
+    "plan-ksa-definition-review-actions": "read_only",
+    "build-duplicate-concept-relations": "non_dry_run",
+    "report-sqf-context-score": "read_only",
+    "build-ontology-transferability-systems": "read_only",
+    "build-ontology-transferability-major-run": "read_only",
+    "summarize-ontology-transferability-run": "read_only",
+    "export-ontology-transferability-review-seedpack": "read_only",
+    "calibrate-ontology-transferability-thresholds": "read_only",
+    "diagnose-ontology-transferability-course-links": "read_only",
+    "review-ontology-transferability-course-link-candidates": "read_only",
+    "plan-ontology-transferability-method-work-queue": "read_only",
+    "audit-ontology-transferability-artifacts": "read_only",
+    "audit-ontology-transferability-education-systems": "read_only",
+    "gate-ontology-transferability-release": "read_only",
+    "plan-ontology-transferability-spotchecks": "read_only",
+    "route-ncs-query": "read_only",
+    "preprocess-hrd-guide-reference": "read_only",
+    "hrd-guide-prompt-coverage": "read_only",
+    "workspace-hygiene": "read_only",
+    "preprocess-ncs-ontology": "builder_required",
+    "recommend-task-transitions": "read_only",
+    "recommend-training-for-task": "save",
+    "recommend-training-transition": "save",
+    "plan-ncs-education-path": "save",
+    "render-aihr-plan-demo": "read_only",
+    "run-aihr-plan-demo": "read_only",
+    "export-chatgpt-evaluation-package": "read_only",
+    "resolve-ncs-query-scope": "read_only",
+    "non-hr-query-smoke": "read_only",
+    "non-hr-transition-smoke": "read_only",
+    "non-hr-education-plan-smoke": "read_only",
+    "query-resolution-gap-report": "read_only",
+    "query-alias-candidate-packet": "read_only",
+    "evaluate-training-transitions": "read_only",
+    "generate-training-transition-eval-set": "apply",
+    "review-training-transition-scenarios": "apply",
+    "prepare-hr-review-queue": "non_dry_run",
+    "prepare-ontology-review-queue": "non_dry_run",
+    "review-priority": "read_only",
+    "ksa-term-preprocessing-review-pack": "read_only",
+    "ksa-term-ontology-impact-report": "read_only",
+    "ksa-term-minimal-review-slice": "read_only",
+    "ksa-review-minimization-audit": "read_only",
+    "ksa-term-review-workflow": "read_only",
+    "ksa-term-review-operator-packet": "read_only",
+    "audit-ksa-term-review-decisions": "read_only",
+    "plan-ksa-term-review-actions": "read_only",
+    "ksa-term-review-readiness": "read_only",
+    "export-review-seedpack": "read_only",
+    "export-ontology-definition-seedpack": "read_only",
+    "export-transition-scenario-seedpack": "read_only",
+    "review-triage": "read_only",
+    "remaining-blockers-report": "read_only",
+    "human-review-backlog-report": "read_only",
+    "goal-completion-audit-report": "read_only",
+    "audit-training-necessity-review": "read_only",
+    "audit-aihr-guide-surface": "read_only",
+    "audit-human-review-display-integrity": "read_only",
+    "audit-review-artifact-readability": "read_only",
+    "audit-operator-report-lineage-sync": "read_only",
+    "build-aihr-operator-handoff-bundle": "read_only",
+    "build-qualification-guarded-batch-operator-decision": "read_only",
+    "audit-operator-review-packet-integrity": "read_only",
+    "build-aihr-blocker-reduction-sprint-queue": "read_only",
+    "build-aihr-release-operator-refresh-dag": "read_only",
+    "build-transition-provenance-crosswalk": "read_only",
+    "audit-human-review-provenance-surface": "read_only",
+    "export-human-review-provenance-reconfirmation-packet": "read_only",
+    "export-human-review-provenance-reconfirmation-proofset": "read_only",
+    "audit-report-grounded-transferability-review": "read_only",
+    "export-aihr-plan-review-seedpack": "read_only",
+    "export-aihr-plan-review-request-order": "read_only",
+    "export-aihr-plan-review-decision-sheet": "read_only",
+    "audit-aihr-plan-review-decisions": "read_only",
+    "record-aihr-plan-review-decision": "read_only",
+    "export-aihr-plan-review-next-request": "read_only",
+    "export-aihr-plan-review-group-packet": "read_only",
+    "export-aihr-plan-review-packet-index": "read_only",
+    "repair-aihr-human-review-packet-labels": "read_only",
+    "audit-aihr-plan-review-basis-coverage": "read_only",
+    "export-aihr-plan-review-unit-evidence-packet": "read_only",
+    "audit-aihr-official-learning-module-gaps": "read_only",
+    "export-aihr-plan-review-evidence-gap-triage": "read_only",
+    "export-aihr-plan-review-workflow-handoff": "read_only",
+    "audit-aihr-reviewer-artifacts": "read_only",
+    "agent-queue-status": "read_only",
+    "agent-queue-run-ready": "read_only",
+    "verify-aihr-dashboard": "read_only",
+    "import-career-paths": "builder_required",
+    "career-path-summary": "read_only",
+    "import-supplemental-ncs-data": "builder_required",
+    "supplemental-data-summary": "read_only",
+    "export-package": "builder_required",
+    "collect-sqf-library": "builder_required",
+    "import-ontology-source": "builder_required",
+    "build-sqf-sqlite-model": "builder_required",
+    "preprocess-sqf-documents": "builder_required",
+    "build-sqf-precision-matches": "builder_required",
+    "export-sqf-report-review-seedpack": "read_only",
+    "audit-sqf-corpus": "read_only",
+    "export-sqf-report-claim-candidates": "read_only",
+    "export-sqf-report-claim-decision-sheet": "read_only",
+    "audit-sqf-report-claim-decisions": "read_only",
+    "annotate-sqf-report-claim-decision": "read_only",
+    "export-sqf-review-priority": "read_only",
+    "summarize-sqf-human-review-readiness": "read_only",
+    "plan-sqf-guarded-import": "read_only",
+    "evaluate": "builder_required",
+    "ontology": "read_only",
+    "refine": "builder_required",
+    "lint": "read_only",
+    "pipeline": "pipeline",
+}
+HARNESS_PIPELINE_MUTATION_FLAGS = frozenset({
+    "preprocess", "quality", "api_standards", "api_subd", "api_elements_hr",
+    "api_sqf", "collect_study_modules", "collect_training_courses",
+    "training_course_links", "collect_job_base", "collect_sqf_library",
+    "build_sqf_sqlite_model", "preprocess_sqf_documents",
+    "build_sqf_precision_matches", "build_sqf_mappings", "mvp_bootstrap",
+    "refine", "apply_refinements",
+})
+
+
+def harness_requires_builder(args: argparse.Namespace) -> bool:
+    """Classify before any settings, SQLite, API or subprocess work."""
+    policy = HARNESS_COMMAND_POLICIES.get(args.command, "builder_required")
+    if policy in {"read_only", "qualification_operator"}:
+        return False
+    if policy in {"apply", "save"}:
+        return getattr(args, policy, False) is not False
+    if policy == "non_dry_run":
+        return getattr(args, "dry_run", False) is not True
+    if policy == "pipeline":
+        return any(getattr(args, name, False) for name in HARNESS_PIPELINE_MUTATION_FLAGS)
+    return True
+
+
+def _qualification_operator_preflight(args: argparse.Namespace) -> dict[str, Any]:
+    """Validate the existing checkpoint plus the entire bounded batch envelope."""
+    api_guard = build_ncs006_guarded_api_gate(
+        workspace=ROOT, checkpoint_path=args.ncs006_checkpoint_path,
+    )
+    violations = list(api_guard.get("safety_violations") or [])
+    if (
+        api_guard.get("status") != "allowed"
+        or api_guard.get("qualification_retry_allowed_now") is not True
+    ):
+        violations.append("ncs006_operational_gate_not_clear")
+    limits = {
+        "limit_units": (1, 100), "num_of_rows": (1, 50),
+        "max_pages": (1, 1), "page_no": (1, 1), "timeout": (1, 120),
+        "max_retries": (0, 1), "stop_after_rate_limit_errors": (1, 3),
+        "request_delay": (2, 3600), "retry_backoff_seconds": (30, 3600),
+    }
+    for name, (minimum, maximum) in limits.items():
+        value = getattr(args, name, None)
+        if (
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or not minimum <= value <= maximum
+        ):
+            violations.append(f"{name}_outside_guarded_bounds")
+    if getattr(args, "refresh", False):
+        violations.append("routine_refresh_forbidden")
+    if getattr(args, "include_not_due", False):
+        violations.append("not_due_retry_forbidden")
+    if args.command == "collect-qualification-items":
+        codes = args.unit_code or []
+        if len(codes) > 100:
+            violations.append("unit_code_batch_too_large")
+        if not (args.all_units or args.major_code or codes):
+            violations.append("qualification_scope_required")
+    if violations:
+        print_json({
+            "ok": False, "error": (
+                "qualification_collection_guard_blocked"
+                if args.command == "collect-qualification-items"
+                else "qualification_retry_guard_blocked"
+            ),
+            "command": args.command, "api_execution_guard": api_guard,
+            "safety_violations": violations,
+            "api_call_allowed_now": False, "qualification_retry_allowed_now": False,
+            "checkpoint_path": api_guard.get("checkpoint_path"),
+            "next_safe_action_status": api_guard.get("next_safe_action_status"),
+        })
+        raise SystemExit(2)
+    return api_guard
+
+
 def main() -> None:
     args = parse_args()
+    if harness_requires_builder(args):
+        print_json({
+            "ok": False, "error": "builder_authorization_required",
+            "command": args.command,
+            "mutation_policy": HARNESS_COMMAND_POLICIES.get(args.command, "unclassified"),
+            "message": "Run this mutation through the Windows NCS Data Builder workflow.",
+        })
+        raise SystemExit(2)
+    if HARNESS_COMMAND_POLICIES.get(args.command) == "qualification_operator":
+        from ncs_mcp.builder_authorization import (
+            BuilderAuthorizationError, qualification_operator_lease,
+        )
+        _qualification_operator_preflight(args)
+        try:
+            with qualification_operator_lease(root=ROOT, command=args.command) as lineage:
+                args._qualification_operation_lineage = lineage
+                _dispatch_harness_command(args)
+        except BuilderAuthorizationError as exc:
+            print_json({
+                "ok": False, "error": "builder_authorization_required",
+                "command": args.command, "message": str(exc),
+                "owner": "qualification_operator",
+            })
+            raise SystemExit(2) from exc
+        return
+    _dispatch_harness_command(args)
+
+
+def _dispatch_harness_command(args: argparse.Namespace) -> None:
     if args.command == "inspect":
         print_json(inspect_project(full_counts=args.full))
     elif args.command == "smoke":
@@ -31068,6 +31382,7 @@ def main() -> None:
             stop_after_rate_limit_errors=args.stop_after_rate_limit_errors,
         )
         result["api_execution_guard"] = api_guard
+        result["operation_context"] = args._qualification_operation_lineage
         result["api_call_allowed_now"] = api_guard.get("api_call_allowed_now")
         result["qualification_retry_allowed_now"] = api_guard.get("qualification_retry_allowed_now")
         result["checkpoint_path"] = api_guard.get("checkpoint_path")
@@ -31075,8 +31390,7 @@ def main() -> None:
         print_json(result)
     elif args.command == "qualification-error-report":
         settings = load_settings()
-        conn = connect(settings.db_path)
-        initialize_database(conn)
+        conn = _connect_readonly_sqlite(Path(settings.db_path))
         try:
             report = qualification_error_report(conn, limit=args.limit)
         finally:
@@ -31094,8 +31408,7 @@ def main() -> None:
         print_json(report)
     elif args.command == "qualification-retry-hygiene":
         settings = load_settings()
-        conn = connect(settings.db_path)
-        initialize_database(conn)
+        conn = _connect_readonly_sqlite(Path(settings.db_path))
         try:
             if args.apply:
                 report = apply_qualification_retry_hygiene(
@@ -31171,8 +31484,7 @@ def main() -> None:
         print_json(report)
     elif args.command == "recommendation-evidence-hygiene":
         settings = load_settings()
-        conn = connect(settings.db_path)
-        initialize_database(conn)
+        conn = _connect_readonly_sqlite(Path(settings.db_path))
         try:
             if args.apply:
                 report = apply_recommendation_evidence_hygiene(
@@ -31194,8 +31506,7 @@ def main() -> None:
         print_json(report)
     elif args.command == "api-quality-hygiene":
         settings = load_settings()
-        conn = connect(settings.db_path)
-        initialize_database(conn)
+        conn = _connect_readonly_sqlite(Path(settings.db_path))
         try:
             if args.apply:
                 report = apply_api_quality_hygiene(
@@ -31217,8 +31528,7 @@ def main() -> None:
         print_json(report)
     elif args.command == "api-unmatched-diagnosis":
         settings = load_settings()
-        conn = connect(settings.db_path)
-        initialize_database(conn)
+        conn = _connect_readonly_sqlite(Path(settings.db_path))
         try:
             diagnosis = api_unmatched_diagnosis_report(conn, limit=args.limit)
         finally:
@@ -31305,6 +31615,7 @@ def main() -> None:
         report_path = Path(args.report_path)
         write_qualification_error_report(report_path, result.get("error_report") or {})
         result["api_execution_guard"] = api_guard
+        result["operation_context"] = args._qualification_operation_lineage
         result["qualification_retry_allowed_now"] = api_guard.get("qualification_retry_allowed_now")
         result["report_path"] = str(report_path)
         print_json(result)
@@ -33089,8 +33400,7 @@ def main() -> None:
             conn.close()
     elif args.command == "recommend-task-transitions":
         settings = load_settings()
-        conn = connect(settings.db_path)
-        initialize_database(conn)
+        conn = _connect_readonly_sqlite(Path(settings.db_path))
         try:
             print_json(
                 recommend_task_transitions(
@@ -33114,8 +33424,11 @@ def main() -> None:
             print_json(task_locator_error_payload())
             raise SystemExit(1)
         settings = load_settings()
-        conn = connect(settings.db_path)
-        initialize_database(conn)
+        if args.save:
+            conn = connect(settings.db_path)
+            initialize_database(conn)
+        else:
+            conn = _connect_readonly_sqlite(Path(settings.db_path))
         try:
             result = recommend_training_for_task(
                 conn,
@@ -33130,7 +33443,7 @@ def main() -> None:
                 preferred_max_hours=args.preferred_max_hours,
                 preferred_methods=args.preferred_method,
                 limit=args.limit,
-                save=not args.no_save,
+                save=args.save,
             )
             if args.compact:
                 result = compact_training_task_response(result, recommendation_limit=args.limit)
@@ -33139,8 +33452,11 @@ def main() -> None:
             conn.close()
     elif args.command == "recommend-training-transition":
         settings = load_settings()
-        conn = connect(settings.db_path)
-        initialize_database(conn)
+        if args.save:
+            conn = connect(settings.db_path)
+            initialize_database(conn)
+        else:
+            conn = _connect_readonly_sqlite(Path(settings.db_path))
         try:
             result = recommend_training_transition(
                 conn,
@@ -33160,7 +33476,7 @@ def main() -> None:
                 preferred_methods=args.preferred_method,
                 preferred_facilities=args.preferred_facility,
                 limit=args.limit,
-                save=not args.no_save,
+                save=args.save,
             )
             if args.compact:
                 result = compact_training_transition_response(result, recommendation_limit=args.limit)
@@ -33168,7 +33484,19 @@ def main() -> None:
         finally:
             conn.close()
     elif args.command == "plan-ncs-education-path":
-        route_evidence = _aihr_public_route_evidence(args.current_query, args.target_query)
+        route_evidence = _aihr_public_route_evidence(
+            args.current_query,
+            args.target_query,
+            major_code=args.major_code,
+            current_major_code=args.current_major_code,
+            target_major_code=args.target_major_code,
+            current_middle_code=args.current_middle_code,
+            target_middle_code=args.target_middle_code,
+            current_small_code=args.current_small_code,
+            target_small_code=args.target_small_code,
+            current_sub_code=args.current_sub_code,
+            target_sub_code=args.target_sub_code,
+        )
         route_contract_schema = (
             route_evidence.get("route_contract", {}).get("schema")
             if isinstance(route_evidence.get("route_contract"), dict)
@@ -33397,8 +33725,7 @@ def main() -> None:
             raise SystemExit(1)
     elif args.command == "resolve-ncs-query-scope":
         settings = load_settings()
-        conn = connect(settings.db_path)
-        initialize_database(conn)
+        conn = _connect_readonly_sqlite(Path(settings.db_path))
         try:
             print_json(
                 resolve_ncs_query_scope(
@@ -33530,8 +33857,7 @@ def main() -> None:
             raise SystemExit(1)
     elif args.command == "evaluate-training-transitions":
         settings = load_settings()
-        conn = connect(settings.db_path)
-        initialize_database(conn)
+        conn = _connect_readonly_sqlite(Path(settings.db_path))
         try:
             try:
                 review_statuses = transition_review_status_filter(
@@ -33552,8 +33878,7 @@ def main() -> None:
             conn.close()
     elif args.command == "generate-training-transition-eval-set":
         settings = load_settings()
-        conn = connect(settings.db_path)
-        initialize_database(conn)
+        conn = _connect_readonly_sqlite(Path(settings.db_path))
         try:
             generation = generate_training_transition_eval_scenarios(
                 conn,
@@ -33620,8 +33945,7 @@ def main() -> None:
             conn.close()
     elif args.command == "review-training-transition-scenarios":
         settings = load_settings()
-        conn = connect(settings.db_path)
-        initialize_database(conn)
+        conn = _connect_readonly_sqlite(Path(settings.db_path))
         try:
             source_statuses = transition_review_status_filter(
                 review_statuses=args.source_review_status,
@@ -33653,8 +33977,7 @@ def main() -> None:
             conn.close()
     elif args.command == "prepare-hr-review-queue":
         settings = load_settings()
-        conn = connect(settings.db_path)
-        initialize_database(conn)
+        conn = _connect_readonly_sqlite(Path(settings.db_path))
         try:
             print_json(
                 prepare_hr_human_review_queue(
@@ -33671,8 +33994,7 @@ def main() -> None:
             conn.close()
     elif args.command == "prepare-ontology-review-queue":
         settings = load_settings()
-        conn = connect(settings.db_path)
-        initialize_database(conn)
+        conn = _connect_readonly_sqlite(Path(settings.db_path))
         try:
             result = prepare_ontology_human_review_queue(
                 conn,
@@ -36090,8 +36412,7 @@ def main() -> None:
             conn.close()
     elif args.command == "career-path-summary":
         settings = load_settings()
-        conn = connect(settings.db_path)
-        initialize_database(conn)
+        conn = _connect_readonly_sqlite(Path(settings.db_path))
         try:
             print_json(career_path_summary(conn, limit=args.limit))
         finally:
@@ -36156,8 +36477,7 @@ def main() -> None:
             conn.close()
     elif args.command == "supplemental-data-summary":
         settings = load_settings()
-        conn = connect(settings.db_path)
-        initialize_database(conn)
+        conn = _connect_readonly_sqlite(Path(settings.db_path))
         try:
             print_json(supplemental_data_summary(conn, limit=args.limit))
         finally:

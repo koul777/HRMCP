@@ -9,6 +9,12 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any, Callable
 
+from .builder_authorization import (
+    BuilderAuthorizationError,
+    BuilderOperationContext,
+    require_builder_context,
+)
+
 from .db import (
     build_task_ksa_concept_relations,
     build_task_similarity_links,
@@ -187,8 +193,11 @@ def resolve_managed_baseline(state_dir: str | Path) -> Path:
 def _sqlite_online_snapshot(
     source: Path, target: Path,
     progress: Callable[[str | dict[str, Any]], None] | None = None,
+    *, authorize: Callable[[], None] | None = None,
 ) -> None:
     """Copy a coherent SQLite view, including committed WAL pages, atomically."""
+    if authorize:
+        authorize()
     target.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{target.name}.snapshot.", suffix=".tmp", dir=target.parent
@@ -205,7 +214,13 @@ def _sqlite_online_snapshot(
                     if progress:
                         progress({'stage': 'DB 복사', 'completed': total - remaining,
                                   'total': total, 'unit': '페이지'})
+                    if authorize:
+                        authorize()
+                if authorize:
+                    authorize()
                 source_conn.backup(target_conn, pages=4096, progress=backup_progress)
+                if authorize:
+                    authorize()
                 target_conn.commit()
                 if progress:
                     progress({'stage': '복사 DB 무결성 검사', 'completed': 0, 'total': None, 'unit': '검사'})
@@ -216,6 +231,8 @@ def _sqlite_online_snapshot(
                     raise RefreshBuilderError(
                         f"SQLite online backup failed quick_check: {quick_check}"
                     )
+        if authorize:
+            authorize()
         os.replace(temporary, target)
     finally:
         temporary.unlink(missing_ok=True)
@@ -256,6 +273,66 @@ def _trusted_counts(conn: sqlite3.Connection) -> dict[str, int]:
             ).fetchone()[0]
         )
     return counts
+
+
+def _trusted_status_identity_digest(
+    conn: sqlite3.Connection,
+) -> dict[str, dict[str, Any]]:
+    """Serialize each protected table's PK/status rows into a stable digest.
+
+    This is intentionally stricter than a count: a status swap between two
+    rows must fail the refresh even when the trusted-row total is unchanged.
+    """
+
+    protected: dict[str, dict[str, Any]] = {}
+    for row in conn.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type='table' ORDER BY name"
+    ):
+        if is_dbstat_table(row[1]):
+            continue
+        table = str(row[0])
+        columns = conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+        if "review_status" not in {str(column[1]) for column in columns}:
+            continue
+        primary_key_columns = [
+            str(column[1])
+            for column in sorted(columns, key=lambda column: int(column[5] or 0))
+            if int(column[5] or 0) > 0
+        ]
+        if not primary_key_columns:
+            raise RefreshBuilderError(
+                f"trusted review-status table has no primary key: {table}"
+            )
+        quoted_keys = [f'"{column}"' for column in primary_key_columns]
+        cursor = conn.execute(
+            f"SELECT {', '.join([*quoted_keys, 'review_status'])} "
+            f'FROM "{table}" WHERE review_status IN ({TRUSTED_SQL}) '
+            f"ORDER BY {', '.join(quoted_keys)}"
+        )
+        digest = hashlib.sha256()
+        header = json.dumps(
+            {"table": table, "primary_key_columns": primary_key_columns},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        digest.update(header.encode("utf-8"))
+        digest.update(b"\n")
+        count = 0
+        for protected_row in cursor:
+            digest.update(
+                json.dumps(
+                    list(protected_row), ensure_ascii=False, separators=(",", ":")
+                ).encode("utf-8")
+            )
+            digest.update(b"\n")
+            count += 1
+        protected[table] = {
+            "count": count,
+            "primary_key_columns": primary_key_columns,
+            "sha256": f"sha256:{digest.hexdigest()}",
+        }
+    return protected
 
 
 def _raw_ksa_hash(conn: sqlite3.Connection) -> str:
@@ -500,22 +577,28 @@ def _incremental_conflicts(path: Path) -> dict[str, int]:
 def _run_pipeline(
     path: Path, *, bootstrap: bool,
     progress: Callable[[str | dict[str, Any]], None] | None = None,
+    authorize: Callable[[], None] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     stages: list[dict[str, Any]] = []
     def announce(label: str) -> None:
         if progress:
             progress({'stage': label, 'completed': 0, 'total': None, 'unit': '단계'})
+        if authorize:
+            authorize()
 
     def completed() -> None:
         if progress:
             progress({'stage': '온톨로지 처리 단계 완료', 'completed': len(stages),
                       'total': 6, 'unit': '단계'})
 
+    if authorize:
+        authorize()
     conn = connect(path)
     try:
         announce('온톨로지 처리 전 원문·검토 상태 검사')
         raw_before = _raw_ksa_hash(conn)
         trusted_before = _trusted_counts(conn)
+        trusted_identity_before = _trusted_status_identity_digest(conn)
         announce('온톨로지 기본 개념 연결')
         stages.append(
             {"name": "ensure_ontology_seeded", "result": ensure_ontology_seeded(conn)}
@@ -544,9 +627,13 @@ def _run_pipeline(
                 "WHERE relation_type='co_required_in_element' "
                 f"AND review_status NOT IN ({TRUSTED_SQL})"
             )
+            if authorize:
+                authorize()
             conn.execute(
                 f"DELETE FROM task_similarity_links WHERE review_status NOT IN ({TRUSTED_SQL})"
             )
+            if authorize:
+                authorize()
             conn.commit()
         announce('온톨로지 개념 관계 구축')
         stages.append(
@@ -575,29 +662,44 @@ def _run_pipeline(
         announce('온톨로지 처리 후 원문·검토 상태 검증')
         raw_after = _raw_ksa_hash(conn)
         trusted_after = _trusted_counts(conn)
+        trusted_identity_after = _trusted_status_identity_digest(conn)
         if raw_after != raw_before:
             raise RefreshBuilderError("raw KSA invariant failed on prepared output")
-        if trusted_after != trusted_before:
+        if (
+            trusted_after != trusted_before
+            or trusted_identity_after != trusted_identity_before
+        ):
             raise RefreshBuilderError(
-                "trusted review-state counts changed during refresh"
+                "trusted review-state identity changed during refresh"
             )
+        if authorize:
+            authorize()
         return stages, {
             "raw_ksa_hash_before": raw_before,
             "raw_ksa_hash_after": raw_after,
             "raw_ksa_preserved": True,
             "trusted_status_counts_before": trusted_before,
             "trusted_status_counts_after": trusted_after,
+            "trusted_status_identity_digest_before": trusted_identity_before,
+            "trusted_status_identity_digest_after": trusted_identity_after,
             "trusted_statuses_preserved": True,
         }
     finally:
         conn.close()
 
 
-def _run_training_pipeline(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def _run_training_pipeline(
+    path: Path, *, authorize: Callable[[], None] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if authorize:
+        authorize()
     conn = connect(path)
     try:
         raw_before = _raw_ksa_hash(conn)
         trusted_before = _trusted_counts(conn)
+        trusted_identity_before = _trusted_status_identity_digest(conn)
+        if authorize:
+            authorize()
         stages = [
             {
                 "name": "build_training_course_ontology_links",
@@ -606,16 +708,25 @@ def _run_training_pipeline(path: Path) -> tuple[list[dict[str, Any]], dict[str, 
         ]
         raw_after = _raw_ksa_hash(conn)
         trusted_after = _trusted_counts(conn)
-        if raw_after != raw_before or trusted_after != trusted_before:
+        trusted_identity_after = _trusted_status_identity_digest(conn)
+        if (
+            raw_after != raw_before
+            or trusted_after != trusted_before
+            or trusted_identity_after != trusted_identity_before
+        ):
             raise RefreshBuilderError(
                 "training refresh violated source or trusted-state invariants"
             )
+        if authorize:
+            authorize()
         return stages, {
             "raw_ksa_hash_before": raw_before,
             "raw_ksa_hash_after": raw_after,
             "raw_ksa_preserved": True,
             "trusted_status_counts_before": trusted_before,
             "trusted_status_counts_after": trusted_after,
+            "trusted_status_identity_digest_before": trusted_identity_before,
+            "trusted_status_identity_digest_after": trusted_identity_after,
             "trusted_statuses_preserved": True,
         }
     finally:
@@ -632,12 +743,28 @@ def build_ontology_refresh(
     full_rebuild_change_ratio_threshold: float = 0.10,
     per_table_change_ratio_threshold: float = 0.25,
     minimum_table_changes_for_fallback: int = 500,
+    builder_context: BuilderOperationContext | None = None,
 ) -> dict[str, Any]:
     """Plan or safely prepare an ontology refresh from one candidate NCS DB.
 
     The source and managed baseline are opened read-only or copied; neither is
     modified. Destructive update/delete reconciliation is deliberately blocked.
+    Applying requires a live Builder capability scoped to the output version.
     """
+    if apply:
+        try:
+            context = require_builder_context(builder_context, action=("build_delta", "resume"))
+            version_dir = Path(context.state_dir) / "versions" / str(context.version)
+            if version_dir.resolve() != version_dir or Path(context.root).resolve() != Path(context.root):
+                raise BuilderAuthorizationError("Builder version path was redirected.")
+            if prepared_output is None:
+                prepared_output = version_dir / "ncs.db"
+            require_builder_context(
+                context, action=("build_delta", "resume"),
+                version_dir=Path(prepared_output).expanduser().resolve().parent,
+            )
+        except BuilderAuthorizationError as exc:
+            raise RefreshBuilderError("builder_authorization_required") from exc
     candidate = Path(candidate_db).expanduser().resolve(strict=True)
     state = Path(state_dir).expanduser().resolve(strict=False)
     pointer: dict[str, Any] | None = None
@@ -737,6 +864,11 @@ def build_ontology_refresh(
     prepared: dict[str, Any] | None = None
     validation: dict[str, Any] | None = None
     status = "planned"
+    def authorize() -> None:
+        require_builder_context(context, action=("build_delta", "resume"), version_dir=output.parent)
+        if version_dir.resolve() != version_dir or output.resolve() != output:
+            raise BuilderAuthorizationError("Builder version path was redirected.")
+
     if apply and blocked:
         status = "blocked"
     elif apply and strategy == "no_rebuild":
@@ -745,11 +877,17 @@ def build_ontology_refresh(
             status = "completed"
             with closing(connect(baseline, read_only=True)) as conn:
                 baseline_raw_hash = _raw_ksa_hash(conn)
+                baseline_trusted_counts = _trusted_counts(conn)
+                baseline_trusted_identity = _trusted_status_identity_digest(conn)
             invariants.update(
                 {
                     "raw_ksa_preserved": True,
                     "raw_ksa_hash_before": baseline_raw_hash,
                     "raw_ksa_hash_after": baseline_raw_hash,
+                    "trusted_status_counts_before": baseline_trusted_counts,
+                    "trusted_status_counts_after": baseline_trusted_counts,
+                    "trusted_status_identity_digest_before": baseline_trusted_identity,
+                    "trusted_status_identity_digest_after": baseline_trusted_identity,
                     "trusted_statuses_preserved": True,
                 }
             )
@@ -764,29 +902,48 @@ def build_ontology_refresh(
             )
         if output.exists():
             raise RefreshBuilderError(f"prepared output already exists: {output}")
-        _sqlite_online_snapshot(candidate, output)
+        authorize()
+        _sqlite_online_snapshot(candidate, output, authorize=authorize)
         try:
+            authorize()
             if strategy in {"bootstrap_additive_build", "incremental_core_append"}:
                 stages, pipeline_invariants = _run_pipeline(
-                    output, bootstrap=strategy == "bootstrap_additive_build"
+                    output, bootstrap=strategy == "bootstrap_additive_build", authorize=authorize,
                 )
                 invariants.update(pipeline_invariants)
             elif strategy == "training_link_append":
-                stages, pipeline_invariants = _run_training_pipeline(output)
+                stages, pipeline_invariants = _run_training_pipeline(output, authorize=authorize)
                 invariants.update(pipeline_invariants)
             else:
                 with closing(connect(output, read_only=True)) as conn:
                     invariants["raw_ksa_preserved"] = True
                     invariants["raw_ksa_hash_before"] = _raw_ksa_hash(conn)
                     invariants["raw_ksa_hash_after"] = invariants["raw_ksa_hash_before"]
+                    invariants["trusted_status_counts_before"] = _trusted_counts(conn)
+                    invariants["trusted_status_counts_after"] = invariants[
+                        "trusted_status_counts_before"
+                    ]
+                    invariants["trusted_status_identity_digest_before"] = (
+                        _trusted_status_identity_digest(conn)
+                    )
+                    invariants["trusted_status_identity_digest_after"] = invariants[
+                        "trusted_status_identity_digest_before"
+                    ]
+                    invariants["trusted_statuses_preserved"] = True
             validation = _integrity(output)
             if not validation["ok"]:
                 raise RefreshBuilderError(
                     f"prepared output validation failed: {validation}"
                 )
             prepared = _artifact(output)
+            authorize()
             status = "completed"
+        except BuilderAuthorizationError:
+            # Preserve the incomplete copy for the operator; revoked authority
+            # cannot authorize deletion as an automatic recovery action.
+            raise
         except Exception:
+            authorize()
             output.unlink(missing_ok=True)
             raise
 
@@ -796,6 +953,8 @@ def build_ontology_refresh(
     baseline_after = _artifact(baseline) if baseline_exists else None
     if baseline_after != baseline_before:
         raise RefreshBuilderError("managed baseline changed during refresh")
+    if apply:
+        authorize()
     publisher_source = None
     if apply and status == "completed" and not blocked:
         publisher_source = prepared or baseline_before
@@ -822,11 +981,10 @@ def build_ontology_refresh(
             "destructive_reconciliation_supported": False,
             "apply_blocked": blocked,
         },
-        "next_publisher_command": (
-            f'python scripts\\publish_vercel_snapshot.py --source "{publisher_source["path"]}"'
-            if publisher_source is not None
-            else None
-        ),
+        # Do not expose the legacy one-off publisher as an operator command.
+        # Packaging must continue under the version-bound DataBuilder lease.
+        "next_publisher_command": None,
+        "next_builder_action": "package" if publisher_source is not None else None,
         "baseline_promotion": {
             "automatic": False,
             "allowed_by_this_builder": False,

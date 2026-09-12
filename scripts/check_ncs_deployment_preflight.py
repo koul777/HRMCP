@@ -350,6 +350,18 @@ def _mirror_check(check_id: str, root_path: Path, deploy_path: Path) -> dict[str
     return _check(check_id, "pass", "Root and deployment source mirrors are identical.", **details)
 
 
+SOURCE_MIRRORS = (
+    ("config_source_mirror", "config.py"),
+    ("ontology_export_source_mirror", "ontology_export.py"),
+    ("query_router_source_mirror", "query_router.py"),
+    ("search_core_source_mirror", "search/core.py"),
+    ("search_normalization_source_mirror", "search/normalization.py"),
+    ("server_source_mirror", "server.py"),
+    ("tool_registry_mirror", "tool_registry.py"),
+    ("training_recommendation_source_mirror", "training_recommendation.py"),
+)
+
+
 def _inspect_vercel_config(repo_root: Path, deploy_root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     root_path = repo_root / "vercel.json"
     deploy_path = deploy_root / "vercel.json"
@@ -490,20 +502,14 @@ def build_report(repo_root: Path) -> dict[str, Any]:
 
     deploy_config, vercel_check = _inspect_vercel_config(repo_root, deploy_root)
     checks.append(vercel_check)
-    checks.append(
-        _mirror_check(
-            "server_source_mirror",
-            repo_root / "src" / "ncs_mcp" / "server.py",
-            deploy_root / "src" / "ncs_mcp" / "server.py",
+    for check_id, relative_path in SOURCE_MIRRORS:
+        checks.append(
+            _mirror_check(
+                check_id,
+                repo_root / "src" / "ncs_mcp" / relative_path,
+                deploy_root / "src" / "ncs_mcp" / relative_path,
+            )
         )
-    )
-    checks.append(
-        _mirror_check(
-            "tool_registry_mirror",
-            repo_root / "src" / "ncs_mcp" / "tool_registry.py",
-            deploy_root / "src" / "ncs_mcp" / "tool_registry.py",
-        )
-    )
     checks.append(_inspect_tool_contract(repo_root, deploy_root, deploy_config))
     snapshot_details, snapshot_check = _inspect_snapshot(deploy_root)
     checks.append(snapshot_check)

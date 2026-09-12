@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 import sys
 import tempfile
@@ -14,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts import export_interview_serving_db as serving_export  # noqa: E402
+from ncs_mcp.data_builder import DataBuilder
 
 
 class ExportInterviewServingDatabaseTests(unittest.TestCase):
@@ -35,16 +37,23 @@ class ExportInterviewServingDatabaseTests(unittest.TestCase):
                     major_code TEXT,
                     middle_code TEXT,
                     small_code TEXT,
-                    sub_code TEXT
+                    sub_code TEXT,
+                    major_name TEXT,
+                    middle_name TEXT,
+                    small_name TEXT,
+                    sub_name TEXT
                 );
-                INSERT INTO classifications VALUES (1, '02', '02', '01', '01');
+                INSERT INTO classifications VALUES
+                    (1, '02', '02', '01', '01', '경영', '인사', '인적자원', '인사기획');
 
                 CREATE TABLE competency_units (
                     unit_code TEXT PRIMARY KEY,
                     classification_id INTEGER,
-                    unit_name_raw TEXT
+                    unit_name_raw TEXT,
+                    api_definition TEXT
                 );
-                INSERT INTO competency_units VALUES ('02020101_01v1', 1, '인사기획');
+                INSERT INTO competency_units VALUES
+                    ('02020101_01v1', 1, '인사기획', '인사기획 업무를 수행한다.');
 
                 CREATE TABLE competency_elements (
                     element_id INTEGER PRIMARY KEY,
@@ -56,17 +65,21 @@ class ExportInterviewServingDatabaseTests(unittest.TestCase):
                 CREATE TABLE performance_criteria (
                     criteria_id INTEGER PRIMARY KEY,
                     element_id INTEGER,
-                    criteria_text_raw TEXT
+                    criteria_text_raw TEXT,
+                    criteria_text_refined TEXT
                 );
-                INSERT INTO performance_criteria VALUES (100, 10, '환경을 분석할 수 있다.');
+                INSERT INTO performance_criteria VALUES
+                    (100, 10, '환경을 분석할 수 있다.', '환경 분석을 수행할 수 있다.');
 
                 CREATE TABLE ksa_items (
                     ksa_id INTEGER PRIMARY KEY,
                     element_id INTEGER,
                     ksa_type_name TEXT,
-                    ksa_text_raw TEXT
+                    ksa_text_raw TEXT,
+                    ksa_text_refined TEXT
                 );
-                INSERT INTO ksa_items VALUES (1000, 10, '지식', '인사환경 분석 지식');
+                INSERT INTO ksa_items VALUES
+                    (1000, 10, '지식', '인사환경 분석 지식', '인사 환경 분석 지식');
 
                 CREATE TABLE ncs_training_courses (
                     training_course_id INTEGER PRIMARY KEY,
@@ -391,6 +404,9 @@ class ExportInterviewServingDatabaseTests(unittest.TestCase):
                     "idx_serving_unit_standard_matched",
                 }.issubset(indexes)
             )
+            # This destination does not carry compact-only derived search
+            # columns, so its index set must not reference them.
+            self.assertNotIn("idx_serving_units_name_search_norm", indexes)
             concept_indexes = {
                 str(row[1]): int(row[2])
                 for row in dst.execute(
@@ -1073,8 +1089,37 @@ class ExportVercelOntologyCompleteDatabaseTests(unittest.TestCase):
 class ExportVercelOntologyCompactDatabaseTests(
     ExportVercelOntologyCompleteDatabaseTests
 ):
+    def test_builder_snapshot_same_process_chain_preserves_source_and_validates_archive(self):
+        from unittest.mock import patch
+        from scripts import build_vercel_snapshot as snapshot_builder
+        before = self._sha256(self.source)
+        progress = []
+        with patch.object(snapshot_builder.subprocess, 'run',
+                          wraps=snapshot_builder.subprocess.run) as run:
+            result = snapshot_builder.build_snapshot(
+                source=self.source, output_db=self.root / 'chain.db',
+                archive=self.root / 'chain.zip', manifest=self.root / 'chain.manifest.json',
+                report_path=self.root / 'chain-report.json', progress_file=self.root / 'chain-progress.json',
+                progress_callback=progress.append, builder_context=self.context,
+            )
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(before, self._sha256(self.source))
+        self.assertEqual(run.call_count, 1)
+        self.assertTrue(run.call_args.args[0][1].endswith('verify_vercel_compact_package.py'))
+        self.assertEqual([row.get('execution') for row in result['stages'][:2]],
+                         ['in_process', 'in_process'])
+        self.assertEqual(progress[-1]['completed'], 3)
+
     def setUp(self) -> None:
         super().setUp()
+        self.builder = DataBuilder(self.root)
+        self.version = self.root / '.state/ncs-data-builder/versions/a1'
+        self.root = self.version / 'release'
+        self.root.mkdir(parents=True)
+        relocated = self.version / 'ncs.db'
+        self.source.replace(relocated)
+        self.source = relocated
+        self.context = self.enterContext(self.builder.exclusive('package', 'a1'))
         with closing(sqlite3.connect(self.source)) as conn:
             conn.executescript(
                 """
@@ -1083,10 +1128,6 @@ class ExportVercelOntologyCompactDatabaseTests(
                 UPDATE ksa_atomic_items SET review_status = 'raw';
                 UPDATE ksa_atomic_concept_links SET link_status = 'raw';
 
-                ALTER TABLE classifications ADD COLUMN major_name TEXT;
-                ALTER TABLE classifications ADD COLUMN middle_name TEXT;
-                ALTER TABLE classifications ADD COLUMN small_name TEXT;
-                ALTER TABLE classifications ADD COLUMN sub_name TEXT;
                 UPDATE classifications
                 SET major_name = 'business', middle_name = 'HR',
                     small_name = 'HR management', sub_name = 'HR planning';
@@ -1237,6 +1278,7 @@ class ExportVercelOntologyCompactDatabaseTests(
             self.source,
             destination,
             profile=serving_export.PROFILE_VERCEL_ONTOLOGY_COMPACT,
+            builder_context=self.context,
         )
 
         self.assertEqual(source_hash, self._sha256(self.source))
@@ -1542,6 +1584,342 @@ class ExportVercelOntologyCompactDatabaseTests(
             ],
         )
 
+    def test_compact_profile_backfills_destination_only_normalized_search_fields(self) -> None:
+        source_db_hash = self._sha256(self.source)
+        source_ksa_hash: str
+        with closing(sqlite3.connect(self.source)) as src:
+            source_ksa_hash = serving_export._stable_ksa_sha256(src)
+            src.execute(
+                "UPDATE competency_units SET unit_name_raw = ?, api_definition = ?",
+                ("ＡＬＰＨＡ—관리", "Straße 업무"),
+            )
+            src.execute(
+                "UPDATE competency_elements SET element_name_raw = ?",
+                ("출입·통제",),
+            )
+            src.execute(
+                "UPDATE performance_criteria "
+                "SET criteria_text_raw = ?, criteria_text_refined = ?",
+                ("Cafe\u0301 점검", "ＡＬＰＨＡ, 보안"),
+            )
+            src.execute(
+                "UPDATE ksa_items SET ksa_text_raw = ?, ksa_text_refined = ? "
+                "WHERE ksa_id = 1000",
+                ("가 능력", "Straße 역량"),
+            )
+            src.execute(
+                "UPDATE classifications SET major_name = ?, middle_name = ?, "
+                "small_name = ?, sub_name = ?",
+                ("ＡＩ·HR", "인사—관리", "Cafe\u0301", "Straße"),
+            )
+            src.execute(
+                "UPDATE ncs_query_aliases SET alias_text = ?, normalized_query = ?",
+                ("ＡＬＰＨＡ", "Straße"),
+            )
+            src.commit()
+            source_db_hash = self._sha256(self.source)
+            source_ksa_hash = serving_export._stable_ksa_sha256(src)
+
+        destination = self.root / "vercel-compact-normalized.db"
+        report = serving_export.export_serving_db(
+            self.source,
+            destination,
+            profile=serving_export.PROFILE_VERCEL_ONTOLOGY_COMPACT,
+            builder_context=self.context,
+        )
+
+        self.assertEqual(source_db_hash, self._sha256(self.source))
+        with closing(sqlite3.connect(self.source)) as src, closing(
+            sqlite3.connect(destination)
+        ) as dst:
+            self.assertEqual(source_ksa_hash, serving_export._stable_ksa_sha256(src))
+            self.assertEqual(source_ksa_hash, serving_export._stable_ksa_sha256(dst))
+            for table, mappings in serving_export.SEARCH_NORMALIZATION_V2_FIELDS.items():
+                source_columns = {
+                    row[1] for row in src.execute(f"PRAGMA table_info('{table}')")
+                }
+                destination_columns = {
+                    row[1] for row in dst.execute(f"PRAGMA table_info('{table}')")
+                }
+                self.assertFalse(set(mappings.values()) & source_columns, table)
+                self.assertTrue(set(mappings.values()) <= destination_columns, table)
+
+            self.assertEqual(
+                serving_export.normalize_search_text("ＡＬＰＨＡ—관리"),
+                dst.execute(
+                    "SELECT unit_name_search_norm FROM competency_units"
+                ).fetchone()[0],
+            )
+            self.assertEqual(
+                serving_export.normalize_search_text("Cafe\u0301 점검"),
+                dst.execute(
+                    "SELECT criteria_text_raw_search_norm FROM performance_criteria"
+                ).fetchone()[0],
+            )
+            self.assertEqual(
+                serving_export.normalize_search_text("가 능력"),
+                dst.execute(
+                    "SELECT ksa_text_raw_search_override FROM ksa_items "
+                    "WHERE ksa_id = 1000"
+                ).fetchone()[0],
+            )
+            self.assertEqual(
+                serving_export.normalize_search_text("ＡＬＰＨＡ Straße"),
+                dst.execute(
+                    "SELECT alias_search_norm FROM ncs_query_aliases"
+                ).fetchone()[0],
+            )
+            self.assertEqual(
+                src.execute(
+                    "SELECT ksa_id, ksa_text_raw FROM ksa_items ORDER BY ksa_id"
+                ).fetchall(),
+                dst.execute(
+                    "SELECT ksa_id, ksa_text_raw FROM ksa_items ORDER BY ksa_id"
+                ).fetchall(),
+            )
+
+            manifest = dict(
+                dst.execute(
+                    "SELECT manifest_key, manifest_value FROM serving_snapshot_manifest"
+                ).fetchall()
+            )
+            self.assertEqual(
+                serving_export.SEARCH_NORMALIZATION_V2_SCHEMA,
+                manifest["search_normalization_schema"],
+            )
+            self.assertEqual("verified_equal", manifest["raw_ksa_parity_status"])
+            self.assertEqual(
+                "builder_derived_from_read_only_source",
+                manifest["search_normalization_source"],
+            )
+            self.assertEqual(
+                serving_export.SEARCH_NORMALIZATION_V2_STORAGE,
+                manifest["search_normalization_storage"],
+            )
+            fields = json.loads(manifest["search_normalization_fields"])
+            alias_field = next(
+                item for item in fields if item["table"] == "ncs_query_aliases"
+            )
+            self.assertEqual(
+                ["alias_text", "normalized_query"], alias_field["source_columns"]
+            )
+            self.assertEqual("alias_search_text", alias_field["runtime_virtual_column"])
+            self.assertEqual(
+                len(
+                    [
+                        derived
+                        for mappings in serving_export.SEARCH_NORMALIZATION_V2_FIELDS.values()
+                        for derived in mappings.values()
+                    ]
+                ),
+                len(fields),
+            )
+            plan = dst.execute(
+                "EXPLAIN QUERY PLAN "
+                "SELECT COUNT(*), SUM(CASE WHEN unit_name_search_norm LIKE ? "
+                "ESCAPE '\\' THEN 1 ELSE 0 END) FROM competency_units",
+                ("%alpha%",),
+            ).fetchall()
+            self.assertTrue(
+                any("idx_serving_units_name_search_norm" in str(row) for row in plan),
+                plan,
+            )
+
+        self.assertEqual(
+            serving_export.SEARCH_NORMALIZATION_V2_SCHEMA,
+            report["profile_metrics"]["search_normalization_schema"],
+        )
+        self.assertEqual(
+            serving_export.SEARCH_NORMALIZATION_V2_STORAGE,
+            report["profile_metrics"]["search_normalization_storage"],
+        )
+
+    def test_compact_profile_v2_normalization_projection_is_lossless_and_typed(self) -> None:
+        """Every v2 field has the declared dense or sparse physical behavior."""
+        with closing(sqlite3.connect(self.source)) as src:
+            src.execute(
+                "UPDATE competency_units SET unit_name_raw = ?, api_definition = ?",
+                ("Unit—Name", "Definition!"),
+            )
+            # Identity sparse values must be represented by NULL rather than a
+            # redundant duplicate. KSA covers both a nonempty and empty override.
+            src.execute(
+                "UPDATE competency_elements SET element_name_raw = ?", ("element",)
+            )
+            src.execute(
+                "UPDATE performance_criteria "
+                "SET criteria_text_raw = ?, criteria_text_refined = ?",
+                ("Raw, Text", "Refined—Text"),
+            )
+            src.execute(
+                "UPDATE ksa_items SET ksa_text_raw = ?, ksa_text_refined = ?",
+                ("Raw KSA", None),
+            )
+            src.execute(
+                "UPDATE classifications SET major_name = ?, middle_name = ?, "
+                "small_name = ?, sub_name = ?",
+                ("Major", "Middle, Name", "Small—Name", "Sub Name"),
+            )
+            src.execute(
+                "UPDATE ncs_query_aliases SET alias_text = ?, normalized_query = ?",
+                ("Alias, Name", "Query!"),
+            )
+            src.commit()
+            source_ksa_hash = serving_export._stable_ksa_sha256(src)
+            source_rows = {}
+            for table, source_columns in (
+                serving_export.SEARCH_NORMALIZATION_SOURCE_FIELDS.items()
+            ):
+                projection = ", ".join(("rowid", *source_columns))
+                source_rows[table] = src.execute(
+                    f"SELECT {projection} FROM {table} ORDER BY rowid"
+                ).fetchall()
+
+        destination = self.root / "vercel-compact-normalized-v2.db"
+        serving_export.export_serving_db(
+            self.source,
+            destination,
+            profile=serving_export.PROFILE_VERCEL_ONTOLOGY_COMPACT,
+            builder_context=self.context,
+        )
+
+        with closing(sqlite3.connect(self.source)) as src, closing(
+            sqlite3.connect(destination)
+        ) as dst:
+            self.assertEqual(source_ksa_hash, serving_export._stable_ksa_sha256(src))
+            self.assertEqual(source_ksa_hash, serving_export._stable_ksa_sha256(dst))
+            self.assertEqual(
+                src.execute(
+                    "SELECT ksa_id, ksa_text_raw, ksa_text_refined "
+                    "FROM ksa_items ORDER BY ksa_id"
+                ).fetchall(),
+                dst.execute(
+                    "SELECT ksa_id, ksa_text_raw, ksa_text_refined "
+                    "FROM ksa_items ORDER BY ksa_id"
+                ).fetchall(),
+            )
+
+            manifest = dict(
+                dst.execute(
+                    "SELECT manifest_key, manifest_value FROM serving_snapshot_manifest"
+                ).fetchall()
+            )
+            self.assertEqual(
+                serving_export.SEARCH_NORMALIZATION_V2_SCHEMA,
+                manifest["search_normalization_schema"],
+            )
+            self.assertEqual(
+                serving_export.SEARCH_NORMALIZATION_SOURCE,
+                manifest["search_normalization_source"],
+            )
+            self.assertEqual("verified_equal", manifest["raw_ksa_parity_status"])
+            self.assertEqual(
+                serving_export.SEARCH_NORMALIZATION_V2_STORAGE,
+                manifest["search_normalization_storage"],
+            )
+            manifest_fields = json.loads(manifest["search_normalization_fields"])
+            self.assertEqual(12, len(manifest_fields))
+
+            manifest_modes = {
+                (item["table"], item["derived_column"]): item["storage_mode"]
+                for item in manifest_fields
+            }
+            expected_modes = {
+                (table, storage_column): (
+                    "sparse_override"
+                    if storage_column
+                    in serving_export.SEARCH_NORMALIZATION_V2_OVERRIDES.get(
+                        table, {}
+                    ).values()
+                    else "dense"
+                )
+                for table, mappings in serving_export.SEARCH_NORMALIZATION_V2_FIELDS.items()
+                for storage_column in mappings.values()
+            }
+            self.assertEqual(expected_modes, manifest_modes)
+
+            for table, mappings in serving_export.SEARCH_NORMALIZATION_V2_FIELDS.items():
+                source_columns = {
+                    row[1] for row in src.execute(f"PRAGMA table_info('{table}')")
+                }
+                destination_info = {
+                    row[1]: row for row in dst.execute(f"PRAGMA table_info('{table}')")
+                }
+                self.assertFalse(set(mappings.values()) & source_columns, table)
+                self.assertTrue(set(mappings.values()) <= destination_info.keys(), table)
+                override_columns = set(
+                    serving_export.SEARCH_NORMALIZATION_V2_OVERRIDES.get(
+                        table, {}
+                    ).values()
+                )
+                destination_rows = [
+                    row[1:]
+                    for row in dst.execute(
+                        f"SELECT rowid, {', '.join(mappings.values())} "
+                        f"FROM {table} ORDER BY rowid"
+                    )
+                ]
+                self.assertEqual(len(source_rows[table]), len(destination_rows))
+                for runtime_column, storage_column in mappings.items():
+                    column_info = destination_info[storage_column]
+                    self.assertEqual("TEXT", str(column_info[2]).upper())
+                    self.assertEqual(
+                        storage_column not in override_columns,
+                        bool(column_info[3]),
+                        f"{table}.{storage_column}",
+                    )
+                    field_index = list(mappings).index(runtime_column)
+                    for source_row, destination_row in zip(
+                        source_rows[table], destination_rows
+                    ):
+                        if table == "ncs_query_aliases":
+                            raw_value = f"{source_row[1] or ''} {source_row[2] or ''}"
+                        else:
+                            raw_value = source_row[field_index + 1]
+                        normalized = serving_export.normalize_search_text(raw_value)
+                        expected = (
+                            None
+                            if storage_column in override_columns
+                            and normalized == raw_value
+                            else normalized
+                        )
+                        self.assertEqual(
+                            expected,
+                            destination_row[field_index],
+                            f"{table}.{storage_column}",
+                        )
+
+            self.assertIsNone(
+                dst.execute(
+                    "SELECT element_name_search_override FROM competency_elements"
+                ).fetchone()[0]
+            )
+            self.assertEqual(
+                "",
+                dst.execute(
+                    "SELECT ksa_text_refined_search_override FROM ksa_items"
+                ).fetchone()[0],
+            )
+
+    def test_compact_profile_rejects_partial_normalization_source_schema(self) -> None:
+        with closing(sqlite3.connect(self.source)) as src:
+            src.execute("ALTER TABLE ksa_items DROP COLUMN ksa_text_refined")
+            src.commit()
+
+        destination = self.root / "invalid-partial-normalization.db"
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"ksa_items; missing columns: \['ksa_text_refined'\]",
+        ):
+            serving_export.export_serving_db(
+                self.source,
+                destination,
+                profile=serving_export.PROFILE_VERCEL_ONTOLOGY_COMPACT,
+                builder_context=self.context,
+            )
+        with closing(sqlite3.connect(destination)) as dst:
+            self.assertEqual(set(), self._table_names(dst))
+
     def test_compact_profile_refuses_to_collapse_review_states(self) -> None:
         with closing(sqlite3.connect(self.source)) as conn:
             conn.execute(
@@ -1553,6 +1931,7 @@ class ExportVercelOntologyCompactDatabaseTests(
                 self.source,
                 self.root / "invalid-review-collapse.db",
                 profile=serving_export.PROFILE_VERCEL_ONTOLOGY_COMPACT,
+                builder_context=self.context,
             )
 
     def test_compact_profile_refuses_unsafe_atomic_state_and_derivation(self) -> None:
@@ -1567,6 +1946,7 @@ class ExportVercelOntologyCompactDatabaseTests(
                 self.source,
                 self.root / "invalid-atomic-status.db",
                 profile=serving_export.PROFILE_VERCEL_ONTOLOGY_COMPACT,
+                builder_context=self.context,
             )
 
         with closing(sqlite3.connect(self.source)) as conn:
@@ -1580,6 +1960,7 @@ class ExportVercelOntologyCompactDatabaseTests(
                 self.source,
                 self.root / "invalid-atomic-derivation.db",
                 profile=serving_export.PROFILE_VERCEL_ONTOLOGY_COMPACT,
+                builder_context=self.context,
             )
 
     def test_compact_profile_refuses_orphaned_job_base_reference(self) -> None:
@@ -1593,6 +1974,7 @@ class ExportVercelOntologyCompactDatabaseTests(
                 self.source,
                 self.root / "invalid-job-base-reference.db",
                 profile=serving_export.PROFILE_VERCEL_ONTOLOGY_COMPACT,
+                builder_context=self.context,
             )
 
 

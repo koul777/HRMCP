@@ -20,11 +20,12 @@ if __package__ in {None, ""}:  # pragma: no cover - direct script support
 
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable
+from typing import Annotated, Any, Callable
 
 import mcp.server.fastmcp.utilities.func_metadata as fastmcp_func_metadata
 from mcp.server.fastmcp import FastMCP
 from mcp.types import TextContent
+from pydantic import Field
 from starlette.responses import JSONResponse
 
 from ncs_mcp.config import load_settings
@@ -65,7 +66,14 @@ from ncs_mcp.qualification_api import (
     search_qualification_links as qualification_search_links,
 )
 from ncs_mcp.contracts import PLAN_NCS_EDUCATION_PATH_TOOL, QUERY_ROUTE_SCHEMA
-from ncs_mcp.query_router import aihr_plan_route_evidence, route_ncs_query
+from ncs_mcp.query_router import (
+    CONTEXT_ROUTE_FINGERPRINT_VERSION,
+    NCS_SEARCH_CONTEXT_SCHEMA,
+    aihr_plan_route_evidence,
+    normalize_search_context_inputs,
+    route_fingerprint_for_payload,
+    route_ncs_query,
+)
 from ncs_mcp.review_safety import (
     REVIEW_PACKET_EXTENSIONS,
     normalize_source_decision_packet_ref,
@@ -340,7 +348,7 @@ def execute_capacity_bound_recommendation(
         with recommendation_capacity_slot() as capacity:
             if not capacity["acquired"]:
                 return None, capacity, recommendation_capacity_error(capacity)
-            with open_db() as conn:
+            with open_recommendation_db() as conn:
                 return operation(conn), capacity, None
     except Exception as exc:
         return None, capacity, recommendation_execution_error(
@@ -393,12 +401,9 @@ async def readiness_check(_request: Any) -> JSONResponse:
 
 
 def db():
+    """Open the prepared serving snapshot; only Builder may initialize or write it."""
     settings = load_settings()
-    read_only_mode = bool(getattr(settings, "read_only_mode", False))
-    conn = connect(settings.db_path, read_only=read_only_mode)
-    if not read_only_mode:
-        initialize_database(conn)
-    return conn
+    return connect(settings.db_path, read_only=True)
 
 
 def runtime_health_metadata() -> dict[str, Any]:
@@ -417,6 +422,17 @@ def current_transport_metadata() -> dict[str, str | None]:
 
 def database_readiness_metadata(db_path) -> dict[str, Any]:
     return shared_database_readiness_metadata(db_path)
+
+
+@contextmanager
+def open_recommendation_db():
+    """Serve recommendations from a prepared database without initializing it."""
+    settings = load_settings()
+    conn = connect(settings.db_path, read_only=True)
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 @contextmanager
@@ -1318,6 +1334,36 @@ def quality_for(conn, target_type: str, target_id: str | int) -> list[dict[str, 
     return rows_to_dicts(rows)
 
 
+def builder_only_operation(func):
+    """Keep legacy/operator signatures while denying writes before any side effect."""
+    @wraps(func)
+    def blocked(*args, **kwargs):
+        return error_response(
+            "builder_only_operation",
+            tool_name=func.__name__,
+            message="This operation is available only in Builder; MCP is read-only.",
+        )
+    return blocked
+
+
+def read_only_legacy_recommendation(func):
+    """Serve the private compatibility reader without creating recommendation audits."""
+    blocked = builder_only_operation(func)
+
+    @wraps(func)
+    def read_only(*args, **kwargs):
+        # Retain the fail-closed legacy-operation behavior when called without
+        # the query that identifies a compatibility read.
+        if not args and "query" not in kwargs:
+            return blocked(*args, **kwargs)
+        # This legacy endpoint is intentionally not registered as a public MCP tool.
+        # Ignore its historical save=True default because serving connections are
+        # query-only and recommendation audit persistence belongs to Builder.
+        kwargs["save"] = False
+        return func(*args, **kwargs)
+    return read_only
+
+
 READ_ONLY_LEGACY_HANDLERS = build_read_only_legacy_handlers(
     open_db=open_db,
     quality_for=quality_for,
@@ -1327,6 +1373,11 @@ READ_ONLY_LEGACY_HANDLERS = build_read_only_legacy_handlers(
     db_path_getter=lambda: load_settings().db_path,
 )
 
+# The legacy SQF summary initializes its DB internally despite its read-like name.
+READ_ONLY_LEGACY_HANDLERS.get_sqf_ontology_summary = builder_only_operation(
+    READ_ONLY_LEGACY_HANDLERS.get_sqf_ontology_summary
+)
+
 LEGACY_OPERATION_HANDLERS = build_legacy_operation_handlers(
     open_db=open_db,
     tool_response=tool_response,
@@ -1334,6 +1385,20 @@ LEGACY_OPERATION_HANDLERS = build_legacy_operation_handlers(
     now_utc=now_utc,
     db_path_getter=lambda: load_settings().db_path,
 )
+
+for _operation_name, _operation in vars(LEGACY_OPERATION_HANDLERS).items():
+    # These compatibility readers are private to the Python surface. They force
+    # save=False and remain absent from the public MCP registry.
+    if _operation_name == "recommend_learning_modules_by_ncs":
+        continue
+    if _operation_name == "recommend_education_for_duty":
+        setattr(
+            LEGACY_OPERATION_HANDLERS,
+            _operation_name,
+            read_only_legacy_recommendation(_operation),
+        )
+        continue
+    setattr(LEGACY_OPERATION_HANDLERS, _operation_name, builder_only_operation(_operation))
 
 _legacy_build_sqf_ncs_mapping_candidates = LEGACY_OPERATION_HANDLERS.build_sqf_ncs_mapping_candidates
 _legacy_map_sqf_to_ncs = LEGACY_OPERATION_HANDLERS.map_sqf_to_ncs
@@ -1630,8 +1695,10 @@ def ncs_search(
     limit: int = 20,
     offset: int = 0,
     classification_filter: dict[str, Any] | None = None,
+    context_text: Annotated[str | None, Field(max_length=500)] = None,
+    job_scope: Annotated[str | None, Field(max_length=100)] = None,
 ) -> dict[str, Any]:
-    """NCS 분류·능력단위·요소·수행준거·KSA를 검색합니다. Search NCS structure and evidence."""
+    """명시 문맥(Shadow)과 hard filter로 NCS 구조·KSA를 검색합니다. Search NCS evidence."""
     normalized_scope = scope if scope in {"unit", "element", "criteria", "ksa", "all"} else "all"
     if not query:
         filter_kwargs = {
@@ -1651,9 +1718,29 @@ def ncs_search(
         result = list_classifications(limit=limit, **filter_kwargs)
         rows = result.get("classifications", [])
         if not rows:
-            return not_found_response("NCS 분류 목록을 찾을 수 없습니다.")
+            response = not_found_response("NCS 분류 목록을 찾을 수 없습니다.")
+            with open_db() as conn:
+                response["search_context"] = resolve_ncs_search_context(
+                    conn,
+                    context_text=context_text,
+                    job_scope=job_scope,
+                    classification_filter=classification_filter,
+                )
+            return response
+        with open_db() as conn:
+            search_context = resolve_ncs_search_context(
+                conn,
+                context_text=context_text,
+                job_scope=job_scope,
+                classification_filter=classification_filter,
+            )
         return tool_response(
-            {"query": query, "scope": "classification", "classifications": rows},
+            {
+                "query": query,
+                "scope": "classification",
+                "classifications": rows,
+                "search_context": search_context,
+            },
             audit={
                 "data_sources": ["classifications", "competency_units"],
                 "returned": len(rows),
@@ -1667,10 +1754,14 @@ def ncs_search(
         limit=limit,
         offset=offset,
         classification_filter=classification_filter,
+        context_text=context_text,
+        job_scope=job_scope,
     )
     rows = result.get("results", [])
     if not rows:
-        return not_found_response(f"NCS 검색 결과가 없습니다: {query}")
+        response = not_found_response(f"NCS 검색 결과가 없습니다: {query}")
+        response["search_context"] = result.get("search_context")
+        return response
     return tool_response(
         result,
         audit={
@@ -1951,30 +2042,217 @@ def ncs_analysis(
     return result
 
 
+def _search_context_binding_payload(search_context: Any) -> dict[str, Any]:
+    """Return the raw-context-free resolver fields used for route binding."""
+    def candidate_contract(candidate: Any) -> dict[str, Any] | None:
+        if not isinstance(candidate, dict):
+            return None
+        return {
+            **{
+                f"{level}_code": candidate.get(f"{level}_code")
+                for level in ("major", "middle", "small", "sub")
+            },
+            "confidence": candidate.get("confidence"),
+        }
+
+    context = search_context if isinstance(search_context, dict) else {}
+    return {
+        "schema": context.get("schema"),
+        "resolver_version": context.get("resolver_version"),
+        "requested": context.get("requested"),
+        "policy": context.get("policy"),
+        "status": context.get("status"),
+        "selected_candidate": candidate_contract(
+            context.get("selected_candidate")
+        ),
+        "alternative_candidates": [
+            candidate
+            for item in context.get("alternative_candidates") or []
+            if (candidate := candidate_contract(item)) is not None
+        ],
+        "resolution_margin": context.get("resolution_margin"),
+        "prior_applied": context.get("prior_applied"),
+        "hard_filter_applied": context.get("hard_filter_applied"),
+        "needs_context": context.get("needs_context"),
+    }
+
+
+def _search_context_binding_hash(search_context: Any) -> str:
+    return route_fingerprint_for_payload(
+        {
+            "schema": "ncs_search_context_binding_v1",
+            "search_context": _search_context_binding_payload(search_context),
+        }
+    )
+
+
+def _search_context_fingerprint_payload(
+    route: dict[str, Any],
+    search_context: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind effective context resolution without binding ignored input keys."""
+    return {
+        "schema": "ncs_query_route_v1",
+        "version": CONTEXT_ROUTE_FINGERPRINT_VERSION,
+        "base_route_fingerprint": route.get("route_fingerprint"),
+        "search_context": _search_context_binding_payload(search_context),
+    }
+
+
+def _route_with_execution_scope(
+    query: str,
+    *,
+    available_tool_names: set[str],
+    classification_filter: dict[str, Any] | None = None,
+    context_text: Annotated[str | None, Field(max_length=500)] = None,
+    job_scope: Annotated[str | None, Field(max_length=100)] = None,
+    execution_params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Bind discovery and meta execution to the same effective planner scope."""
+    route = route_ncs_query(
+        query,
+        available_tool_names=available_tool_names,
+        classification_filter=classification_filter,
+        context_text=context_text,
+        job_scope=job_scope,
+    )
+    normalized_context, normalized_job_scope = normalize_search_context_inputs(
+        context_text=context_text,
+        job_scope=job_scope,
+    )
+    if route.get("tool") == "ncs_search" and (
+        normalized_context or normalized_job_scope
+    ):
+        with open_db() as conn:
+            search_context = resolve_ncs_search_context(
+                conn,
+                context_text=normalized_context,
+                job_scope=normalized_job_scope,
+                classification_filter=classification_filter,
+            )
+        fingerprint = route_fingerprint_for_payload(
+            _search_context_fingerprint_payload(route, search_context)
+        )
+        search_context_hash = _search_context_binding_hash(search_context)
+        classification_context = dict(route.get("classification_context") or {})
+        selected_candidate = search_context.get("selected_candidate") or {}
+        classification_context.update(
+            schema=NCS_SEARCH_CONTEXT_SCHEMA,
+            resolver_version=search_context.get("resolver_version"),
+            mode="soft_prior",
+            source="caller_supplied_context",
+            requested=search_context.get("requested"),
+        )
+        classification_context["resolution"] = {
+            "status": search_context.get("status"),
+            "selected_codes": [
+                selected_candidate.get(f"{level}_code")
+                for level in ("major", "middle", "small", "sub")
+                if selected_candidate.get(f"{level}_code") is not None
+            ],
+            "resolution_margin": search_context.get("resolution_margin"),
+        }
+        contract = dict(route.get("route_contract") or {})
+        contract.update(
+            fingerprint_version=CONTEXT_ROUTE_FINGERPRINT_VERSION,
+            classification_context=classification_context,
+            search_context_binding_schema="ncs_search_context_binding_v1",
+            search_context_hash=search_context_hash,
+            route_fingerprint=fingerprint,
+        )
+        route.update(
+            classification_context=classification_context,
+            search_context=search_context,
+            route_contract=contract,
+            route_fingerprint=fingerprint,
+        )
+        return route
+    if route.get("tool") != "plan_ncs_education_path":
+        return route
+    filters = {} if classification_filter is None else classification_filter
+    if not isinstance(filters, dict):
+        raise ValueError("Planner classification_filter must be an object.")
+    if any(filters.get(f"{level}_name") for level in ("major", "middle", "small", "sub")):
+        raise ValueError("Planner classification_filter requires classification codes, not names.")
+    explicit = execution_params or {}
+    scope = {}
+    for side in ("current", "target"):
+        for level in ("major", "middle", "small", "sub"):
+            field = f"{side}_{level}_code"
+            values = [explicit.get(field)]
+            if level == "major":
+                values.append(explicit.get("major_code"))
+            values.extend((filters.get(field), filters.get(f"{level}_code")))
+            value = next(
+                (str(item).strip() for item in values if item is not None and str(item).strip()),
+                None,
+            )
+            if value is not None:
+                scope[field] = value
+    params = dict(route.get("params") or {})
+    for key in ("current_query", "target_query"):
+        if not _route_value_missing(explicit.get(key)):
+            params[key] = explicit[key]
+    scope_route = aihr_plan_route_evidence(
+        params.get("current_query", ""),
+        params.get("target_query", ""),
+        available_tool_names=available_tool_names,
+        **scope,
+    )
+    params.update(scope)
+    context = scope_route["classification_context"]
+    fingerprint = route_fingerprint_for_payload({
+        "base_route_fingerprint": route["route_fingerprint"],
+        "classification_context": context,
+        "current_query": params.get("current_query"),
+        "target_query": params.get("target_query"),
+    })
+    contract = dict(route["route_contract"])
+    contract.update(
+        classification_context=context,
+        provided_params=sorted(key for key, value in params.items() if not _route_value_missing(value)),
+        route_fingerprint=fingerprint,
+    )
+    route.update(
+        params=params,
+        classification_context=context,
+        route_contract=contract,
+        route_fingerprint=fingerprint,
+    )
+    return route
+
+
 @mcp.tool()
 @guard_public_tool
 def ncs_discover_tools(
     intent: str = "",
     classification_filter: dict[str, Any] | None = None,
+    context_text: Annotated[str | None, Field(max_length=500)] = None,
+    job_scope: Annotated[str | None, Field(max_length=100)] = None,
 ) -> dict[str, Any]:
-    """한국어 사용자 의도에 맞는 HRMCP 도구와 호출 순서를 안내합니다. Discover the right tool."""
+    """명시 HR 문맥을 결속해 적절한 읽기 전용 도구와 호출 순서를 안내합니다."""
     surface = current_mcp_tool_surface()
-    query_route = route_ncs_query(
+    query_route = _route_with_execution_scope(
         intent,
         available_tool_names=set(surface["all_tools"]),
         classification_filter=classification_filter,
+        context_text=context_text,
+        job_scope=job_scope,
     )
     matches = tool_registry.discover_tools_for_intent(
         intent,
         executable_tool_names=tool_registry.NCS_EXECUTABLE_TOOL_NAMES,
         available_tool_names=set(surface["all_tools"]),
     )
-    return tool_response(
-        {
+    response_payload = {
             "response_schema_version": "ncs_discover_tools_v2",
             "intent": intent,
             "classification_filter": (
                 query_route.get("classification_context", {}).get("filter")
+                or {
+                    key: value for key, value in query_route.get("params", {}).items()
+                    if key.endswith("_code")
+                }
                 or {}
             ),
             "query_route": query_route,
@@ -1991,7 +2269,9 @@ def ncs_discover_tools(
                 "NCS_MCP_ENABLE_ADVANCED_TOOLS=1 is set before server start."
             ),
             "hidden_legacy_note": "SQF and learning-module legacy tools are not part of the active recommendation path.",
-        },
+        }
+    return tool_response(
+        response_payload,
         audit={
             "data_sources": ["NCS MCP tool registry"],
             "generated_at": now_utc(),
@@ -2096,11 +2376,29 @@ def ncs_execute_tool(tool_name: str, params: dict[str, Any] | None = None) -> di
     tool_params = dict(params or {})
     route_query = tool_params.pop("_route_query", None)
     route_fingerprint = tool_params.pop("_route_fingerprint", None)
+    normalized_context, normalized_job_scope = normalize_search_context_inputs(
+        context_text=tool_params.get("context_text"),
+        job_scope=tool_params.get("job_scope"),
+    )
+    if tool_name == "ncs_search" and (
+        normalized_context or normalized_job_scope
+    ) and (not route_query or not route_fingerprint):
+        return error_response(
+            "context_route_binding_required",
+            tool_name=tool_name,
+            message=(
+                "Context-aware meta execution requires both _route_query and "
+                "_route_fingerprint from ncs_discover_tools."
+            ),
+        )
     query_route = (
-        route_ncs_query(
+        _route_with_execution_scope(
             str(route_query),
             available_tool_names=tool_registry.NCS_EXECUTABLE_TOOL_NAMES,
             classification_filter=tool_params.get("classification_filter"),
+            context_text=tool_params.get("context_text"),
+            job_scope=tool_params.get("job_scope"),
+            execution_params=tool_params,
         )
         if route_query
         else None
@@ -2142,7 +2440,14 @@ def ncs_execute_tool(tool_name: str, params: dict[str, Any] | None = None) -> di
         if tool_name == query_route.get("tool"):
             route_params = query_route.get("params") if isinstance(query_route.get("params"), dict) else {}
             for key, value in route_params.items():
-                tool_params.setdefault(key, value)
+                if tool_name == "plan_ncs_education_path" and (
+                    key in {"current_query", "target_query"} or key.endswith("_code")
+                ):
+                    tool_params[key] = value
+                else:
+                    tool_params.setdefault(key, value)
+            if tool_name == "plan_ncs_education_path":
+                tool_params.pop("classification_filter", None)
         missing_required = _route_missing_required_params(query_route, tool_params)
         if missing_required:
             return error_response(
@@ -2173,6 +2478,66 @@ def ncs_execute_tool(tool_name: str, params: dict[str, Any] | None = None) -> di
             message=str(exc),
         )
     if isinstance(result, dict):
+        context_binding_meta: dict[str, Any] = {}
+        if tool_name == "ncs_search" and query_route and (
+            normalized_context or normalized_job_scope
+        ):
+            expected_context = query_route.get("search_context")
+            actual_context = result.get("search_context")
+            expected_binding = _search_context_binding_payload(expected_context)
+            actual_binding = _search_context_binding_payload(actual_context)
+            expected_hash = _search_context_binding_hash(expected_context)
+            actual_hash = _search_context_binding_hash(actual_context)
+            contract_hash = (query_route.get("route_contract") or {}).get(
+                "search_context_hash"
+            )
+            if (
+                expected_binding.get("schema") != NCS_SEARCH_CONTEXT_SCHEMA
+                or actual_binding.get("schema") != NCS_SEARCH_CONTEXT_SCHEMA
+                or contract_hash != expected_hash
+                or expected_binding != actual_binding
+            ):
+                response = error_response(
+                    "context_route_resolution_mismatch",
+                    tool_name=tool_name,
+                    route_fingerprint=query_route.get("route_fingerprint"),
+                    expected_search_context_hash=expected_hash,
+                    actual_search_context_hash=actual_hash,
+                    expected_search_context_status=expected_binding.get("status"),
+                    actual_search_context_status=actual_binding.get("status"),
+                    message=(
+                        "Search context changed after route verification. "
+                        "Run ncs_discover_tools again and retry with the new fingerprint."
+                    ),
+                )
+                response["meta_execution"] = _route_execution_metadata(
+                    tool_name=tool_name,
+                    query_route=query_route,
+                    params=params,
+                )
+                response["meta_execution"].update(
+                    search_context_binding_schema="ncs_search_context_binding_v1",
+                    search_context_binding_verified=False,
+                    expected_search_context_hash=expected_hash,
+                    actual_search_context_hash=actual_hash,
+                )
+                return response
+            context_binding_meta = {
+                "search_context_binding_schema": "ncs_search_context_binding_v1",
+                "search_context_binding_verified": True,
+                "search_context_hash": actual_hash,
+            }
+        if tool_name == "plan_ncs_education_path" and result.get("ok"):
+            if query_route is None:
+                query_route = result.get("query_route")
+            elif query_route.get("tool") == tool_name:
+                # Publish the validated request route, including its original intent
+                # and risk flags, instead of the facade's separately generated route.
+                for payload in (result, result.get("data")):
+                    if isinstance(payload, dict):
+                        payload["query_route"] = query_route
+                        payload["route_fingerprint"] = query_route["route_fingerprint"]
+                        payload["route_contract_schema"] = query_route["schema"]
         result.setdefault("meta_execution", {})
         result["meta_execution"].update(
             _route_execution_metadata(
@@ -2181,6 +2546,7 @@ def ncs_execute_tool(tool_name: str, params: dict[str, Any] | None = None) -> di
                 params=params,
             )
         )
+        result["meta_execution"].update(context_binding_meta)
         return result
     return tool_response(
         {
@@ -2578,6 +2944,7 @@ from .search import (
     configure_search_runtime as _configure_search_runtime,
     search_ncs,
 )
+from .search.core import resolve_ncs_search_context
 
 _configure_search_runtime(
     open_db_factory=lambda: open_db(),
@@ -2591,6 +2958,7 @@ _configure_search_runtime(
 )
 
 @mcp.tool()
+@guard_public_tool
 def get_quality_issues(
     target_type: str | None = None,
     unit_code: str | None = None,
@@ -2755,6 +3123,7 @@ def get_training_course(
     return tool_response(result, include_data_alias=False)
 
 
+@builder_only_operation
 def build_training_course_ontology_links(
     major_code: str | None = None,
     reset: bool = False,
@@ -2779,6 +3148,7 @@ def build_training_course_ontology_links(
     )
 
 
+@builder_only_operation
 def import_career_paths(
     csv_path: str,
     encoding: str = "cp949",
@@ -2911,6 +3281,7 @@ def get_qualification_error_report(limit: int = 50) -> dict[str, Any]:
     )
 
 
+@builder_only_operation
 def retry_qualification_errors(
     major_code: str | None = None,
     limit_units: int | None = None,
@@ -3119,10 +3490,13 @@ def recommend_training_for_task(
     preferred_max_hours: float | None = None,
     preferred_methods: list[str] | None = None,
     limit: int = 5,
-    save: bool = True,
+    save: bool = False,
     compact: bool = False,
 ) -> dict[str, Any]:
-    """과업의 수행준거와 KSA 근거로 훈련과정을 추천합니다. Recommend training from task evidence."""
+    """과업의 수행준거와 KSA 근거로 훈련과정을 추천합니다. Recommend training from task evidence.
+
+    The legacy save parameter is accepted for compatibility; MCP never saves results.
+    """
     result, capacity, failure = execute_capacity_bound_recommendation(
         "recommend_training_for_task",
         lambda conn: training_recommend_for_task(
@@ -3178,10 +3552,13 @@ def recommend_training_transition(
     preferred_max_hours: float | None = None,
     preferred_methods: list[str] | None = None,
     limit: int = 5,
-    save: bool = True,
+    save: bool = False,
     compact: bool = False,
 ) -> dict[str, Any]:
-    """Recommend training for moving from one NCS scope to another using KSA gap analysis."""
+    """Recommend training for moving from one NCS scope to another using KSA gap analysis.
+
+    The legacy save parameter is accepted for compatibility; MCP never saves results.
+    """
     result, capacity, failure = execute_capacity_bound_recommendation(
         "recommend_training_transition",
         lambda conn: training_recommend_transition(
@@ -3257,6 +3634,15 @@ def plan_ncs_education_path(
             available_tool_names=set(
                 tool_registry.mcp_tools_for_mode(operator_tools_enabled=False)
             ),
+            major_code=major_code,
+            current_major_code=current_major_code,
+            target_major_code=target_major_code,
+            current_middle_code=current_middle_code,
+            target_middle_code=target_middle_code,
+            current_small_code=current_small_code,
+            target_small_code=target_small_code,
+            current_sub_code=current_sub_code,
+            target_sub_code=target_sub_code,
         )
         route_contract_schema = (
             route_evidence.get("route_contract", {}).get("schema")
@@ -3964,6 +4350,7 @@ def get_concept_evidence(concept_id: int, limit: int = 20) -> dict[str, Any]:
 
 
 @mcp.tool()
+@builder_only_operation
 def review_learning_module_ncs_link(
     link_id: int,
     review_status: str,
@@ -3995,6 +4382,7 @@ def review_learning_module_ncs_link(
 
 
 @mcp.tool()
+@builder_only_operation
 def review_training_goal_concept_link(
     link_id: int,
     review_status: str,
@@ -4112,6 +4500,7 @@ def review_training_goal_concept_link(
 
 
 @mcp.tool()
+@builder_only_operation
 def review_task_ksa_concept_relation(
     relation_id: int,
     review_status: str,
@@ -4240,6 +4629,7 @@ def review_task_ksa_concept_relation(
 
 
 @mcp.tool()
+@builder_only_operation
 def review_ontology_concept(
     concept_id: int,
     concept_name: str | None = None,

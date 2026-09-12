@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from ncs_mcp.data_builder import DataBuilder
 from ncs_mcp.db import connect, initialize_database, now_utc
 from ncs_mcp.knowledge_graph import build_ncs_knowledge_graph
 from ncs_mcp.training_recommendation import recommend_training_for_task
@@ -113,8 +114,12 @@ class CompactRuntimeParityTests(unittest.TestCase):
     def test_public_graph_and_task_recommendation_keep_result_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            source = root / "source.db"
-            compact = root / "compact.db"
+            builder = DataBuilder(root)
+            version = "a1"
+            version_dir = builder.state / "versions" / version
+            version_dir.mkdir(parents=True)
+            source = version_dir / "ncs.db"
+            compact = version_dir / "release" / "compact.db"
             fixture = self._create_source(source)
 
             source_conn = connect(source)
@@ -132,11 +137,13 @@ class CompactRuntimeParityTests(unittest.TestCase):
                 unit_code=str(fixture["unit_code"]),
             )
 
-            export_serving_db(
-                source,
-                compact,
-                profile=PROFILE_VERCEL_ONTOLOGY_COMPACT,
-            )
+            with builder.exclusive("package", version) as builder_context:
+                export_serving_db(
+                    source,
+                    compact,
+                    profile=PROFILE_VERCEL_ONTOLOGY_COMPACT,
+                    builder_context=builder_context,
+                )
             compact_conn = sqlite3.connect(compact)
             compact_conn.row_factory = sqlite3.Row
             try:

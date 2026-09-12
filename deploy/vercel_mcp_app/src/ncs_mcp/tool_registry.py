@@ -5,7 +5,10 @@ from typing import Any
 
 NCS_TOOL_PROFILES: dict[str, dict[str, Any]] = {
     "ncs_discover_tools": {
-        "description": "Find the right compact NCS MCP tool for a user intent.",
+        "description": (
+            "Find the right compact NCS MCP tool and bind optional caller-supplied "
+            "HR context to a read-only route fingerprint."
+        ),
         "aliases": ["discover", "tool catalog", "help", "what can this MCP do"],
     },
     "ncs_execute_tool": {
@@ -13,7 +16,11 @@ NCS_TOOL_PROFILES: dict[str, dict[str, Any]] = {
         "aliases": ["execute", "run tool", "meta tool"],
     },
     "ncs_search": {
-        "description": "Search NCS classifications, units, elements, criteria, and KSA records.",
+        "description": (
+            "Search NCS classifications, units, elements, criteria, and KSA records. "
+            "classification_filter is a hard constraint; context_text/job_scope produce "
+            "source-backed shadow ranks only and never infer scope from the query."
+        ),
         "aliases": ["search", "classification", "unit", "criteria", "KSA"],
     },
     "ncs_unit_detail": {

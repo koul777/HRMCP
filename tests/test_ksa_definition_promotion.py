@@ -1480,7 +1480,7 @@ class KsaDefinitionPromotionTests(unittest.TestCase):
         self.assertEqual(report["samples"]["skipped_human_lock"][0]["reason"], "human_lock")
         self.assertEqual(report["samples"]["promotable"][0]["meaning_text"], real_text)
 
-    def test_harness_promote_definitions_flag_runs_independently(self) -> None:
+    def test_harness_promote_definitions_requires_builder_even_with_approval_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "ncs.db"
             conn = connect(db_path)
@@ -1504,11 +1504,14 @@ class KsaDefinitionPromotionTests(unittest.TestCase):
                 text=True,
                 check=False,
             )
-            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            # Definition promotion is a DB mutation and is now Builder-owned.
+            # The legacy approval flag must not create a direct-write bypass.
+            self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
             payload = json.loads(proc.stdout)
-            self.assertEqual(payload["definition_promotions"]["promoted"], 1)
-            self.assertEqual(payload["definition_promotions"]["skipped_boilerplate"], 1)
-            self.assertEqual(payload["definition_promotions"]["skipped_human_lock"], 0)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["error"], "builder_authorization_required")
+            self.assertEqual(payload["command"], "preprocess-ncs-ontology")
+            self.assertEqual(payload["mutation_policy"], "builder_required")
 
             conn = connect(db_path)
             boilerplate_row = conn.execute(
@@ -1524,10 +1527,10 @@ class KsaDefinitionPromotionTests(unittest.TestCase):
             self.assertIsNone(boilerplate_row["definition"])
             self.assertIsNone(boilerplate_row["definition_source"])
             self.assertEqual(boilerplate_row["definition_status"], "missing")
-            self.assertEqual(real_row["definition"], real_text)
-            self.assertEqual(real_row["definition_source"], "ksa_meaning_candidate_promotion")
-            self.assertEqual(real_row["definition_status"], "candidate")
-            self.assertEqual(real_row["review_status"], "llm_reviewed")
+            self.assertIsNone(real_row["definition"])
+            self.assertIsNone(real_row["definition_source"])
+            self.assertEqual(real_row["definition_status"], "missing")
+            self.assertEqual(real_row["review_status"], "raw")
 
     def test_harness_promote_definitions_requires_explicit_approval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1556,8 +1559,9 @@ class KsaDefinitionPromotionTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
             payload = json.loads(proc.stdout)
             self.assertFalse(payload["ok"])
-            self.assertEqual(payload["error"], "ksa_definition_promotion_requires_approval")
-            self.assertIn("report-ksa-definition-promotion", payload["dry_run_command"])
+            self.assertEqual(payload["error"], "builder_authorization_required")
+            self.assertEqual(payload["command"], "preprocess-ncs-ontology")
+            self.assertEqual(payload["mutation_policy"], "builder_required")
 
             conn = connect(db_path)
             real_row = conn.execute(

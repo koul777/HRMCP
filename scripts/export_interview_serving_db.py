@@ -44,6 +44,17 @@ from ncs_mcp.compact_storage import (  # noqa: E402
     create_job_base_storage,
     create_training_storage,
 )
+from ncs_mcp.search.normalization import (  # noqa: E402
+    SEARCH_NORMALIZATION_SOURCE,
+    SEARCH_NORMALIZATION_SOURCE_FIELDS,
+    SEARCH_NORMALIZATION_V2_FIELDS,
+    SEARCH_NORMALIZATION_V2_OVERRIDES,
+    SEARCH_NORMALIZATION_V2_SCHEMA,
+    SEARCH_NORMALIZATION_V2_STORAGE,
+    normalize_search_text,
+)
+from ncs_mcp.builder_authorization import BuilderOperationContext  # noqa: E402
+from ncs_mcp.builder_release import package_guard  # noqa: E402
 
 
 CORE_TABLES = (
@@ -1087,6 +1098,134 @@ def _copy_query_aliases(
     return True
 
 
+def _search_normalization_manifest_fields() -> str:
+    """Return the stable v2 dense/sparse destination projection contract."""
+    fields = []
+    for table, mappings in sorted(SEARCH_NORMALIZATION_V2_FIELDS.items()):
+        override_columns = set(
+            SEARCH_NORMALIZATION_V2_OVERRIDES.get(table, {}).values()
+        )
+        for runtime_column, storage_column in sorted(mappings.items()):
+            storage_mode = (
+                "sparse_override"
+                if storage_column in override_columns
+                else "dense"
+            )
+            item = {
+                "table": table,
+                "source_columns": list(SEARCH_NORMALIZATION_SOURCE_FIELDS[table]),
+                # ``derived_column`` is retained as the stable manifest name
+                # used by existing artifact readers. In v2 it identifies the
+                # physical dense field or sparse override field.
+                "derived_column": storage_column,
+                "storage_column": storage_column,
+                "storage_mode": storage_mode,
+            }
+            if table == "ncs_query_aliases":
+                item["runtime_virtual_column"] = runtime_column
+                item["source_expression"] = "alias_text + ' ' + normalized_query"
+            else:
+                item["raw_column"] = runtime_column
+            fields.append(item)
+    return json.dumps(fields, ensure_ascii=False, separators=(",", ":"))
+
+
+def _require_search_normalization_source_fields(src: sqlite3.Connection) -> None:
+    """Reject an incomplete source before it can produce a partial index.
+
+    ``ncs_query_aliases`` remains an optional compatibility table.  When it is
+    absent, ``_copy_query_aliases`` creates an empty compatible destination
+    table, which still has the two raw columns required to derive its aggregate
+    search value.
+    """
+    for table, mappings in SEARCH_NORMALIZATION_V2_FIELDS.items():
+        if table == "ncs_query_aliases" and not _table_exists(src, table):
+            continue
+        raw_columns = set(SEARCH_NORMALIZATION_SOURCE_FIELDS[table])
+        _require_columns(src, table, raw_columns)
+
+
+def _add_compact_search_normalization_columns(dst: sqlite3.Connection) -> None:
+    """Build the v2 dense/sparse normalized projection in the destination.
+
+    Large KSA and element text stays in its existing raw field when normalized
+    text is identical. A NULL override is therefore an identity marker; an
+    empty string remains a materialized override when normalization legitimately
+    produces it (including a NULL source value).
+    """
+    for table, mappings in SEARCH_NORMALIZATION_V2_FIELDS.items():
+        destination_columns = set(_table_columns(dst, table))
+        storage_columns = set(mappings.values())
+        existing_storage = destination_columns & storage_columns
+        if existing_storage:
+            raise RuntimeError(
+                "compact destination unexpectedly already has normalized search "
+                f"columns for {table}: {sorted(existing_storage)}"
+            )
+
+        raw_columns = set(SEARCH_NORMALIZATION_SOURCE_FIELDS[table])
+        missing = sorted(raw_columns - destination_columns)
+        if missing:
+            raise RuntimeError(
+                "compact destination is missing normalization source columns: "
+                f"{table}; missing columns: {missing}"
+            )
+
+        override_columns = set(
+            SEARCH_NORMALIZATION_V2_OVERRIDES.get(table, {}).values()
+        )
+        for storage_column in mappings.values():
+            column_spec = "TEXT" if storage_column in override_columns else "TEXT NOT NULL DEFAULT ''"
+            dst.execute(
+                f"ALTER TABLE {_quote(table)} "
+                f"ADD COLUMN {_quote(storage_column)} {column_spec}"
+            )
+
+        if table == "ncs_query_aliases":
+            storage_column = mappings["alias_search_text"]
+            rows = dst.execute(
+                "SELECT rowid, alias_text, normalized_query "
+                "FROM ncs_query_aliases ORDER BY rowid"
+            )
+            dst.executemany(
+                f"UPDATE {_quote(table)} SET {_quote(storage_column)} = ? "
+                "WHERE rowid = ?",
+                (
+                    (
+                        normalize_search_text(
+                            f"{alias_text or ''} {normalized_query or ''}"
+                        ),
+                        rowid,
+                    )
+                    for rowid, alias_text, normalized_query in rows
+                ),
+            )
+            continue
+
+        for raw_column, storage_column in mappings.items():
+            sparse_override = storage_column in override_columns
+            rows = dst.execute(
+                f"SELECT rowid, {_quote(raw_column)} FROM {_quote(table)} "
+                "ORDER BY rowid"
+            )
+            dst.executemany(
+                f"UPDATE {_quote(table)} SET {_quote(storage_column)} = ? "
+                "WHERE rowid = ?",
+                (
+                    (
+                        (
+                            None
+                            if sparse_override
+                            and normalize_search_text(raw_value) == raw_value
+                            else normalize_search_text(raw_value)
+                        ),
+                        rowid,
+                    )
+                    for rowid, raw_value in rows
+                ),
+            )
+
+
 def _execute_indexes(
     dst: sqlite3.Connection,
     statements: tuple[str, ...],
@@ -1290,6 +1429,7 @@ def _export_vercel_ontology_compact(
     for table in required_tables:
         if not _table_exists(src, table):
             raise RuntimeError(f"source table is missing: {table}")
+    _require_search_normalization_source_fields(src)
 
     for table in VERCEL_ONTOLOGY_COMPACT_DIRECT_TABLES:
         _copy_compacted_source_table(
@@ -1314,6 +1454,10 @@ def _export_vercel_ontology_compact(
         empty_compatibility_tables.append("learning_module_concept_links")
     else:
         missing_compatibility_tables.append("learning_module_concept_links")
+
+    if _copy_query_aliases(src, dst):
+        empty_compatibility_tables.append("ncs_query_aliases")
+    _add_compact_search_normalization_columns(dst)
 
     relation_posting_counts, relation_edge_count = (
         _create_ontology_relation_postings(dst)
@@ -1387,11 +1531,26 @@ def _export_vercel_ontology_compact(
             ("task_similarity_storage", "derived_not_materialized"),
             ("label_candidate_scope", "human_reviewed_only"),
             ("raw_ksa_sha256", source_ksa_hash),
+            ("raw_ksa_parity_status", "verified_equal"),
+            ("search_normalization_schema", SEARCH_NORMALIZATION_V2_SCHEMA),
+            (
+                "search_normalization_fields",
+                _search_normalization_manifest_fields(),
+            ),
+            (
+                "search_normalization_source",
+                SEARCH_NORMALIZATION_SOURCE,
+            ),
+            (
+                "search_normalization_storage",
+                SEARCH_NORMALIZATION_V2_STORAGE,
+            ),
+            (
+                "search_normalization_index_policy",
+                "unit_name_exact_prefix_only; contains_search_not_indexed",
+            ),
         ),
     )
-
-    if _copy_query_aliases(src, dst):
-        empty_compatibility_tables.append("ncs_query_aliases")
 
     payload_tables = sorted(
         str(row[0])
@@ -1494,6 +1653,12 @@ def _export_vercel_ontology_compact(
             "physical_counts": physical_counts,
             "servable_counts": servable_counts,
             "raw_ksa_sha256": source_ksa_hash,
+            "raw_ksa_parity_status": "verified_equal",
+            "search_normalization_schema": SEARCH_NORMALIZATION_V2_SCHEMA,
+            "search_normalization_storage": SEARCH_NORMALIZATION_V2_STORAGE,
+            "search_normalization_fields": json.loads(
+                _search_normalization_manifest_fields()
+            ),
             "human_reviewed_label_count": reviewed_label_count,
             "atomic_compaction": atomic_metrics,
             "training_compaction": training_metrics,
@@ -1591,13 +1756,27 @@ def _vercel_ontology_complete_indexes() -> tuple[str, ...]:
     )
 
 
-def _vercel_ontology_compact_indexes() -> tuple[str, ...]:
+def _vercel_ontology_compact_indexes(
+    dst: sqlite3.Connection,
+) -> tuple[str, ...]:
     return (
         # Directly materialized public tables (views are intentionally absent).
         "CREATE UNIQUE INDEX idx_serving_elements_id ON competency_elements(element_id)",
         "CREATE UNIQUE INDEX idx_serving_criteria_id ON performance_criteria(criteria_id)",
         "CREATE UNIQUE INDEX idx_serving_ksa_id ON ksa_items(ksa_id)",
         "CREATE UNIQUE INDEX idx_serving_training_course_id ON ncs_training_courses(training_course_id)",
+        # Leading-wildcard predicates cannot seek this B-tree, but the IDF
+        # aggregation reads only this field and can scan the smaller covering
+        # index instead of the wider competency_units table. This is derived
+        # only in the compact destination, so never create it elsewhere.
+        *(
+            (
+                "CREATE INDEX idx_serving_units_name_search_norm "
+                "ON competency_units(unit_name_search_norm)",
+            )
+            if "unit_name_search_norm" in _table_columns(dst, "competency_units")
+            else ()
+        ),
         "CREATE UNIQUE INDEX idx_serving_ont_concepts_id ON ontology_concepts(concept_id)",
         "CREATE INDEX idx_serving_ont_concepts_key ON ontology_concepts(normalized_key)",
         "CREATE INDEX idx_serving_ont_concepts_type ON ontology_concepts(concept_type)",
@@ -1646,7 +1825,35 @@ def export_serving_db(
     include_ontology: bool = False,
     include_task_ontology: bool = False,
     include_indexes: bool = True,
+    builder_context: BuilderOperationContext | None = None,
 ) -> dict[str, object]:
+    options = dict(profile=profile, include_training_links=include_training_links,
+                   include_ontology=include_ontology, include_task_ontology=include_task_ontology,
+                   include_indexes=include_indexes)
+    if profile != PROFILE_VERCEL_ONTOLOGY_COMPACT:
+        return _export_serving_db(source, destination, **options)
+    guard = package_guard(builder_context)
+    guard.check(source)
+    guard.output(destination)
+    if not source.resolve().is_relative_to(guard.version.resolve()):
+        from ncs_mcp.builder_authorization import BuilderAuthorizationError
+        raise BuilderAuthorizationError('Compact source is outside the Builder version.')
+    return guard.call(_export_serving_db, source, destination, **options,
+                      builder_context=builder_context)
+
+
+def _export_serving_db(
+    source: Path, destination: Path, *, profile: str = PROFILE_DEFAULT,
+    include_training_links: bool = False, include_ontology: bool = False,
+    include_task_ontology: bool = False, include_indexes: bool = True,
+    builder_context: BuilderOperationContext | None = None,
+) -> dict[str, object]:
+    authorize = None
+    if profile == PROFILE_VERCEL_ONTOLOGY_COMPACT:
+        guard = package_guard(builder_context)
+        guard.check(source)
+        guard.output(destination)
+        authorize = lambda: guard.output(destination)
     _validate_profile_selection(
         profile=profile,
         include_training_links=include_training_links,
@@ -1655,8 +1862,12 @@ def export_serving_db(
     )
     if source.resolve() == destination.resolve():
         raise ValueError("destination must be different from source")
+    if authorize is not None:
+        authorize()
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
+        if authorize is not None:
+            authorize()
         destination.unlink()
 
     source_uri = (
@@ -1666,6 +1877,9 @@ def export_serving_db(
     with closing(sqlite3.connect(source_uri, uri=True)) as src, closing(
         sqlite3.connect(destination, uri=True)
     ) as dst:
+        if authorize is not None:
+            authorize()
+            dst.set_progress_handler(lambda: authorize() or 0, 10000)
         src.execute("PRAGMA query_only = ON")
         # Use the same immutable URI for the connection doing the bulk copy.
         # Attaching the plain path would silently reopen the canonical source in
@@ -1748,7 +1962,7 @@ def export_serving_db(
             elif profile == PROFILE_VERCEL_ONTOLOGY_COMPACT:
                 _execute_indexes(
                     dst,
-                    _vercel_ontology_compact_indexes(),
+                    _vercel_ontology_compact_indexes(dst),
                     strict=True,
                 )
             elif include_training_links:
@@ -1792,6 +2006,8 @@ def export_serving_db(
                 )
                 _execute_indexes(dst, task_indexes)
 
+        if authorize is not None:
+            authorize()
         dst.commit()
         dst.execute("DETACH DATABASE source")
 
@@ -1868,6 +2084,7 @@ def export_serving_db(
         omitted_tables = sorted(_source_table_names(src) - represented_source_tables)
 
         if profile == PROFILE_VERCEL_ONTOLOGY_COMPACT:
+            authorize()
             dst.execute("VACUUM")
             compact_size = destination.stat().st_size
             if compact_size >= VERCEL_COMPACT_MAX_BYTES:
@@ -1948,6 +2165,7 @@ def main() -> None:
         help="Skip index creation in the exported database.",
     )
     parser.add_argument("--report", type=Path)
+    parser.add_argument("--dry-run", action="store_true", help="Print the export plan without creating files.")
     args = parser.parse_args()
     try:
         _validate_profile_selection(
@@ -1958,6 +2176,13 @@ def main() -> None:
         )
     except ValueError as exc:
         parser.error(str(exc))
+    if args.dry_run:
+        print(json.dumps({'ok': True, 'dry_run': True, 'source': str(args.source),
+                          'destination': str(args.destination), 'profile': args.profile,
+                          'db_writes': False}, ensure_ascii=False))
+        return
+    if args.profile == PROFILE_VERCEL_ONTOLOGY_COMPACT:
+        parser.error('Compact export requires the live Windows NCS Data Builder; use --dry-run for inspection.')
     report = export_serving_db(
         args.source,
         args.destination,

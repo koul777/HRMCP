@@ -1,16 +1,20 @@
 # Vercel compact snapshot Builder
 
-The preferred replacement path is the one-input Publisher:
+The Windows Data Builder is the single operator entry point for the entire
+production lifecycle:
 
 ```powershell
-python scripts\publish_vercel_snapshot.py --source data\processed\ncs.db
+.\run_ncs_builder.bat
 ```
 
-It stages and verifies the compact snapshot, rechecks the canonical source
-hash, and atomically publishes the verified ZIP/manifest pair to the selected
-Vercel app's `api` directory. A publication failure restores the complete
-previous pair. Optional controls are `--deploy-root`, `--dry-run`, and
-`--report`.
+Production DB/API refresh, ontology rebuild, compact package creation, Vercel
+release, remote verification, and baseline promotion must run as stages of the
+same selected Builder version. Packaging is an internal, version-bound Builder
+stage: it rechecks the canonical source hash and creates the verified compact
+DB, ZIP, and manifest inside that version's `release` directory.
+`scripts/publish_vercel_snapshot.py` is retained only for dry-run diagnostics
+and legacy recovery tests; its CLI cannot perform a non-dry publication. It is
+not a second operator runbook.
 
 `scripts/build_vercel_snapshot.py` remains the low-level, deterministic Builder
 for custom output paths. It takes one prepared canonical SQLite database and
@@ -35,22 +39,12 @@ does not update human-review statuses. Vercel likewise only verifies and
 serves the packaged snapshot; it does not perform API collection at request
 time.
 
-## Build a custom staged snapshot
+## Non-operational implementation inspection
 
-Run from the repository root with paths that do not already exist. The Builder
-refuses to replace an output so an existing deploy input is never silently
-overwritten.
-
-```powershell
-python scripts\build_vercel_snapshot.py `
-  --source data\processed\ncs.db `
-  --output-db build\ncs_ontology_compact_<DATE>.db `
-  --archive build\ncs_ontology_compact_<DATE>.zip `
-  --manifest build\ncs_ontology_compact_<DATE>.manifest.json `
-  --report reports\vercel_snapshot_build_<DATE>.json
-```
-
-For a no-write inspection of resolved paths and exact argument arrays:
+`scripts/build_vercel_snapshot.py` remains the low-level deterministic component
+for Builder-owned custom output paths. It refuses to replace an output. The
+only standalone example retained here is a no-write inspection of resolved
+paths and exact argument arrays; it is not a package or release instruction:
 
 ```powershell
 python scripts\build_vercel_snapshot.py `
@@ -75,25 +69,11 @@ are outside the Builder's scope.
 
 ## Change-aware Refresh Builder
 
-Use the Refresh Builder before the snapshot Publisher when a new `ncs.db` is
-supplied. Planning is the default and is read-only:
-
-```powershell
-python scripts\refresh_ncs_ontology.py data\processed\ncs.db `
-  --state-dir C:\ncs_mcp_state\ncs-ontology-refresh `
-  --report reports\ncs_ontology_refresh_plan.json
-```
-
-An explicit `--apply` creates a separate prepared database. It never writes to
-the supplied DB or the promoted baseline:
-
-```powershell
-python scripts\refresh_ncs_ontology.py data\processed\ncs.db `
-  --state-dir C:\ncs_mcp_state\ncs-ontology-refresh `
-  --output build\prepared\ncs.db `
-  --report reports\ncs_ontology_refresh_apply.json `
-  --apply
-```
+The selected Builder version invokes the change-aware ontology component after
+source-delta review. Read-only planning may be used for implementation
+diagnostics, but candidate creation is performed only through the Builder UI.
+The internal component creates a separate prepared database and never writes to
+the supplied DB or promoted baseline.
 
 The Builder compares stable source projections rather than volatile timestamps.
 It chooses one of these fail-closed strategies:
@@ -113,20 +93,10 @@ checks, and KSA/review-state invariants.
 
 ## Supplemental API Refresh Builder
 
-Training-course and job-base APIs can be refreshed before ontology planning.
-The command discovers all NCS major codes from the DB. It creates a consistent
-SQLite online-backup first, including committed WAL frames, and calls the APIs
-only against that working copy:
-
-```powershell
-python scripts\refresh_ncs_api_evidence.py `
-  --db data\processed\ncs.db `
-  --source training-courses `
-  --source job-base `
-  --apply `
-  --state-dir .state\ncs-api-refresh `
-  --out reports\ncs_api_refresh_evidence.json
-```
+Training-course and job-base APIs are refreshed only by the selected Builder
+version's API stage. The internal component discovers all NCS major codes from
+the DB, creates a consistent SQLite online backup including committed WAL
+frames, and calls the APIs only against that working copy.
 
 If any major-code page fails or completion cannot be proven, the command exits
 without a publishable `prepared_output`; the original DB remains byte-for-byte
@@ -145,19 +115,10 @@ local build succeeded. Baseline promotion requires these evidence files:
 4. in the automated staged-release path, the successful exact staged-deployment
    MCP verification report as well.
 
-After those checks, the promotion command stores an immutable versioned
+After those checks, the Builder's promotion stage stores an immutable versioned
 baseline, a lineage sidecar, and an atomic `current.json` pointer under the
-persistent state directory:
-
-```powershell
-python scripts\promote_ncs_refresh_baseline.py `
-  --refresh-report reports\ncs_ontology_refresh_apply.json `
-  --publish-report reports\vercel_snapshot_publish_report.json `
-  --staged-verification reports\remote_mcp_transport_verify_staged.json `
-  --remote-verification reports\remote_mcp_transport_verify_final.json `
-  --state-dir C:\ncs_mcp_state\ncs-ontology-refresh `
-  --out reports\baseline_promotion_report.json
-```
+persistent state directory. `scripts/promote_ncs_refresh_baseline.py` is the
+internal implementation boundary, not an operator bypass.
 
 A failed build, deployment, or remote verification leaves `current.json`
 untouched. Versioned baselines are not deleted automatically; retention is an
@@ -191,8 +152,8 @@ file transforms, source identity checks, rollback boundaries, and explicit
 promotion evidence. AI can generate HR outputs through the MCP tools, but it
 does not decide how deployment data is rebuilt or approved.
 
-Because the canonical source DB is currently about 12.6 GB, the self-hosted
-runner needs space for the downloaded source, API working copy, ontology
+Because the canonical source DB is currently about 12.6 GB, the Windows Builder
+host needs space for the selected source, API working copy, ontology
 working copy, compact build, and persistent versioned baseline. Vercel remains
 lightweight because only the compact ZIP and manifest are deployed.
 
@@ -200,19 +161,62 @@ The runtime validates the manifest/archive before materializing the SQLite file
 under `/tmp`, then opens that path read-only. It does not use `NCS_DB_URL` in
 the standard deployment flow.
 
-## Deploy the verified input
+## Guarded release internals and recovery
 
-```powershell
-cd deploy\vercel_mcp_app
-vercel deploy
-vercel deploy --prod
-```
+Direct preview or production deployment is not an operator procedure. It would
+bypass the selected Builder version, source identity, durable transaction, and
+rollback fencing. The Builder release uses this fixed internal sequence:
 
-The first command produces a preview deployment; the second deploys production.
-These direct commands rebuild from source, so do not add `--prebuilt` to them.
-The automated release workflow is different: it runs `vercel build`, verifies
-the resulting `.vercel/output` function bundle, and deploys that exact output
-with `vercel deploy --prebuilt`. `git.deploymentEnabled=false` prevents Git
-pushes from deploying a commit that lacks the ignored ZIP; release only through
-the CLI or guarded workflow after the Publisher has completed. Confirm
-`/api/health` and `/api/ready` after deployment.
+1. Copy only Git-tracked deployment source into the isolated version stage and
+   fail before building if a required local import is absent from that stage.
+2. Run `vercel build --prod --yes`, then verify the exact
+   `.vercel/output/functions/python.func` with
+   `verify_vercel_compact_package.py`.
+3. Record the current production deployment, upload that unchanged output with
+   `vercel deploy --prebuilt --prod --skip-domain --yes`, and verify the unique
+   deployment's health, readiness, MCP contract, and exact build identity.
+4. Reconfirm that production did not change concurrently, promote only the
+   verified unique URL, and repeat the health/readiness/MCP/build check through
+   the production URL.
+5. If the post-promotion check fails, explicitly roll back to the recorded
+   previous production URL and reconfirm the restored target. Baseline promotion
+   remains blocked regardless of rollback outcome.
+
+The release report contains an atomic `deployment_transaction` checkpoint. It
+records the original known-good production deployment before staging, records
+promotion intent before calling the CLI, and records rollback intent before a
+rollback. If the process stops after promotion intent, the next invocation
+first inspects production and restores the original target when the staged URL
+is live. Immediately before rollback it inspects production again and runs the
+rollback only when the exact expected staged deployment ID is still current;
+an already restored known-good target is accepted without mutation, while a
+third deployment is recorded as divergence and left untouched. A
+`rollback_pending`, `rollback_unconfirmed`,
+`promotion_outcome_unconfirmed`, or `production_diverged` state blocks automatic
+retry; an operator must reconcile Vercel production state before any new
+deployment attempt. Retries never replace the original known-good target with
+an unverified promoted deployment. Legacy failed reports that record promotion
+or an unconfirmed rollback without a durable transaction are migrated on first
+inspection to a persistent `promotion_outcome_unconfirmed` transaction. The
+migration retains the original known-good deployment identity when legacy
+evidence contains it and is flushed before attempt fields are cleared, so the
+first retry, later retries, and retries after a Builder process restart all
+remain blocked without deploy, promote, or rollback calls. Report checkpoints
+flush file contents before atomic replace; directory metadata sync is applied
+where the operating system supports it.
+
+The Vercel CLI inspection followed by rollback is not a remote atomic
+compare-and-swap and does not provide a fencing token. Run exactly one Builder
+deployment authority per Vercel project. The surrounding scheduler must enforce
+a singleton lease (and a fencing mechanism when multiple hosts can contend)
+before invoking the Builder; the local atomic release report is durable recovery
+evidence, not a distributed lock. If overlapping authorities may have run, stop
+automatic deployment and reconcile production explicitly.
+
+The Builder never fills a missing import from arbitrary untracked files. For
+example, if `ncs_mcp.search.core` imports `ncs_mcp.search.normalization` but the
+corresponding source file is not tracked and copied, the release stops with a
+source-package error. `git.deploymentEnabled=false` prevents Git pushes from
+deploying a commit that lacks the ignored ZIP. There is no scheduled/Git
+deployment authority; release only through `run_ncs_builder.bat` after the
+Publisher stage has completed.

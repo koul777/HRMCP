@@ -35,6 +35,7 @@ from ncs_mcp.vercel_snapshot import (
     sqlite_snapshot_is_usable,
 )
 from scripts.package_vercel_compact_snapshot import package_compact_snapshot
+from ncs_mcp.data_builder import DataBuilder
 from scripts.package_vercel_compact_snapshot import CANONICAL_DEPLOY_ROOT as PACKAGE_DEPLOY_ROOT
 from scripts.verify_vercel_compact_package import (
     CANONICAL_DEPLOY_ROOT as VERIFY_DEPLOY_ROOT,
@@ -205,13 +206,15 @@ class VercelSnapshotTests(unittest.TestCase):
 
     def test_packaging_command_emits_one_member_archive_and_sidecar(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
+            root = Path(temp_dir) / '.state/ncs-data-builder/versions/a1/release'
+            root.mkdir(parents=True)
             database = root / "source.db"
             self._create_database(database)
             archive = root / "package" / COMPACT_ARCHIVE_NAME
             manifest = root / "package" / COMPACT_MANIFEST_NAME
 
-            result = package_compact_snapshot(database, archive, manifest)
+            with DataBuilder(Path(temp_dir)).exclusive('package', 'a1') as context:
+                result = package_compact_snapshot(database, archive, manifest, builder_context=context)
 
             self.assertTrue(result["ok"])
             self.assertEqual(result["sqlite_bytes"], database.stat().st_size)
@@ -444,7 +447,8 @@ class VercelSnapshotTests(unittest.TestCase):
 
     def test_packaging_command_rejects_physical_count_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
+            root = Path(temp_dir) / '.state/ncs-data-builder/versions/a1/release'
+            root.mkdir(parents=True)
             database = root / "source.db"
             self._create_database(database)
             with closing(sqlite3.connect(database)) as conn:
@@ -457,16 +461,18 @@ class VercelSnapshotTests(unittest.TestCase):
                 )
                 conn.commit()
 
-            with self.assertRaisesRegex(ValueError, "physical count mismatch"):
+            with DataBuilder(Path(temp_dir)).exclusive('package', 'a1') as context, self.assertRaisesRegex(ValueError, "physical count mismatch"):
                 package_compact_snapshot(
                     database,
                     root / COMPACT_ARCHIVE_NAME,
                     root / COMPACT_MANIFEST_NAME,
+                    builder_context=context,
                 )
 
     def test_packaging_command_rejects_servable_count_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
+            root = Path(temp_dir) / '.state/ncs-data-builder/versions/a1/release'
+            root.mkdir(parents=True)
             database = root / "source.db"
             self._create_database(database)
             with closing(sqlite3.connect(database)) as conn:
@@ -479,11 +485,12 @@ class VercelSnapshotTests(unittest.TestCase):
                 )
                 conn.commit()
 
-            with self.assertRaisesRegex(ValueError, "servable count mismatch"):
+            with DataBuilder(Path(temp_dir)).exclusive('package', 'a1') as context, self.assertRaisesRegex(ValueError, "servable count mismatch"):
                 package_compact_snapshot(
                     database,
                     root / COMPACT_ARCHIVE_NAME,
                     root / COMPACT_MANIFEST_NAME,
+                    builder_context=context,
                 )
 
     def test_materializes_exact_member_and_reuses_verified_cache(self) -> None:

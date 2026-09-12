@@ -245,6 +245,12 @@ def run_preview_smoke(
             package_source,
             smoke_db,
         )
+        deploy_env = env.copy()
+        deploy_source = runtime_source / "deploy" / "vercel_mcp_app" / "src"
+        deploy_env["PYTHONPATH"] = str(deploy_source.resolve())
+        deploy_env["NCS_MCP_READ_ONLY"] = "1"
+        deploy_env["NCS_MCP_ENABLE_OPERATOR_TOOLS"] = "0"
+        deploy_env["NCS_MCP_ENABLE_ADVANCED_TOOLS"] = "0"
         removed_secret_env_names = sorted(
             set(removed_secret_env_names) | set(package_removed_names)
         )
@@ -292,6 +298,23 @@ def run_preview_smoke(
                 [sys.executable, "scripts/ncs_harness.py", "smoke"],
                 runtime_source,
                 env,
+            ),
+            (
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import pathlib; "
+                        "import ncs_mcp.search.core as search_core; "
+                        "import ncs_mcp.server as server; "
+                        "expected=(pathlib.Path.cwd()/'deploy'/'vercel_mcp_app'/'src'/'ncs_mcp').resolve(); "
+                        "actual=[pathlib.Path(search_core.__file__).resolve(),pathlib.Path(server.__file__).resolve()]; "
+                        "print('\\n'.join(str(path) for path in actual)); "
+                        "raise SystemExit(0 if all(path.is_relative_to(expected) for path in actual) else 3)"
+                    ),
+                ],
+                runtime_source,
+                deploy_env,
             ),
         ]
         for command, command_cwd, command_env in command_specs:
