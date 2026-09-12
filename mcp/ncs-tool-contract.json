@@ -240,7 +240,7 @@
       "categories": [
         "tool_discovery"
       ],
-      "description": "Find the right compact NCS MCP tool for a user intent.",
+      "description": "Find the right compact NCS MCP tool and bind optional caller-supplied HR context to a read-only route fingerprint.",
       "executable_via_meta": false,
       "meta_compact_default": false,
       "meta_save_forced_false": false,
@@ -274,7 +274,7 @@
       "categories": [
         "ncs_structure_search"
       ],
-      "description": "Search NCS classifications, units, elements, criteria, and KSA records.",
+      "description": "Search NCS classifications, units, elements, criteria, and KSA records. classification_filter is a hard constraint; context_text/job_scope produce source-backed shadow ranks only and never infer scope from the query.",
       "executable_via_meta": true,
       "meta_compact_default": false,
       "meta_save_forced_false": false,
