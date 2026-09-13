@@ -118,6 +118,7 @@ Builder/Publisher 스크립트와 Vercel CLI는 구현 구성요소이지 운영
 
 ### 변경 이력
 
+- **2026-09-13**: 최종 검색 개선 commit `70c995ce61a62caffd82c3f2094ee5d92e75001f`를 Builder 단일 경로로 `ncs-mcp-bridge-mini2` production에 배포했습니다. Builder 데이터 버전은 `20260913_020821_38fadb3a`, Vercel deployment는 `dpl_BHEgRsnnLMg5exQWzurFm1yqqyi3`, 서버 build ID는 `7c31b93c0d4e46d59881a9824729fc26`입니다. 배포 후 공개 도구 7/7개와 실제 호출 12건을 다시 통과했고, 운영 의미 프로브에서 `채용관리를 → 인력채용`, `적격증빙 수취와 전표 처리 → 적격증빙관리·전표관리`, `출입 통제와 보안 점검`의 수출입 오탐 제거, `classification_filter.major_code=02`의 차량·행사 HR 범위 제한을 확인했습니다. compact DB는 `478,756,864` bytes로 480 MB 하드 캡까지 `1,243,136` bytes만 남아 있으므로 다음 데이터 갱신 전 용량 절감이 필수입니다.
 - **2026-09-13**: 조사 제거 후에도 `채용관리`, `인사기획업무`처럼 저정보 접미사가 남는 복합어를 unit명과 해당 unit의 기존 정확 alias에만 제한해 보강했습니다. 새 alias나 DB 쓰기 없이 `채용관리를`의 1위를 `전작 경영관리`에서 `인력채용`으로 바로잡았고 기존 정의 후보는 뒤에 보존했습니다. 23개 대분류의 비-holdout 공식명 변형 162건에서 Hit@1/Hit@3/MRR@20이 `0→1.0`이었으며, dev 40건과 기존 synthetic 48건은 회귀가 없었습니다.
 - **2026-09-13**: 과업·KSA 근거 재랭킹은 반환 후보마다 unit·element·criteria·KSA를 추가 SQL 1회로 수집하는 shadow profiler까지 구현했습니다. 후보가 있는 24회에서 추가 p50/p95는 `9.712/14.159ms`, 근거 샘플 coverage는 124/124였지만 독립 relevance 검증이 없으므로 공개 랭킹 승격은 **HOLD**입니다.
 - **2026-09-13**: 다음 데이터 갱신이 Vercel 크기 제한에서 갑자기 실패하지 않도록 Builder에 버전별 `snapshot_capacity` 계약을 추가했습니다. 선택한 버전의 실제 staged ZIP member와 manifest를 다시 측정해 DB 크기, 460 MB 소프트 캡·480 MB 하드 캡, 남은 여유를 보고서와 화면에 표시합니다. 460 MB 초과는 명시적 경고로 남기되 다른 검증이 통과하면 배포할 수 있고, 480 MB 이상은 원본·기존 운영 배포·로컬 포인터를 보존한 채 원격 호출 전에 차단합니다.
