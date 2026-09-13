@@ -1089,6 +1089,18 @@ class ExportVercelOntologyCompleteDatabaseTests(unittest.TestCase):
 class ExportVercelOntologyCompactDatabaseTests(
     ExportVercelOntologyCompleteDatabaseTests
 ):
+    def test_compact_integer_key_export_is_byte_reproducible(self):
+        paths = [self.root / 'capacity-first.db', self.root / 'capacity-second.db']
+        before = self._sha256(self.source)
+        for destination in paths:
+            serving_export.export_serving_db(
+                self.source, destination,
+                profile=serving_export.PROFILE_VERCEL_ONTOLOGY_COMPACT,
+                builder_context=self.context,
+            )
+        self.assertEqual(before, self._sha256(self.source))
+        self.assertEqual(self._sha256(paths[0]), self._sha256(paths[1]))
+
     def test_builder_snapshot_same_process_chain_preserves_source_and_validates_archive(self):
         from unittest.mock import patch
         from scripts import build_vercel_snapshot as snapshot_builder
@@ -1289,6 +1301,19 @@ class ExportVercelOntologyCompactDatabaseTests(
         with closing(sqlite3.connect(self.source)) as src, closing(
             sqlite3.connect(destination)
         ) as dst:
+            for table, key in serving_export.VERCEL_COMPACT_INTEGER_PRIMARY_KEYS.items():
+                with self.subTest(integer_primary_key=table):
+                    info = {row[1]: row for row in dst.execute(f'PRAGMA table_info("{table}")')}
+                    self.assertEqual(("INTEGER", 1), (info[key][2], info[key][5]))
+                    self.assertEqual(
+                        src.execute(f'SELECT "{key}" FROM "{table}" ORDER BY "{key}"').fetchall(),
+                        dst.execute(f'SELECT "{key}" FROM "{table}" ORDER BY "{key}"').fetchall(),
+                    )
+                    key_indexes = [
+                        row for row in dst.execute(f'PRAGMA index_list("{table}")')
+                        if [item[2] for item in dst.execute(f'PRAGMA index_info("{row[1]}")')] == [key]
+                    ]
+                    self.assertEqual([], key_indexes)
             object_types = {
                 str(row[0]): str(row[1])
                 for row in dst.execute(

@@ -113,6 +113,18 @@ SUPPORTED_PROFILES = (
 VERCEL_COMPACT_MAX_BYTES = 480_000_000
 VERCEL_COMPACT_SCHEMA = "ncs_vercel_ontology_compact_v2"
 
+# CTAS stores integer IDs separately from the rowid; most of these tables also
+# need a standalone ID index. Keep source IDs as rowid aliases in this read-only
+# profile. Non-integer, NULL, or duplicate IDs are rejected before insertion.
+VERCEL_COMPACT_INTEGER_PRIMARY_KEYS = {
+    "competency_elements": "element_id",
+    "performance_criteria": "criteria_id",
+    "ksa_items": "ksa_id",
+    "ncs_training_courses": "training_course_id",
+    "ontology_concepts": "concept_id",
+    "ksa_concept_links": "link_id",
+}
+
 VERCEL_ONTOLOGY_COMPACT_DIRECT_TABLES = (
     *CORE_TABLES,
     # Unit links are small and remain directly materialized. The four large
@@ -345,6 +357,7 @@ def _copy_compacted_source_table(
     table: str,
     *,
     null_columns: set[str] | None = None,
+    integer_primary_key: str | None = None,
 ) -> None:
     """Copy a table while nulling only columns that exist in its source schema."""
     columns = _table_columns(src, table)
@@ -354,15 +367,62 @@ def _copy_compacted_source_table(
         alias="item",
         null_columns=selected_nulls,
     )
-    dst.execute(
-        f"CREATE TABLE {_quote(table)} AS "
-        f"SELECT {select_columns} FROM source.{_quote(table)} AS item"
+    _create_projected_table(
+        dst,
+        table,
+        f"SELECT {select_columns} FROM source.{_quote(table)} AS item",
+        integer_primary_key=integer_primary_key,
     )
+
+
+def _create_projected_table(
+    dst: sqlite3.Connection,
+    table: str,
+    select_sql: str,
+    *,
+    integer_primary_key: str | None = None,
+) -> None:
+    """Preserve CTAS column affinities while avoiding duplicate ID storage."""
+    if integer_primary_key is None:
+        dst.execute(f"CREATE TABLE {_quote(table)} AS {select_sql}")
+        return
+
+    # Let SQLite infer exactly the same projected types (including untyped
+    # NULL/CASE expressions) as the previous CTAS export. This table is empty.
+    dst.execute(f"CREATE TABLE {_quote(table)} AS {select_sql} LIMIT 0")
+    columns = dst.execute(f"PRAGMA table_info({_quote(table)})").fetchall()
+    key = _quote(integer_primary_key)
+    if integer_primary_key not in {column[1] for column in columns}:
+        raise RuntimeError(f"compact integer primary key is missing: {table}.{integer_primary_key}")
+    invalid = dst.execute(
+        f"SELECT 1 FROM ({select_sql}) WHERE typeof({key}) <> 'integer' LIMIT 1"
+    ).fetchone()
+    duplicate = dst.execute(
+        f"SELECT 1 FROM ({select_sql}) GROUP BY {key} HAVING COUNT(*) > 1 LIMIT 1"
+    ).fetchone()
+    if invalid or duplicate:
+        raise RuntimeError(
+            f"compact integer primary key must contain unique non-null integers: "
+            f"{table}.{integer_primary_key}"
+        )
+    definitions = [
+        f"{_quote(column[1])} " + (
+            "INTEGER PRIMARY KEY" if column[1] == integer_primary_key else column[2]
+        )
+        for column in columns
+    ]
+    dst.execute(f"DROP TABLE {_quote(table)}")
+    dst.execute(f"CREATE TABLE {_quote(table)} ({', '.join(definitions)})")
+    # Stable key order also preserves the existing compact scans of the source
+    # INTEGER PRIMARY KEY tables when IDs have gaps.
+    dst.execute(f"INSERT INTO {_quote(table)} {select_sql} ORDER BY {key}")
 
 
 def _copy_complete_concepts(
     src: sqlite3.Connection,
     dst: sqlite3.Connection,
+    *,
+    integer_primary_key: str | None = None,
 ) -> None:
     columns = _require_columns(
         src,
@@ -406,10 +466,12 @@ def _copy_complete_concepts(
         else:
             expression = f"item.{_quote(column)}"
         expressions.append(f"{expression} AS {_quote(column)}")
-    dst.execute(
-        "CREATE TABLE ontology_concepts AS "
+    _create_projected_table(
+        dst,
+        "ontology_concepts",
         f"SELECT {', '.join(expressions)} "
-        "FROM source.ontology_concepts AS item"
+        "FROM source.ontology_concepts AS item",
+        integer_primary_key=integer_primary_key,
     )
 
 
@@ -1437,9 +1499,10 @@ def _export_vercel_ontology_compact(
             dst,
             table,
             null_columns=set(VERCEL_ONTOLOGY_COMPACT_NULL_COLUMNS),
+            integer_primary_key=VERCEL_COMPACT_INTEGER_PRIMARY_KEYS.get(table),
         )
 
-    _copy_complete_concepts(src, dst)
+    _copy_complete_concepts(src, dst, integer_primary_key="concept_id")
     atomic_metrics = create_atomic_storage(src, dst)
     training_metrics = create_training_storage(src, dst)
     job_base_metrics = create_job_base_storage(src, dst)
@@ -1761,10 +1824,8 @@ def _vercel_ontology_compact_indexes(
 ) -> tuple[str, ...]:
     return (
         # Directly materialized public tables (views are intentionally absent).
-        "CREATE UNIQUE INDEX idx_serving_elements_id ON competency_elements(element_id)",
-        "CREATE UNIQUE INDEX idx_serving_criteria_id ON performance_criteria(criteria_id)",
-        "CREATE UNIQUE INDEX idx_serving_ksa_id ON ksa_items(ksa_id)",
-        "CREATE UNIQUE INDEX idx_serving_training_course_id ON ncs_training_courses(training_course_id)",
+        # Direct table IDs are INTEGER PRIMARY KEY rowid aliases in this
+        # profile, so their separate UNIQUE indexes would duplicate storage.
         # Leading-wildcard predicates cannot seek this B-tree, but the IDF
         # aggregation reads only this field and can scan the smaller covering
         # index instead of the wider competency_units table. This is derived
@@ -1777,7 +1838,6 @@ def _vercel_ontology_compact_indexes(
             if "unit_name_search_norm" in _table_columns(dst, "competency_units")
             else ()
         ),
-        "CREATE UNIQUE INDEX idx_serving_ont_concepts_id ON ontology_concepts(concept_id)",
         "CREATE INDEX idx_serving_ont_concepts_key ON ontology_concepts(normalized_key)",
         "CREATE INDEX idx_serving_ont_concepts_type ON ontology_concepts(concept_type)",
         "CREATE INDEX idx_serving_ont_alias_concept ON ontology_concept_aliases(concept_id)",

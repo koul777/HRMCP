@@ -899,6 +899,82 @@ class NcsSearchRecallTests(unittest.TestCase):
         )
         self.assertEqual(result["match_mode"], "phrase")
 
+    def test_joined_official_compound_phrase_is_bounded(self) -> None:
+        self.assertEqual(
+            search_core._ncs_search_joined_compound_phrase(
+                "급여 지급", ["급여", "지급"]
+            ),
+            "급여지급",
+        )
+        rejected = (
+            ("급여지급", ["급여지급"]),
+            ("급여 pay", ["급여", "pay"]),
+            ("인사 및 평가", ["인사", "평가"]),
+            ("하나 둘 셋 넷 다섯", ["하나", "둘", "셋", "넷"]),
+            (
+                "가나다라마바사아자차카타파하가나다라마바사아자차카타 파하",
+                ["가나다라마바사아자차카타파하가나다라마바사아자차카타", "파하"],
+            ),
+        )
+        for phrase, tokens in rejected:
+            with self.subTest(phrase=phrase):
+                self.assertEqual(
+                    search_core._ncs_search_joined_compound_phrase(phrase, tokens),
+                    "",
+                )
+
+    def test_joined_official_compound_recovers_space_variant_without_extra_sql(self) -> None:
+        with self._open_db() as conn:
+            conn.executemany(
+                "INSERT INTO competency_units VALUES (?, ?, '', '4', 1)",
+                (
+                    ("C_SPACED", "급여 지급 안내"),
+                    ("C_JOINED", "급여지급"),
+                    ("C_JOINED_PREFIX", "급여지급검토"),
+                ),
+            )
+            conn.commit()
+
+        query = "급여 지급"
+        self.sql_statements.clear()
+        with patch.object(
+            search_core, "_ncs_search_joined_compound_phrase", return_value=""
+        ):
+            baseline = server.search_ncs(query, scope="unit", limit=10)
+        baseline_statement_count = len(self.sql_statements)
+
+        self.sql_statements.clear()
+        result = server.search_ncs(query, scope="unit", limit=10)
+        self.assertEqual(len(self.sql_statements), baseline_statement_count)
+        self.assertEqual(result["results"][:baseline["returned"]], baseline["results"])
+        self.assertEqual(
+            [row["id"] for row in result["results"]],
+            ["C_SPACED", "C_JOINED", "C_JOINED_PREFIX"],
+        )
+        joined = result["results"][1]
+        self.assertEqual(joined["match_mode"], "phrase")
+        self.assertEqual(joined["matched_tokens"], ["급여", "지급"])
+        self.assertEqual(joined["match_fields"], ["unit_name"])
+        self.assertEqual(
+            joined["matched_expansions"],
+            [
+                {
+                    "query": query,
+                    "matched_as": "급여지급",
+                    "match_fields": ["unit_name"],
+                }
+            ],
+        )
+        self.assertEqual(result["query_expansions"], {})
+        self.assertEqual(
+            server.search_ncs(
+                query,
+                scope="unit",
+                classification_filter={"major_code": "99"},
+            )["returned"],
+            0,
+        )
+
     def test_ksa_scope_is_public_and_returns_only_ksa(self) -> None:
         result = server.ncs_search("채용", scope="ksa", limit=5)
 
@@ -1567,6 +1643,76 @@ class NcsSearchHybridRecallTests(NcsSearchRecallTests):
             SEARCH_NORMALIZATION_V2_REQUIRED_MANIFEST.items(),
         )
         self.assertEqual(search_core._normalized_search_storage(conn), "v2")
+
+    def test_v2_joined_compound_uses_normalized_name_only_with_guards(self) -> None:
+        with self._open_db() as conn:
+            conn.executemany(
+                "INSERT INTO competency_units VALUES (?, ?, ?, '4', ?)",
+                (
+                    ("V2_LITERAL", "급여 지급 안내", "", 1),
+                    ("V2_JOINED", "급여지급", "", 1),
+                    ("V2_PREFIX", "급여지급검토", "", 1),
+                    ("V2_INTERNAL", "초급여지급", "", 1),
+                    ("V2_DEFINITION", "기타수행", "급여지급", 1),
+                    ("V2_OTHER_MAJOR", "급여지급외부", "", 2),
+                ),
+            )
+            self._add_normalized_columns(conn)
+            conn.commit()
+
+        query = "급여 지급"
+        classification_filter = {"major_code": "02"}
+        self.sql_statements.clear()
+        with patch.object(
+            search_core, "_ncs_search_joined_compound_phrase", return_value=""
+        ):
+            baseline = server.search_ncs(
+                query,
+                scope="unit",
+                limit=10,
+                classification_filter=classification_filter,
+            )
+        baseline_statement_count = len(self.sql_statements)
+
+        self.sql_statements.clear()
+        result = server.search_ncs(
+            query,
+            scope="unit",
+            limit=10,
+            classification_filter=classification_filter,
+        )
+        self.assertEqual(len(self.sql_statements), baseline_statement_count)
+        self.assertTrue(
+            any("unit_name_search_norm" in sql for sql in self.sql_statements)
+        )
+        self.assertTrue(
+            any("ncs_search_match_normalized" in sql for sql in self.sql_statements)
+        )
+        self.assertEqual(result["results"][:baseline["returned"]], baseline["results"])
+        self.assertEqual(
+            [row["id"] for row in result["results"]],
+            ["V2_LITERAL", "V2_JOINED", "V2_PREFIX"],
+        )
+        self.assertNotIn(
+            "V2_INTERNAL", [row["id"] for row in result["results"]]
+        )
+        self.assertNotIn(
+            "V2_DEFINITION", [row["id"] for row in result["results"]]
+        )
+        joined = result["results"][1]
+        self.assertEqual(joined["matched_tokens"], ["급여", "지급"])
+        self.assertEqual(joined["match_fields"], ["unit_name"])
+        self.assertEqual(joined["matched_expansions"][0]["matched_as"], "급여지급")
+        other_major = server.search_ncs(
+            query,
+            scope="unit",
+            limit=10,
+            classification_filter={"major_code": "99"},
+        )
+        self.assertEqual(
+            [row["id"] for row in other_major["results"]],
+            ["V2_OTHER_MAJOR"],
+        )
 
     def test_sparse_identity_null_and_empty_overrides(self) -> None:
         with self._open_db() as conn:

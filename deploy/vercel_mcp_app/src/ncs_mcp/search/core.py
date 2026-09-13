@@ -211,6 +211,28 @@ def _normalize_ncs_search_query(query: str) -> tuple[str, list[str], list[str]]:
     return phrase, query_tokens, fallback_tokens
 
 
+def _ncs_search_joined_compound_phrase(
+    phrase: str,
+    fallback_tokens: list[str],
+) -> str:
+    """Join a bounded all-Hangul phrase for official compound-name recall.
+
+    NCS unit names commonly omit spaces that users naturally insert. Only join
+    the complete two-to-four-token query, require every token to carry at least
+    two Hangul syllables, and keep the result short. This is a spelling variant
+    of the supplied phrase, not an alias or a source-data rewrite.
+    """
+    phrase_tokens = phrase.split()
+    if not 2 <= len(phrase_tokens) <= 4:
+        return ""
+    if phrase_tokens != fallback_tokens:
+        return ""
+    if not all(re.fullmatch(r"[가-힣]{2,}", token) for token in phrase_tokens):
+        return ""
+    joined = "".join(phrase_tokens)
+    return joined if len(joined) <= 24 else ""
+
+
 def _ncs_search_morphology_expansions(tokens: list[str]) -> dict[str, list[str]]:
     """Offer one conservative Korean particle removal per bounded query token.
 
@@ -1373,7 +1395,9 @@ def _normalized_ncs_search_params(params: dict[str, Any]) -> dict[str, Any]:
     """Keep original code binds while normalizing text binds once per tier."""
     result = dict(params)
     for key, value in params.items():
-        if key == "phrase_term" or key.startswith(("token_", "expanded_", "intent_", "morphology_", "compound_base_")):
+        if key in {"phrase_term", "joined_compound"} or key.startswith(
+            ("token_", "expanded_", "intent_", "morphology_", "compound_base_")
+        ):
             result[f"{key}_raw"] = value
             result[key] = normalize_search_text(value)
     # phrase_pattern is the legacy unit-order tiebreak, not a text prefilter.
@@ -1394,7 +1418,16 @@ def _ncs_search_tier_predicates(
         "phrase_pattern": f"%{_escape_ncs_search_like(phrase)}%",
         "phrase_term": phrase,
     }
-    phrase_clause = _ncs_search_boundary_any(columns, "phrase_term", normalized=normalized)
+    phrase_clause = _ncs_search_boundary_any(
+        columns, "phrase_term", normalized=normalized
+    )
+    joined_compound = _ncs_search_joined_compound_phrase(phrase, fallback_tokens)
+    if joined_compound and "cu.unit_name_raw" in columns:
+        params["joined_compound"] = joined_compound
+        phrase_clause = (
+            f"({phrase_clause} OR "
+            f"{_ncs_search_boundary_any(('cu.unit_name_raw',), 'joined_compound', normalized=normalized)})"
+        )
     token_clauses: list[str] = []
     parameter_groups: list[list[str]] = []
     for index, token in enumerate(fallback_tokens):
@@ -1731,6 +1764,28 @@ def _ncs_search_match_metadata(
             for field_name, value in normalized_fields.items()
             if normalized_phrase and matches(field_name, value, normalized_phrase)
         ]
+        if not match_fields and item.get("type") == "unit":
+            joined_compound = _ncs_search_joined_compound_phrase(
+                phrase,
+                [token for token in query_tokens if len(token) > 1],
+            )
+            compound_fields = [
+                field_name
+                for field_name, value in normalized_fields.items()
+                if field_name == "unit_name"
+                and joined_compound
+                and matches(field_name, value, joined_compound)
+            ]
+            if compound_fields:
+                matched_tokens = list(query_tokens)
+                match_fields = compound_fields
+                matched_expansions.append(
+                    {
+                        "query": phrase,
+                        "matched_as": joined_compound,
+                        "match_fields": compound_fields,
+                    }
+                )
     else:
         match_fields = [
             field_name
@@ -1782,6 +1837,7 @@ def search_ncs(
         _NCS_SEARCH_TYPES if normalized_scope == "all" else (normalized_scope,)
     )
     phrase, query_tokens, fallback_tokens = _normalize_ncs_search_query(query)
+    joined_compound = _ncs_search_joined_compound_phrase(phrase, fallback_tokens)
     normalized_classification_filter = _normalize_ncs_classification_filter(
         classification_filter
     )
@@ -1909,6 +1965,11 @@ def search_ncs(
             order_phrase = (
                 normalize_search_text(phrase) if normalized_search else phrase
             )
+            order_joined_compound = (
+                normalize_search_text(joined_compound)
+                if normalized_search
+                else joined_compound
+            )
             rows = _active_tier_executor()(
                 conn,
                 """
@@ -1944,13 +2005,17 @@ def search_ncs(
                         WHEN cu.unit_code = :exact_code THEN 0
                         WHEN TRIM({unit_order_name}) = TRIM(:order_exact) COLLATE NOCASE THEN 0
                         WHEN {unit_order_name} LIKE :order_prefix_pattern ESCAPE '\\' THEN 1
-                        WHEN {unit_order_name} LIKE :order_phrase_pattern ESCAPE '\\' THEN 2
+                        WHEN :order_joined_exact != ''
+                         AND TRIM({unit_order_name}) = TRIM(:order_joined_exact) COLLATE NOCASE THEN 2
+                        WHEN :order_joined_exact != ''
+                         AND {unit_order_name} LIKE :order_joined_prefix_pattern ESCAPE '\\' THEN 3
+                        WHEN {unit_order_name} LIKE :order_phrase_pattern ESCAPE '\\' THEN 4
                         WHEN {unit_order_classification[0]} LIKE :order_phrase_pattern ESCAPE '\\'
                           OR {unit_order_classification[1]} LIKE :order_phrase_pattern ESCAPE '\\'
                           OR {unit_order_classification[2]} LIKE :order_phrase_pattern ESCAPE '\\'
-                          OR {unit_order_classification[3]} LIKE :order_phrase_pattern ESCAPE '\\' THEN 3
-                        WHEN {unit_order_definition} LIKE :order_phrase_pattern ESCAPE '\\' THEN 4
-                        ELSE 5
+                          OR {unit_order_classification[3]} LIKE :order_phrase_pattern ESCAPE '\\' THEN 5
+                        WHEN {unit_order_definition} LIKE :order_phrase_pattern ESCAPE '\\' THEN 6
+                        ELSE 7
                     END,
                     LENGTH(cu.unit_name_raw),
                     CASE
@@ -1970,6 +2035,10 @@ def search_ncs(
                     "exact_code": phrase,
                     "order_exact": order_phrase,
                     "order_prefix_pattern": f"{_escape_ncs_search_like(order_phrase)}%",
+                    "order_joined_exact": order_joined_compound,
+                    "order_joined_prefix_pattern": (
+                        f"{_escape_ncs_search_like(order_joined_compound)}%"
+                    ),
                     "order_phrase_pattern": f"%{_escape_ncs_search_like(order_phrase)}%",
                     "candidate_limit": candidate_limit,
                 },
