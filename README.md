@@ -118,6 +118,8 @@ Builder/Publisher 스크립트와 Vercel CLI는 구현 구성요소이지 운영
 
 ### 변경 이력
 
+- **2026-09-13**: 명시적인 `X 직무/업무 필요역량` 질의를 NCS 분류체계의 정확하고 유일한 세분류 경로에 먼저 결합한 뒤, 해당 가지의 능력단위→능력단위요소→수행준거·KSA만 조회하도록 commit `ccd59040cba791496bf34a15c127f7b5d78d49d6`에서 검색 경계를 강화했습니다. `직무/업무` 뒤의 `에`·`의`·`에서`·무조사 문형과 연속 `@AI비서 NCSMCP` 접두사를 처리하며, `접객`처럼 exact·unique 분류로 승격할 수 없는 범위는 무범위 검색을 실행하지 않고 `route_context_required`로 중단합니다. HR `인사` 범위의 `인사하기`는 filtered `NOT_FOUND`와 NCS 근거/BARS 생성 금지 안내를 반환합니다. 특정 분야 denylist나 신규 alias 없이 6개 대분류 운영 표본에서 `offscope=0`을 확인했고, 전체 테스트는 2,515개 통과·4개 환경 의존 skip입니다. Builder 단일 경로의 데이터 버전은 `20260913_085611_e74ff3ae`, Vercel deployment는 `dpl_Aic2S4fkXSBDoWN4eQ3WEMLrbkBH`, 서버 build ID는 `6e35bdc0361d45a3a8ebdddf3d17bafb`이며, production health·ready·MCP build identity와 공개 도구 7/7개를 재검증했습니다.
+- **2026-09-13**: 검색 일반화와 Vercel snapshot 용량 개선 commit `d225a254672b867d686ce87c127e85bde7141c61`을 반영했습니다. 새 alias나 DB 쓰기 없이 공식 능력단위명의 보수적 복합어 결합만 허용해, 공식명에서 자동 생성한 비-holdout 띄어쓰기 변형 60건의 Hit@1/Hit@3/MRR@3를 `0.6333/0.7333/0.6750`에서 `0.9167/0.9833/0.9472`로 개선했습니다. 배포용 compact DB는 정수 ID 6개를 rowid 기반 `INTEGER PRIMARY KEY`로 보존하고 중복 ID 인덱스 5개를 제거해 `478,756,864` bytes에서 `456,929,280` bytes로 `21,827,584` bytes 절감했습니다. 43개 물리 테이블 행 해시·view 정의와 6개 대분류의 실제 추천·그래프 결과가 기존 snapshot과 동일함을 확인했고, 전체 테스트는 2,497개 통과·4개 환경 의존 skip입니다. 과업·KSA shadow 재랭킹은 NDCG/MRR이 각각 `+0.007366/+0.008565`였지만 구조 회귀 1건과 독립 의미 라벨 부재로 공개 적용을 **HOLD**했습니다. 기존 holdout은 개별 사례를 열거나 alias 튜닝에 사용하지 않았습니다.
 - **2026-09-13**: 최종 검색 개선 commit `70c995ce61a62caffd82c3f2094ee5d92e75001f`를 Builder 단일 경로로 `ncs-mcp-bridge-mini2` production에 배포했습니다. Builder 데이터 버전은 `20260913_020821_38fadb3a`, Vercel deployment는 `dpl_BHEgRsnnLMg5exQWzurFm1yqqyi3`, 서버 build ID는 `7c31b93c0d4e46d59881a9824729fc26`입니다. 배포 후 공개 도구 7/7개와 실제 호출 12건을 다시 통과했고, 운영 의미 프로브에서 `채용관리를 → 인력채용`, `적격증빙 수취와 전표 처리 → 적격증빙관리·전표관리`, `출입 통제와 보안 점검`의 수출입 오탐 제거, `classification_filter.major_code=02`의 차량·행사 HR 범위 제한을 확인했습니다. compact DB는 `478,756,864` bytes로 480 MB 하드 캡까지 `1,243,136` bytes만 남아 있으므로 다음 데이터 갱신 전 용량 절감이 필수입니다.
 - **2026-09-13**: 조사 제거 후에도 `채용관리`, `인사기획업무`처럼 저정보 접미사가 남는 복합어를 unit명과 해당 unit의 기존 정확 alias에만 제한해 보강했습니다. 새 alias나 DB 쓰기 없이 `채용관리를`의 1위를 `전작 경영관리`에서 `인력채용`으로 바로잡았고 기존 정의 후보는 뒤에 보존했습니다. 23개 대분류의 비-holdout 공식명 변형 162건에서 Hit@1/Hit@3/MRR@20이 `0→1.0`이었으며, dev 40건과 기존 synthetic 48건은 회귀가 없었습니다.
 - **2026-09-13**: 과업·KSA 근거 재랭킹은 반환 후보마다 unit·element·criteria·KSA를 추가 SQL 1회로 수집하는 shadow profiler까지 구현했습니다. 후보가 있는 24회에서 추가 p50/p95는 `9.712/14.159ms`, 근거 샘플 coverage는 124/124였지만 독립 relevance 검증이 없으므로 공개 랭킹 승격은 **HOLD**입니다.
@@ -161,6 +163,9 @@ intent alias가 없는 일반 질의는 기존 문구·토큰 순서를 그대�
 안전한 경우에만 `morphology_fill` 후보를 기존 결과 뒤에 추가합니다. 조사 제거 뒤 `관리`·`업무`·`운영`·
 `직무`·`실무`가 남는 경우에는 그 앞의 비범용 base를 능력단위명 또는 같은 능력단위의 기존 정확 alias에만
 연결하며, 짧은 base를 정의·분류 전체로 확산하지 않습니다.
+명시적인 `X 직무/업무 필요역량` 질의는 먼저 `대분류 → 중분류 → 소분류 → 세분류`의 정확하고 유일한
+원천 분류 경로를 확인합니다. 경로가 확인되면 그 가지를 hard filter로 고정하고 능력단위·요소·수행준거·KSA로
+내려가며, 정확한 범위를 확정할 수 없으면 다른 분야 결과를 섞지 않고 범위 확인이 필요하다고 응답합니다.
 
 | 검증 항목 | 현재 결과 |
 | --- | --- |
@@ -177,7 +182,7 @@ intent alias가 없는 일반 질의는 기존 문구·토큰 순서를 그대�
 | 2026-09-12 원격 readiness warm p50 | `1,434.019 ms → 235.134 ms` (`83.6%` 단축) |
 | 새 preview 3회 첫 요청 p50 | `5,186.377 ms` |
 | 첫 요청 중 snapshot bootstrap p50 | `4,554.211 ms` |
-| 전체 단위 테스트(로컬) | 총 `2,474개` 통과, `4개 skip` |
+| 전체 단위 테스트(로컬) | 총 `2,515개` 통과, `4개 skip` |
 
 `ncs_search`는 `offset`과 `next_offset`을 제공해 5건 이후 결과에도 접근할 수 있습니다.
 `scope="all"`은 능력단위, 능력단위요소, 수행준거, KSA가 한 유형에 선점되지 않도록 유형별 결과를
@@ -192,8 +197,9 @@ holdout은 전후 비교에만 사용하며 결과를 보고 alias를 추가하�
 보조 SQL이 1회 늘어 승격 기준을 넘었으므로 public reranking은 HOLD 상태입니다.
 
 Vercel에는 전체 원본 DB가 아니라 검증된 compact SQLite snapshot을 배포합니다. 현재 snapshot은
-`478,756,864 bytes`, 압축 ZIP은 `128,894,654 bytes`입니다. 빌드 하드 캡 `480 MB`까지 남은 여유는
-`1,243,136 bytes`뿐이고 소프트 캡 `460 MB`는 넘었으므로 다음 데이터 갱신 전 축소 기준을 재점검해야 합니다.
+`456,929,280 bytes`, 압축 ZIP은 `120,158,362 bytes`입니다. 빌드 소프트 캡 `460 MB`까지
+`3,070,720 bytes`, 하드 캡 `480 MB`까지 `23,070,720 bytes`의 여유가 있으며 현재 용량 게이트는
+`within_budget`입니다.
 FTS5 인덱스는 배포 시 `/tmp` 여유와 콜드스타트 안정성을 해칠 수 있어 현재 릴리스에는 포함하지 않았습니다.
 무결성 확인을 위한 SHA-256과 `fsync`는 유지합니다.
 
@@ -686,9 +692,9 @@ Vercel에는 전체 운영 DB 대신 온톨로지와 교육 추천에 필요한 
 처리합니다.
 
 릴리스는 추적된 파일만 복사한 clean staging에서 조립하며, 실제 Vercel `filePathMap`에서 원본 DB가
-0건인지 확인합니다. 현재 검증된 함수 매핑 총량은 178,567,716 bytes이고, 런타임에 펼쳐지는
-SQLite는 478,756,864 bytes입니다. Builder의 480 MB 하드 캡까지 여유가 1,243,136 bytes뿐이므로
-DB가 증가하기 전에 축소 기준과 `/tmp` 사용량을 다시 점검해야 합니다.
+0건인지 확인합니다. 현재 검증된 함수 번들은 169,901,404 bytes이고, 런타임에 펼쳐지는
+SQLite는 456,929,280 bytes입니다. Builder의 480 MB 하드 캡까지 23,070,720 bytes가 남아 있으며,
+향후 데이터 증가 시에도 용량 게이트와 `/tmp` 사용량을 계속 확인합니다.
 
 - [경량 DB Builder·Refresh Builder·Vercel 배포 절차](docs/VERCEL_SNAPSHOT_BUILDER.md)
 - [Vercel 배포 구조·전체 포함 데이터·운영 범위](docs/README_VERCEL_HTTPS.md)
