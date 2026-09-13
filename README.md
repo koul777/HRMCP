@@ -7,6 +7,7 @@
 - Added all-major execution-gate and collision-audit scripts. The latest gate covers 24/24 majors, 96 hierarchy samples, and 288 calls with zero unexpected results and no holdout inspection or database mutation.
 - Added Builder safeguards for code-only releases: a missing deployed-version pointer is rejected, and the operation is journaled as `copy_current` with restart-safe version persistence. Superseded Builder versions are recoverably archived off the system drive; the active production pointer is unchanged.
 - Verified the canonical source and `deploy/vercel_mcp_app` mirror remain synchronized. Lint, smoke, scope/recommendation, public payload, Builder, and deployment-source tests pass.
+- Production deployment completed through the Windows Builder for project `ncs-mcp-bridge-mini2`: Builder version `20260913_152326_dbfee9b8`, build ID `ea2a33d510a7453e82676fb96f99cefe`, deployment `dpl_CXCdNyJinPYXCYFv1igw2wXP7UyM`. Staged and production health, readiness, MCP transport, and build-identity checks all passed.
 
 > 운영 원칙(2026-09-11): production DB/API 갱신, 온톨로지 재구축, 경량
 > 패키지 생성, Vercel 반영, 기준본 승격은 Windows NCS Data Builder
