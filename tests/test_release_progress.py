@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+import zipfile
 from unittest.mock import patch
 
 from ncs_mcp.builder_release import (
@@ -35,6 +36,12 @@ class ReleaseProgressTests(unittest.TestCase):
         source.write_bytes(b'candidate')
         artifact = stage / 'archive.zip'
         artifact.write_bytes(b'validated package')
+        api = stage / 'api'
+        api.mkdir()
+        with zipfile.ZipFile(api / 'ncs_ontology_compact.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr('ncs_ontology_compact.db', b'compact')
+        (api / 'ncs_ontology_compact.manifest.json').write_text(json.dumps({
+            'archive_member': 'ncs_ontology_compact.db', 'sqlite_bytes': 7}))
         url = 'https://selected.vercel.app/api/mcp'
         project_dir = stage / '.vercel'
         project_dir.mkdir()

@@ -10,12 +10,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 import tempfile
 import unittest
+import zipfile
 from unittest.mock import patch
 
 from ncs_mcp.builder_release import (
     ReleaseError, _is_canonically_within, _parse_inspection, _verify, _verify_deployment,
     _write, build_release as direct_build_release, deploy_release as direct_deploy_release,
-    project_configuration,
+    project_configuration, ReleaseGuard, _capacity_record, snapshot_capacity_message,
 )
 from ncs_mcp.builder_authorization import BuilderAuthorizationError
 from ncs_mcp.data_builder import BuilderError, DataBuilder
@@ -80,8 +81,11 @@ class BuilderReleaseTests(unittest.TestCase):
         if argv[0] == 'git':
             return '\0'.join('deploy/vercel_mcp_app/' + name for name in self.files) + '\0'
         if '--source' in argv and str(argv[1]).endswith('build_vercel_snapshot.py'):
-            for flag in ('--output-db', '--archive', '--manifest'):
-                Path(argv[argv.index(flag) + 1]).write_bytes(b'compact')
+            Path(argv[argv.index('--output-db') + 1]).write_bytes(b'compact')
+            with zipfile.ZipFile(Path(argv[argv.index('--archive') + 1]), 'w', zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr('ncs_ontology_compact.db', b'compact')
+            Path(argv[argv.index('--manifest') + 1]).write_text(json.dumps({
+                'archive_member': 'ncs_ontology_compact.db', 'sqlite_bytes': 7}))
             Path(argv[argv.index('--report') + 1]).write_text(
                 '{"ok":true,"generated_at":"2026-09-12T01:02:03+00:00"}'
             )
@@ -135,6 +139,162 @@ class BuilderReleaseTests(unittest.TestCase):
             runner=self.run_command, verifier=self.verified)
         self.assertTrue(report['ok'], report)
         return report
+
+    def test_capacity_boundaries_and_exact_production_caps(self):
+        with DataBuilder(self.root).exclusive('package', self.version.name) as context:
+            guard = ReleaseGuard(context, action='package', version_dir=self.version)
+            for size, status, passed in (
+                    (459_999_999, 'within_budget', True),
+                    (460_000_000, 'within_budget', True),
+                    (460_000_001, 'soft_cap_warning', True),
+                    (478_756_864, 'soft_cap_warning', True),
+                    (479_999_999, 'soft_cap_warning', True),
+                    (480_000_000, 'hard_cap_exceeded', False),
+                    (480_000_001, 'hard_cap_exceeded', False)):
+                with self.subTest(size=size):
+                    capacity = _capacity_record({}, guard, size, measured_from='test')
+                    self.assertEqual(capacity['status'], status)
+                    self.assertEqual(capacity['size_gate_passed'], passed)
+                    self.assertEqual(capacity['soft_headroom_bytes'], 460_000_000 - size)
+                    self.assertEqual(capacity['hard_headroom_bytes'], 480_000_000 - size)
+                    self.assertIn(f'{size:,}', snapshot_capacity_message(capacity))
+
+    def test_soft_capacity_is_version_bound_warning_and_allows_package_and_deploy(self):
+        # A tiny real ZIP exercises the same gate without allocating a production-sized DB.
+        (self.template / 'api/ncs_ontology_compact.manifest.json').write_text(
+            '{"sqlite_bytes":999999999}')
+        old_pointer = self.version.parents[1] / 'deployed.json'
+        old_pointer.write_text('{"version":"old"}')
+        before_source = (self.version / 'ncs.db').read_bytes()
+        events = []
+        with patch('ncs_mcp.builder_release.SOFT_SNAPSHOT_BYTES', 6), \
+                patch('ncs_mcp.builder_release.MAX_SNAPSHOT_BYTES', 8), \
+                patch('ncs_mcp.data_builder.refresh_ncs_api_evidence') as collect:
+            package = build_release(self.version, repo_root=self.root, deploy_root=self.template,
+                expected_source_sha256=self.sha, runner=self.run_command, progress=events.append)
+            self.assertTrue(package['ok'], package)
+            capacity = package['snapshot_capacity']
+            self.assertEqual(capacity['database_bytes'], 7)
+            self.assertEqual(capacity['status'], 'soft_cap_warning')
+            self.assertEqual(capacity['version'], self.version.name)
+            self.assertEqual(capacity['build_id'], package['build_id'])
+            self.assertEqual(capacity['source_sha256'], self.sha)
+            self.assertEqual(Path(capacity['archive_path']).parent, self.version / 'release/deploy/api')
+            self.assertRegex(capacity['archive_sha256'], r'^sha256:[0-9a-f]{64}$')
+            path = self.version / 'release.json'
+            stale_report = json.loads(path.read_text(encoding='utf-8'))
+            stale_report['snapshot_capacity'] = {'version': 'other', 'database_bytes': 999_999_999}
+            path.write_text(json.dumps(stale_report), encoding='utf-8')
+            # Removing only the raw export proves deploy measures the immutable staged pair.
+            (self.version / 'release/compact.db').unlink()
+            deployed = deploy_release(self.version,
+                production_mcp_url='https://selected-project.vercel.app/api/mcp',
+                runner=self.run_command, verifier=self.verified, progress=events.append)
+            self.assertTrue(deployed['ok'], deployed)
+            self.assertEqual(deployed['snapshot_capacity'], capacity)
+            collect.assert_not_called()
+        self.assertEqual((self.version / 'ncs.db').read_bytes(), before_source)
+        self.assertEqual(old_pointer.read_text(), '{"version":"old"}')
+        self.assertGreaterEqual(sum('snapshot_capacity' in event for event in events), 2)
+
+    def test_hard_capacity_export_failure_reports_bytes_and_preserves_existing_state(self):
+        engine = DataBuilder(self.root)
+        (self.version / 'build.json').write_text(json.dumps({'status': 'ready', 'sha256': self.sha}))
+        protected = [self.version / 'ncs.db', engine.state / 'deployed.json',
+                     engine.state / 'baseline.json', self.template / 'api/ncs_ontology_compact.zip',
+                     self.template / 'api/ncs_ontology_compact.manifest.json']
+        for path in protected[1:]:
+            path.write_bytes(b'old verified artifact')
+        before = {path: path.read_bytes() for path in protected}
+        def failed_export(**kwargs):
+            kwargs['output_db'].write_bytes(b'compact')
+            return {'ok': False, 'error': {'stage': 'export_compact_snapshot'},
+                    'stages': [{'name': 'export_compact_snapshot', 'returncode': 1}]}
+        with patch('scripts.build_vercel_snapshot.build_snapshot', side_effect=failed_export), \
+                patch('ncs_mcp.builder_release.MAX_SNAPSHOT_BYTES', 7), \
+                patch('ncs_mcp.builder_release.SOFT_SNAPSHOT_BYTES', 6), \
+                patch('ncs_mcp.builder_release._run', side_effect=self.run_command), \
+                patch('ncs_mcp.data_builder.refresh_ncs_api_evidence') as collect:
+            with self.assertRaisesRegex(BuilderError, '7 bytes / soft 6 / hard 7'):
+                engine.package(self.version.name, self.template)
+            report = json.loads((self.version / 'release.json').read_text(encoding='utf-8'))
+            self.assertEqual(report['status'], 'build_failed')
+            self.assertFalse(report['package_validated'])
+            self.assertEqual(report['failed_build_stage'], 'export_compact_snapshot')
+            self.assertEqual(report['snapshot_capacity']['status'], 'hard_cap_exceeded')
+            self.assertEqual(report['snapshot_capacity']['hard_headroom_bytes'], 0)
+            self.assertEqual(report['snapshot_capacity']['error_code'], 'snapshot_hard_cap_exceeded')
+            self.assertEqual(Path(report['snapshot_capacity']['database_path']),
+                             self.version / 'release/compact.db')
+            self.assertIn('hard 7', report['error'])
+            self.commands.clear()
+            with self.assertRaises(BuilderError):
+                engine.deploy(self.version.name, self.template,
+                              'https://selected-project.vercel.app/api/mcp')
+            self.assertEqual(self.commands, [])
+            collect.assert_not_called()
+        self.assertEqual({path: path.read_bytes() for path in protected}, before)
+        self.assertEqual(self.current_deployment, self.previous_deployment)
+        self.assertFalse((self.version / 'release/deploy/api/ncs_ontology_compact.zip').exists())
+
+    def test_staged_hard_cap_blocks_even_if_snapshot_stage_claims_success(self):
+        def mutate_progress(event):
+            if 'snapshot_capacity' in event:
+                event['snapshot_capacity'].update(status='within_budget', database_bytes=1)
+        with patch('ncs_mcp.builder_release.MAX_SNAPSHOT_BYTES', 7):
+            report = build_release(self.version, repo_root=self.root, deploy_root=self.template,
+                expected_source_sha256=self.sha, runner=self.run_command, progress=mutate_progress)
+        self.assertEqual(report['status'], 'build_failed')
+        self.assertFalse(report['package_validated'])
+        self.assertEqual(report['snapshot_capacity']['measured_from'], 'staged_archive_member')
+        self.assertEqual(report['snapshot_capacity']['status'], 'hard_cap_exceeded')
+        self.assertEqual(report['snapshot_capacity']['database_bytes'], 7)
+        self.assertFalse(any(len(argv) > 1 and argv[1] == 'build' for argv, _ in self.commands))
+
+    def test_staged_capacity_rejects_manifest_member_size_mismatch(self):
+        original = self.run_command
+        def mismatching_stage(argv, cwd):
+            result = original(argv, cwd)
+            if '--manifest' in argv and str(argv[1]).endswith('build_vercel_snapshot.py'):
+                path = Path(argv[argv.index('--manifest') + 1])
+                path.write_text('{"archive_member":"ncs_ontology_compact.db","sqlite_bytes":8}')
+            return result
+        with patch.object(self, 'run_command', side_effect=mismatching_stage):
+            report = self.build()
+        self.assertEqual(report['status'], 'build_failed')
+        self.assertIn('sizes do not match', report['error'])
+        self.assertFalse(any(len(argv) > 1 and argv[1] == 'build' for argv, _ in self.commands))
+
+    def test_deploy_remeasures_capacity_and_blocks_at_hard_cap_before_remote_calls(self):
+        self.build()
+        source_before = (self.version / 'ncs.db').read_bytes()
+        self.commands.clear()
+        with patch('ncs_mcp.builder_release.MAX_SNAPSHOT_BYTES', 7):
+            result = deploy_release(self.version,
+                production_mcp_url='https://selected-project.vercel.app/api/mcp',
+                runner=self.run_command, verifier=self.verified)
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['snapshot_capacity']['status'], 'hard_cap_exceeded')
+        self.assertEqual(result['snapshot_capacity']['database_bytes'], 7)
+        self.assertIsNone(result['snapshot_capacity']['database_path'])
+        self.assertEqual(result['snapshot_capacity']['archive_member'],
+                         'ncs_ontology_compact.db')
+        self.assertEqual(self.commands, [])
+        self.assertEqual((self.version / 'ncs.db').read_bytes(), source_before)
+        self.assertEqual(self.current_deployment, self.previous_deployment)
+
+    def test_capacity_progress_lease_revocation_cannot_write_or_call_vercel(self):
+        def revoke(event):
+            if 'snapshot_capacity' in event:
+                (self.version.parents[1] / 'operation.lock').write_text('new owner')
+        with self.assertRaises(BuilderError) as rejected:
+            build_release(self.version, repo_root=self.root, deploy_root=self.template,
+                expected_source_sha256=self.sha, runner=self.run_command, progress=revoke)
+        self.assertIsInstance(rejected.exception.__cause__, BuilderAuthorizationError)
+        self.assertFalse((self.version / 'release.json').exists())
+        self.assertFalse(any(len(argv) > 1 and argv[1] in {'build', 'deploy', 'promote', 'rollback'}
+                             for argv, _ in self.commands))
+        self.assertEqual(hashlib.sha256((self.version / 'ncs.db').read_bytes()).hexdigest(), self.sha)
 
     def test_template_copy_target_hardlink_race_never_truncates_source(self):
         source = self.version / 'ncs.db'
@@ -198,6 +358,8 @@ class BuilderReleaseTests(unittest.TestCase):
         self.assertEqual(current['deployment_identity']['deployment_id'], 'dpl_staged')
         self.assertEqual(current['build_id'], result['deployment']['build_id'])
         self.assertEqual(current['source_sha256'], self.sha)
+        self.assertEqual(current['snapshot_capacity'], result['deployment']['snapshot_capacity'])
+        self.assertEqual(current['snapshot_capacity']['version'], self.version.name)
         self.assertEqual(baseline.read_bytes(), old_baseline)
         self.assertEqual([argv[1] for argv, _ in self.commands[count:]], ['inspect', 'inspect'])
 

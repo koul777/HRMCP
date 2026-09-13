@@ -681,7 +681,7 @@ class DataBuilder:
                 raise
 
     def package(self, version: str, deploy_root: Path) -> dict:
-        from .builder_release import build_release
+        from .builder_release import build_release, snapshot_capacity_message
 
         with self.exclusive("package", version) as builder_context:
             db = self.candidate(version)
@@ -696,11 +696,12 @@ class DataBuilder:
             if not report.get("ok"):
                 raise BuilderError(
                     "경량 패키지 생성·검증에 실패했습니다. release.json을 확인하세요."
+                    + "\n" + snapshot_capacity_message(report.get("snapshot_capacity"))
                 )
             return {"version": version, "package": report}
 
     def deploy(self, version: str, deploy_root: Path, production_url: str) -> dict:
-        from .builder_release import ReleaseGuard, _write, deploy_release
+        from .builder_release import ReleaseGuard, _write, deploy_release, snapshot_capacity_message
 
         with self.exclusive("deploy", version) as builder_context:
             release_guard = ReleaseGuard(builder_context, action="deploy",
@@ -729,9 +730,11 @@ class DataBuilder:
                     raise BuilderError(
                         "완료된 운영 배포의 재검증에 실패했습니다. 기존 완료 기록과 로컬 기준점은 "
                         "보존했습니다. 운영 배포와 패키지 무결성을 확인한 뒤 다시 시도하세요."
+                        + "\n" + snapshot_capacity_message(report.get("snapshot_capacity"))
                     )
                 raise BuilderError(
                     "Vercel 갱신 검증을 완료하지 못했습니다. release.json의 배포 상태를 확인하세요."
+                    + "\n" + snapshot_capacity_message(report.get("snapshot_capacity"))
                 )
             _write(
                 self.state / "deployed.json",
@@ -744,6 +747,7 @@ class DataBuilder:
                     "source_sha256": report.get("source_sha256"),
                     "deployment_identity": report.get("production_after_promotion"),
                     "release_report_sha256": file_sha256(release_path),
+                    "snapshot_capacity": report.get("snapshot_capacity"),
                 },
                 builder_context=builder_context, guard=release_guard,
             )

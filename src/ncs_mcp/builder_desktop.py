@@ -16,6 +16,7 @@ from .data_builder import BuilderError, DataBuilder, inspect_workbook
 from .builder_progress import describe_progress, workflow_percent
 from .builder_discovery import discover_project
 from .builder_session import BuilderSession
+from .builder_release import snapshot_capacity_message
 
 
 class BuilderCancelled(BaseException):
@@ -42,6 +43,7 @@ class BuilderWindow:
         self.baseline = tk.StringVar(value=str(self.engine.current_db()))
         self.deploy_root = tk.StringVar(value=str(PROJECT_ROOT / "deploy/vercel_mcp_app"))
         self.production_url = tk.StringVar()
+        self.capacity_status = tk.StringVar(value=snapshot_capacity_message(None))
         self.internal_role_mapping_packet = tk.StringVar()
         self.gold_embedding_model = tk.StringVar(
             value=os.environ.get(
@@ -123,6 +125,8 @@ class BuilderWindow:
         self.selection_label.pack(anchor="w", pady=10)
         self.deploy_selection = ttk.Label(deploy_tab, text="선택된 버전 없음", wraplength=900)
         self.deploy_selection.pack(anchor="w", pady=10)
+        for capacity_tab in (release_tab, deploy_tab):
+            ttk.Label(capacity_tab, textvariable=self.capacity_status, wraplength=930).pack(anchor="w", pady=8)
         ttk.Label(deploy_tab, text="③에서 만든 패키지를 검증용으로 배포한 뒤, 연결 검증을 통과하면 운영 주소에 반영합니다.\n각 단계는 버튼을 눌러 실행하며 자동으로 다음 단계가 시작되지 않습니다.", wraplength=950).pack(anchor="w", pady=10)
         ttk.Label(
             gold_tab,
@@ -610,6 +614,7 @@ class BuilderWindow:
         report = json.loads((folder / "build.json").read_text(encoding="utf-8"))
         release_file = folder / "release.json"
         release = json.loads(release_file.read_text(encoding="utf-8")) if release_file.exists() else {}
+        self.capacity_status.set(snapshot_capacity_message(capacity_for_version(release, version)))
         ready = report.get("status") == "ready"
         complete = {1: ready and bool(report.get("source_delta")),
                     2: ready and bool(report.get("sources")),
@@ -638,6 +643,9 @@ class BuilderWindow:
             while True:
                 kind, value = self.events.get_nowait()
                 if kind == "progress":
+                    if isinstance(value, dict) and value.get('snapshot_capacity'):
+                        self.capacity_status.set(snapshot_capacity_message(
+                            capacity_for_version(value, self.selected_version)))
                     if self.active_phase and time.monotonic() - self.last_journal_at >= 2:
                         self.session.progress(value if isinstance(value, dict) else {'stage': value})
                         self.last_journal_at = time.monotonic()
@@ -683,6 +691,14 @@ class BuilderWindow:
                     self.bar.configure(mode="determinate", value=0)
                     self.status.set(value)
                     self.log.insert("end", value + "\n")
+                    if self.selected_version:
+                        release_file = self.engine._version_dir(self.selected_version) / 'release.json'
+                        try:
+                            release = json.loads(release_file.read_text(encoding='utf-8'))
+                        except (OSError, ValueError):
+                            release = {}
+                        self.capacity_status.set(snapshot_capacity_message(
+                            capacity_for_version(release, self.selected_version)))
                     if not self.closing and kind == 'error':
                         messagebox.showerror("작업을 완료하지 못했습니다", value)
                 elif kind == "done":
@@ -725,6 +741,11 @@ def main():
     root.mainloop()
 
 
+def capacity_for_version(release: dict, version: str | None) -> dict | None:
+    capacity = release.get('snapshot_capacity')
+    return capacity if version and isinstance(capacity, dict) and capacity.get('version') == version else None
+
+
 def format_result(result: dict) -> str:
     if "preview" in result:
         preview = result["preview"]
@@ -752,4 +773,7 @@ def format_result(result: dict) -> str:
         lines.append("\nVercel 운영 MCP 업데이트 및 연결 검증 완료.")
     else:
         lines.append("\n작업 완료. 상세 근거는 버전별 보고서에 저장했습니다.")
+    release = result.get('package') or result.get('deployment')
+    if isinstance(release, dict):
+        lines.append("\n" + snapshot_capacity_message(capacity_for_version(release, result.get('version'))))
     return "\n".join(lines)

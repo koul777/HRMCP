@@ -24,11 +24,18 @@ import threading
 import urllib.error
 import urllib.request
 import uuid
+import zipfile
 from typing import Callable
 
 from .builder_authorization import (
     BuilderAuthorizationError, BuilderOperationContext, require_builder_context,
 )
+from .vercel_snapshot import (
+    COMPACT_ARCHIVE_NAME, COMPACT_MANIFEST_NAME, COMPACT_SNAPSHOT_NAME,
+    MAX_MANIFEST_BYTES, MAX_SNAPSHOT_BYTES,
+)
+
+SOFT_SNAPSHOT_BYTES = 460_000_000
 
 
 class ReleaseGuard:
@@ -129,6 +136,109 @@ def package_guard(builder_context: BuilderOperationContext | None) -> ReleaseGua
 
 class ReleaseError(RuntimeError):
     """A bounded, credential-free release failure."""
+
+
+def _capacity_record(report: dict, guard: ReleaseGuard, database_bytes: int | None,
+                     *, measured_from: str) -> dict:
+    """A size observation, never a replacement for package/content verification."""
+    hard = database_bytes is not None and database_bytes >= MAX_SNAPSHOT_BYTES
+    soft = database_bytes is not None and database_bytes > SOFT_SNAPSHOT_BYTES
+    return {
+        'schema': 'ncs_builder_snapshot_capacity_v1',
+        'version': guard.version.name, 'build_id': report.get('build_id'),
+        'source_sha256': report.get('source_sha256'),
+        # Successful package/deploy checks measure the immutable ZIP member;
+        # do not claim the raw export still exists during a later deploy.
+        'database_path': (str(guard.version / 'release/compact.db')
+                          if measured_from == 'failed_export_database' else None),
+        'database_bytes': database_bytes, 'measured_from': measured_from,
+        'soft_cap_bytes': SOFT_SNAPSHOT_BYTES, 'hard_cap_bytes': MAX_SNAPSHOT_BYTES,
+        'soft_headroom_bytes': None if database_bytes is None else SOFT_SNAPSHOT_BYTES - database_bytes,
+        'hard_headroom_bytes': None if database_bytes is None else MAX_SNAPSHOT_BYTES - database_bytes,
+        'status': ('not_measured' if database_bytes is None else
+                   'invalid_database_size' if database_bytes <= 0 else
+                   'hard_cap_exceeded' if hard else 'soft_cap_warning' if soft else 'within_budget'),
+        'size_gate_passed': database_bytes is not None and 0 < database_bytes < MAX_SNAPSHOT_BYTES,
+        'warning': soft and not hard,
+        'error_code': 'snapshot_hard_cap_exceeded' if hard else None,
+    }
+
+
+def snapshot_capacity_message(capacity: dict | None) -> str:
+    """Render bounded numeric capacity evidence for reports and the desktop UI."""
+    if not isinstance(capacity, dict) or any(type(capacity.get(key)) is not int for key in (
+            'database_bytes', 'soft_cap_bytes', 'hard_cap_bytes',
+            'soft_headroom_bytes', 'hard_headroom_bytes')):
+        return '경량 DB 용량: 미측정 · 선택 버전의 패키지 생성·검증이 필요합니다.'
+    status = capacity.get('status')
+    label = {'within_budget': '정상', 'soft_cap_warning': '경고 · 소프트 캡 초과',
+             'hard_cap_exceeded': '차단 · 하드 캡 이상',
+             'invalid_database_size': '차단 · 빈 파일'}.get(status, '미확인')
+    message = (f"경량 DB 용량 {label}: {capacity['database_bytes']:,} bytes / "
+               f"soft {capacity['soft_cap_bytes']:,} / hard {capacity['hard_cap_bytes']:,} bytes. "
+               f"소프트 여유 {capacity['soft_headroom_bytes']:,}, "
+               f"하드 여유 {capacity['hard_headroom_bytes']:,} bytes.")
+    if status == 'soft_cap_warning':
+        message += ' 용량 경고만으로 차단하지 않습니다. 다른 검증을 통과하면 배포할 수 있습니다.'
+    elif status == 'hard_cap_exceeded':
+        message += ' 제한값과 같아도 패키지·배포를 차단합니다. 기존 운영 배포는 유지합니다.'
+    return message
+
+
+def _staged_snapshot_capacity(report: dict, guard: ReleaseGuard) -> dict:
+    """Measure the selected version's ZIP member, not a template or stale report."""
+    stage = guard.version / 'release/deploy/api'
+    archive, manifest = stage / COMPACT_ARCHIVE_NAME, stage / COMPACT_MANIFEST_NAME
+    guard.check(archive, manifest)
+    try:
+        if not 0 < manifest.stat().st_size <= MAX_MANIFEST_BYTES:
+            raise ReleaseError('Staged capacity manifest size is invalid.')
+        metadata = json.loads(manifest.read_text(encoding='utf-8'))
+        with zipfile.ZipFile(archive) as bundle:
+            members = bundle.infolist()
+            if len(members) != 1 or members[0].filename != COMPACT_SNAPSHOT_NAME:
+                raise ReleaseError('Staged capacity archive member is invalid.')
+            database_bytes = members[0].file_size
+        if (not isinstance(metadata, dict)
+                or metadata.get('archive_member') != COMPACT_SNAPSHOT_NAME
+                or type(metadata.get('sqlite_bytes')) is not int
+                or metadata['sqlite_bytes'] != database_bytes or database_bytes <= 0):
+            raise ReleaseError('Staged capacity manifest/member sizes do not match.')
+        result = _capacity_record(report, guard, database_bytes, measured_from='staged_archive_member')
+        result.update(archive_path=str(archive), manifest_path=str(manifest),
+                      archive_member=COMPACT_SNAPSHOT_NAME,
+                      archive_bytes=archive.stat().st_size,
+                      archive_sha256='sha256:' + _hash(archive),
+                      manifest_sha256='sha256:' + _hash(manifest))
+        for name, field in ((COMPACT_ARCHIVE_NAME, 'archive_sha256'),
+                            (COMPACT_MANIFEST_NAME, 'manifest_sha256')):
+            recorded = (report.get('artifacts') or {}).get('api/' + name)
+            if recorded is not None and result[field] != 'sha256:' + recorded:
+                raise ReleaseError('Staged capacity artifact changed after package verification.')
+        return result
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+        raise ReleaseError('Unable to measure the selected version staged compact capacity.') from exc
+    finally:
+        guard.check(archive, manifest)
+
+
+def _record_snapshot_capacity(report: dict, guard: ReleaseGuard, tell: Callable,
+                              *, export_failed: bool = False) -> None:
+    if export_failed:
+        database = guard.version / 'release/compact.db'
+        guard.check(database)
+        database_bytes = database.stat().st_size if database.is_file() else None
+        capacity = _capacity_record(report, guard, database_bytes,
+                                    measured_from='failed_export_database' if database_bytes is not None else 'none')
+    else:
+        capacity = _staged_snapshot_capacity(report, guard)
+    guard.check()
+    report['snapshot_capacity'] = capacity
+    tell({'stage': snapshot_capacity_message(capacity), 'completed': 0, 'total': None,
+          'snapshot_capacity': dict(capacity)})
+    guard.check()
+    if capacity['status'] == 'hard_cap_exceeded':
+        raise ReleaseError(snapshot_capacity_message(capacity))
 
 
 def _absolute_path(path: str | Path) -> Path:
@@ -499,6 +609,7 @@ def build_release(version_dir: Path, *, repo_root: Path, deploy_root: Path,
               'package_operation_lineage': builder_context.lineage(),
               'source_database_mutated': False, 'baseline_advanced': False,
               'package_validated': False}
+    report['snapshot_capacity'] = _capacity_record(report, guard, None, measured_from='none')
     output = version / 'release.json'
     if output.exists() or (version / 'release').exists():
         raise ReleaseError('This version already has release artifacts; create a new version to rebuild.')
@@ -586,6 +697,9 @@ def build_release(version_dir: Path, *, repo_root: Path, deploy_root: Path,
                 raise ReleaseError('Compact build failed; see release/snapshot-build.json for the failed stage.') from exc
             raise
         evidence = json.loads(build_report.read_text(encoding='utf-8'))
+        if evidence.get('ok') is not True:
+            report['failed_build_stage'] = (evidence.get('error') or {}).get('stage')
+        _record_snapshot_capacity(report, guard, tell, export_failed=evidence.get('ok') is not True)
         if evidence.get('ok') is not True:
             raise ReleaseError('Compact snapshot verification did not pass.')
         tell({'stage': '배포 패키지 무결성 검사 중', 'completed': 0, 'total': None, 'unit': '공정 완료'})
@@ -924,7 +1038,7 @@ def _legacy_known_good(evidence: dict, report: dict, history: list) -> dict | No
 
 
 def _release_package_preflight(report: dict, version: Path, production_mcp_url: str,
-                               guard: ReleaseGuard) -> tuple[Path, Path]:
+                               guard: ReleaseGuard, tell: Callable | None = None) -> tuple[Path, Path]:
     """Validate the same immutable inputs for a first deployment and local recovery."""
     guard.check()
     if not re.fullmatch(r'https://[a-zA-Z0-9.-]+/api/mcp', production_mcp_url):
@@ -969,6 +1083,7 @@ def _release_package_preflight(report: dict, version: Path, production_mcp_url: 
     repo = Path(report['repo_root'])
     require_builder_context(guard.context, action='deploy', root=repo, version_dir=version)
     guard.check()
+    _record_snapshot_capacity(report, guard, tell or partial(guard.call, lambda event: None))
     return stage, repo
 
 
@@ -984,7 +1099,7 @@ def _reconcile_deployed_release(report: dict, *, version: Path, production_mcp_u
     try:
         tell({'stage': '완료된 운영 배포와 로컬 계보 재확인 중', 'completed': 0,
               'total': 2, 'unit': '공정 완료'})
-        stage, repo = _release_package_preflight(report, version, production_mcp_url, guard)
+        stage, repo = _release_package_preflight(recovered, version, production_mcp_url, guard, tell)
         transaction = report.get('deployment_transaction') or {}
         expected = report.get('production_after_promotion') or {}
         staged = transaction.get('staged_url')
@@ -1026,7 +1141,7 @@ def _reconcile_deployed_release(report: dict, *, version: Path, production_mcp_u
         if not (_same_deployment(expected, reconfirmed)
                 and reconfirmed.get('deployment_id') == expected['deployment_id']):
             raise ReleaseError('Production changed during local recovery; local pointer remains unchanged.')
-        _release_package_preflight(report, version, production_mcp_url, guard)
+        _release_package_preflight(recovered, version, production_mcp_url, guard)
         recovered['deployment_operation_lineage'] = guard.context.lineage()
         recovered['local_reconciliation'] = {
             'schema': 'ncs_builder_deployment_reconciliation_v1',
@@ -1139,7 +1254,7 @@ def deploy_release(version_dir: Path, *, production_mcp_url: str,
                 'Legacy deployment evidence records a promotion or unconfirmed rollback '
                 'without a durable known-good transaction; automatic retry is blocked.'
             )
-        stage, repo = _release_package_preflight(report, version, production_mcp_url, guard)
+        stage, repo = _release_package_preflight(report, version, production_mcp_url, guard, tell)
         prebuilt_output = stage / '.vercel/output'
         verify = partial(guard.call, verifier or (lambda url, build_id: _verify_deployment(
             url, build_id, repo, run,
