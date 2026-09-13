@@ -4,6 +4,7 @@ import csv
 import json
 import re
 import sqlite3
+import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -7340,11 +7341,123 @@ def _target_only_task_concepts(
     )
 
 
+def _sql_scope_lookup_expression(column: str, *, punctuation_normalized: bool = False) -> str:
+    """Build a SQLite-only approximation of recommendation scope keys."""
+    expression = f"lower({column})"
+    # `_scope_lookup_key` removes whitespace and non-word punctuation. SQLite
+    # has no regex/NFKC primitive, so keep this C-level fallback explicit and
+    # bounded to common ASCII/full-width variants (the Python resolver handles
+    # canonical unit/element labels before reaching this criteria fallback).
+    removable_codes = [9, 10, 11, 12, 13, 32]
+    if punctuation_normalized:
+        removable_codes.extend(ord(char) for char in "-_.,;:/!?()[]{}")
+    for code in removable_codes:
+        expression = f"replace({expression}, char({code}), '')"
+    return expression
+
+
+def resolve_task_criteria_candidates(
+    conn: sqlite3.Connection,
+    *,
+    query: str | None = None,
+    criteria_id: int | None = None,
+    element_id: int | None = None,
+    unit_code: str | None = None,
+    major_code: str | None = None,
+    middle_code: str | None = None,
+    small_code: str | None = None,
+    sub_code: str | None = None,
+    limit: int | None = 50,
+    exact_criteria_query: str | None = None,
+    punctuation_normalized: bool = False,
+) -> list[dict[str, Any]]:
+    """Return bounded task rows without silently choosing the first match.
+
+    The recommendation layer uses this helper to detect duplicate exact task
+    labels before ranking.  It is deliberately read-only and keeps the raw
+    task fields intact; callers decide whether a row is safe to select.
+    """
+    clauses: list[str] = []
+    params: list[Any] = []
+    if criteria_id is not None:
+        clauses.append("pc.criteria_id = ?")
+        params.append(criteria_id)
+    if element_id is not None:
+        clauses.append("ce.element_id = ?")
+        params.append(element_id)
+    if unit_code:
+        clauses.append("ce.unit_code = ?")
+        params.append(unit_code)
+    if major_code:
+        clauses.append("c.major_code = ?")
+        params.append(major_code)
+    if middle_code:
+        clauses.append("c.middle_code = ?")
+        params.append(middle_code)
+    if small_code:
+        clauses.append("c.small_code = ?")
+        params.append(small_code)
+    if sub_code:
+        clauses.append("c.sub_code = ?")
+        params.append(sub_code)
+    if exact_criteria_query is not None:
+        # Exact criteria fallback stays in SQLite and returns only matching
+        # performance-criteria rows. Unit/element punctuation normalization is
+        # handled earlier by the scope resolver's canonical candidate.
+        criteria_expression = _sql_scope_lookup_expression(
+            "pc.criteria_text_raw", punctuation_normalized=punctuation_normalized
+        )
+        query_expression = _sql_scope_lookup_expression("?", punctuation_normalized=punctuation_normalized)
+        clauses.append(
+            f"({criteria_expression} = {query_expression})"
+        )
+        params.append(exact_criteria_query)
+    elif query:
+        clauses.append(
+            """
+            (
+                pc.criteria_text_raw LIKE ?
+                OR ce.element_name_raw LIKE ?
+                OR cu.unit_name_raw LIKE ?
+                OR c.major_name LIKE ?
+                OR c.middle_name LIKE ?
+                OR c.small_name LIKE ?
+                OR c.sub_name LIKE ?
+            )
+            """
+        )
+        like = f"%{query}%"
+        params.extend([like] * 7)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    bounded_limit = max(1, min(int(limit or 50), 200)) if limit is not None else None
+    limit_sql = "LIMIT ?" if bounded_limit is not None else ""
+    rows = conn.execute(
+        f"""
+        SELECT
+            pc.criteria_id, pc.criteria_no, pc.criteria_text_raw,
+            ce.element_id, ce.element_no, ce.element_name_raw,
+            cu.unit_code, cu.unit_name_raw, cu.unit_level_raw,
+            c.major_code, c.major_name, c.middle_code, c.middle_name,
+            c.small_code, c.small_name, c.sub_code, c.sub_name
+        FROM performance_criteria pc
+        JOIN competency_elements ce ON ce.element_id = pc.element_id
+        JOIN competency_units cu ON cu.unit_code = ce.unit_code
+        JOIN classifications c ON c.classification_id = cu.classification_id
+        {where}
+        ORDER BY pc.criteria_id
+        {limit_sql}
+        """,
+        (*params, bounded_limit) if bounded_limit is not None else tuple(params),
+    ).fetchall()
+    return rows_to_dicts(rows)
+
+
 def resolve_task_criteria(
     conn: sqlite3.Connection,
     *,
     criteria_id: int | None = None,
     query: str | None = None,
+    element_id: int | None = None,
     unit_code: str | None = None,
     major_code: str | None = None,
     middle_code: str | None = None,
@@ -7356,6 +7469,9 @@ def resolve_task_criteria(
     if criteria_id is not None:
         clauses.append("pc.criteria_id = ?")
         params.append(criteria_id)
+    if element_id is not None:
+        clauses.append("ce.element_id = ?")
+        params.append(element_id)
     if unit_code:
         clauses.append("ce.unit_code = ?")
         params.append(unit_code)
@@ -7448,6 +7564,95 @@ def resolve_task_criteria(
     return row_to_dict(row)
 
 
+def _transition_task_scope_key(value: Any) -> str:
+    """Normalize task text for the transition locator's exact-match gate."""
+    normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return re.sub(r"[^\w]+", "", normalized, flags=re.UNICODE)
+
+
+def _transition_task_projection(row: dict[str, Any]) -> dict[str, Any]:
+    """Expose bounded canonical choices without selecting a first LIKE row."""
+    return {
+        "candidate_type": "task",
+        "match_level": "source_task",
+        "matched_text": row.get("criteria_text_raw")
+        or row.get("element_name_raw")
+        or row.get("unit_name_raw"),
+        "criteria_id": row.get("criteria_id"),
+        "element_id": row.get("element_id"),
+        "unit_code": row.get("unit_code"),
+        "unit_name": row.get("unit_name_raw"),
+        "element_name": row.get("element_name_raw"),
+        "major_code": row.get("major_code"),
+        "major_name": row.get("major_name"),
+        "middle_code": row.get("middle_code"),
+        "middle_name": row.get("middle_name"),
+        "small_code": row.get("small_code"),
+        "small_name": row.get("small_name"),
+        "sub_code": row.get("sub_code"),
+        "sub_name": row.get("sub_name"),
+    }
+
+
+def _scan_transition_task_text_equivalents(
+    conn: sqlite3.Connection, *, query: str, unit_code: str | None = None
+) -> list[dict[str, Any]]:
+    """Catch Unicode/punctuation variants after one cheap exact candidate.
+
+    This is intentionally a read-only proof step. It runs only after the
+    SQLite exact lookup found one plausible criteria row, so unknown/fuzzy
+    labels do not trigger an unbounded source scan.
+    """
+    params: list[Any] = []
+    where = ""
+    if unit_code:
+        where = "WHERE ce.unit_code = ?"
+        params.append(unit_code)
+    query_key = _transition_task_scope_key(query)
+    rows = conn.execute(
+        f"""
+        SELECT
+            pc.criteria_id, pc.criteria_no, pc.criteria_text_raw,
+            ce.element_id, ce.element_no, ce.element_name_raw,
+            cu.unit_code, cu.unit_name_raw, cu.unit_level_raw,
+            c.major_code, c.major_name, c.middle_code, c.middle_name,
+            c.small_code, c.small_name, c.sub_code, c.sub_name
+        FROM performance_criteria pc
+        JOIN competency_elements ce ON ce.element_id = pc.element_id
+        JOIN competency_units cu ON cu.unit_code = ce.unit_code
+        JOIN classifications c ON c.classification_id = cu.classification_id
+        {where}
+        ORDER BY pc.criteria_id
+        """,
+        tuple(params),
+    )
+    matches: list[dict[str, Any]] = []
+    for row in rows:
+        if _transition_task_scope_key(row["criteria_text_raw"]) != query_key:
+            continue
+        matches.append(dict(row))
+        if len(matches) >= 9:
+            break
+    return matches
+
+
+def _transition_scope_clarification(
+    *, reason: str, rows: list[dict[str, Any]]
+) -> dict[str, Any]:
+    candidates = [_transition_task_projection(row) for row in rows[:8]]
+    return {
+        "ok": False,
+        "needs_clarification": True,
+        "error": {
+            "code": "needs_clarification",
+            "reason": reason,
+            "field": "query",
+            "message": "A single source-backed NCS task could not be selected safely.",
+        },
+        "clarification": {"reason": reason, "candidates": candidates},
+    }
+
+
 def recommend_task_transitions(
     conn: sqlite3.Connection,
     *,
@@ -7470,9 +7675,63 @@ def recommend_task_transitions(
                 "message": "Provide criteria_id, query, or unit_code to select an NCS task.",
             },
         }
-    source = resolve_task_criteria(conn, criteria_id=criteria_id, query=query, unit_code=unit_code)
-    if source is None:
-        return {"ok": False, "error": {"code": "TASK_NOT_FOUND"}}
+    # A transition must start from one canonical task.  The historical
+    # resolver used LIKE ... LIMIT 1, which silently selected an unrelated
+    # task whenever a job label was partial or shared across NCS paths.  Keep
+    # explicit IDs authoritative, but require an exact, unique criteria text
+    # for free-text/unit locators and return bounded choices otherwise.
+    if criteria_id is not None:
+        source_rows = resolve_task_criteria_candidates(
+            conn, criteria_id=criteria_id, unit_code=unit_code, limit=None
+        )
+        if len(source_rows) != 1:
+            return {"ok": False, "error": {"code": "TASK_NOT_FOUND"}}
+        source = source_rows[0]
+    elif query:
+        source_rows = resolve_task_criteria_candidates(
+            conn,
+            exact_criteria_query=query,
+            unit_code=unit_code,
+            limit=None,
+        )
+        if not source_rows:
+            source_rows = resolve_task_criteria_candidates(
+                conn,
+                exact_criteria_query=query,
+                punctuation_normalized=True,
+                unit_code=unit_code,
+                limit=None,
+            )
+        if len(source_rows) == 1:
+            source_rows = _scan_transition_task_text_equivalents(
+                conn, query=query, unit_code=unit_code
+            )
+        if len(source_rows) != 1:
+            reason = (
+                "multiple_same_name_source_tasks"
+                if len(source_rows) > 1
+                else "non_exact_scope_requires_clarification"
+            )
+            suggestions = source_rows or resolve_task_criteria_candidates(
+                conn, query=query, unit_code=unit_code, limit=8
+            )
+            return _transition_scope_clarification(reason=reason, rows=suggestions)
+        source = source_rows[0]
+    else:
+        source_rows = resolve_task_criteria_candidates(
+            conn, unit_code=unit_code, limit=2
+        )
+        if len(source_rows) != 1:
+            reason = (
+                "multiple_same_name_source_tasks"
+                if len(source_rows) > 1
+                else "non_exact_scope_requires_clarification"
+            )
+            suggestions = resolve_task_criteria_candidates(
+                conn, unit_code=unit_code, limit=8
+            )
+            return _transition_scope_clarification(reason=reason, rows=suggestions)
+        source = source_rows[0]
     max_rows = clamp_limit(limit, default=10, maximum=50)
     evidence_rows = clamp_limit(evidence_limit, default=12, maximum=50)
     clauses = ["tsl.source_criteria_id = ?"]

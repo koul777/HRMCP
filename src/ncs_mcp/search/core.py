@@ -493,6 +493,259 @@ def _ncs_context_candidate_compatible(
     return False
 
 
+def _ncs_search_scope_invariant(
+    candidates_by_type: dict[str, list[dict[str, Any]]],
+    classification_filter: dict[str, str],
+    *,
+    normalized: bool | str = False,
+) -> dict[str, Any] | None:
+    """Verify every fetched candidate remains inside the effective scope.
+
+    SQL predicates are the first line of containment.  This second line runs
+    after tier execution and reranking, while the private code map and full
+    source path are still available, so a malformed/custom executor cannot
+    leak a row after the response strips the private code map.
+    """
+    if not classification_filter:
+        return None
+    checked_rows = 0
+    mismatches: list[dict[str, Any]] = []
+    for item_type, candidates in candidates_by_type.items():
+        for candidate in candidates:
+            checked_rows += 1
+            mismatch: dict[str, Any] | None = None
+            for field, expected in classification_filter.items():
+                if field.endswith("_code"):
+                    actual = (candidate.get("_classification_codes") or {}).get(field)
+                else:
+                    # The public path is already required for every leaf and
+                    # unit result; reuse it instead of duplicating name fields
+                    # on every private candidate object.
+                    path_field = field.removesuffix("_name")
+                    actual = (candidate.get("path") or {}).get(path_field)
+                if field.endswith("_code"):
+                    matches = str(actual or "").casefold() == str(expected).casefold()
+                elif normalized:
+                    matches = (
+                        _ncs_search_boundary_match_normalized(
+                            normalize_search_text(actual),
+                            normalize_search_text(expected),
+                        )
+                        == 1
+                    )
+                else:
+                    matches = _ncs_search_boundary_match(actual, expected) == 1
+                if not matches:
+                    mismatch = {
+                        "type": item_type,
+                        "id": candidate.get("id"),
+                        "field": field,
+                        "expected": expected,
+                        "actual": actual,
+                    }
+                    break
+            if mismatch is not None:
+                mismatches.append(mismatch)
+    if not mismatches:
+        return {
+            "schema": "ncs_search_classification_scope_invariant_v1",
+            "ok": True,
+            "status": "verified",
+            "checked_rows": checked_rows,
+        }
+    return {
+        "schema": "ncs_search_classification_scope_invariant_v1",
+        "ok": False,
+        "status": "failed_closed",
+        "checked_rows": checked_rows,
+        "violation": "classification_filter_post_query_mismatch",
+        "mismatches": mismatches[:5],
+        "mismatch_count": len(mismatches),
+    }
+
+
+def _ncs_exact_classification_scope_candidates(
+    conn: Any,
+    normalized_job_scope: str,
+    *,
+    normalized: bool | str = False,
+) -> list[dict[str, Any]]:
+    """Return candidates for an exact classification-label scope only.
+
+    This deliberately does not join ``competency_units``.  A unit-name hit is
+    therefore never promoted to an exact classification scope; callers can
+    fall back to the legacy resolver when this query produces no candidates.
+    The normalized projection is used when its manifest is attested.  On
+    legacy databases, scanning the small classifications table still avoids
+    the expensive per-classification unit-name aggregation.
+    """
+    levels = ("major", "middle", "small", "sub")
+    query_value = normalize_search_text(normalized_job_scope)
+    if not query_value:
+        return []
+
+    selected_fields = (
+        "classification_id, major_code, major_name, middle_code, middle_name, "
+        "small_code, small_name, sub_code, sub_name"
+    )
+    if normalized:
+        predicates = [
+            f"{_ncs_search_column(f'c.{level}_name', normalized)} = ?"
+            for level in levels
+        ]
+        rows = conn.execute(
+            f"SELECT {selected_fields} FROM classifications c "
+            f"WHERE {' OR '.join(predicates)} "
+            "ORDER BY c.major_code, c.middle_code, c.small_code, c.sub_code, "
+            "c.classification_id",
+            (query_value,) * len(predicates),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            f"SELECT {selected_fields} FROM classifications c "
+            "ORDER BY c.major_code, c.middle_code, c.small_code, c.sub_code, "
+            "c.classification_id"
+        ).fetchall()
+
+    candidates: dict[tuple[str | None, ...], dict[str, Any]] = {}
+    for row in rows:
+        matching_depths = [
+            depth
+            for depth, level in enumerate(levels)
+            if normalize_search_text(row[f"{level}_name"]) == query_value
+        ]
+        if not matching_depths:
+            continue
+        # A row can repeat a label at multiple hierarchy levels.  The deepest
+        # exact node on that canonical branch is the only useful candidate.
+        depth = max(matching_depths)
+        codes = tuple(
+            str(row[f"{level}_code"] or "") or None
+            if index <= depth else None
+            for index, level in enumerate(levels)
+        )
+        names = tuple(
+            str(row[f"{level}_name"] or "") or None
+            if index <= depth else None
+            for index, level in enumerate(levels)
+        )
+        key = codes
+        candidate = candidates.setdefault(
+            key,
+            {
+                **{f"{level}_code": codes[index] for index, level in enumerate(levels)},
+                **{f"{level}_name": names[index] for index, level in enumerate(levels)},
+                "path_label": " > ".join(name for name in names if name),
+                "confidence": 1.0,
+                "match_basis": [f"job_scope_exact_{levels[depth]}_name"],
+                "_depth": depth,
+                "_job_basis": 1.0,
+                "_job_match_name": query_value,
+                "_context_token_count": 0,
+                "_members": [],
+            },
+        )
+        candidate["_members"].append({key: row[key] for key in row.keys()})
+    return list(candidates.values())
+
+
+def _ncs_prune_exact_scope_candidates(
+    candidates: list[dict[str, Any]],
+    classification_filter: dict[str, str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Keep deepest same-branch exact nodes and return compatible paths."""
+    levels = ("major", "middle", "small", "sub")
+    ranked = sorted(
+        candidates,
+        key=lambda item: (
+            -int(item["_depth"]),
+            str(item.get("major_code") or ""),
+            str(item.get("middle_code") or ""),
+            str(item.get("small_code") or ""),
+            str(item.get("sub_code") or ""),
+        ),
+    )
+
+    def prune(branches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        pruned: list[dict[str, Any]] = []
+        for candidate in branches:
+            depth = int(candidate["_depth"])
+            if any(
+                depth < int(kept["_depth"])
+                and all(
+                    candidate.get(f"{levels[index]}_code")
+                    == kept.get(f"{levels[index]}_code")
+                    for index in range(depth + 1)
+                )
+                for kept in pruned
+            ):
+                continue
+            pruned.append(candidate)
+        return pruned
+
+    # Keep an unfiltered pruned view for fail-closed conflict metadata, while
+    # selecting the deepest compatible node when a caller filter narrows an
+    # otherwise duplicated exact label to one branch.
+    pruned = prune(ranked)
+    compatible = prune([
+        item for item in ranked
+        if _ncs_context_candidate_compatible(item, classification_filter)
+    ])
+    return compatible, pruned
+
+
+def _ncs_resolve_exact_classification_scope(
+    conn: Any,
+    *,
+    normalized_job_scope: str,
+    normalized_filter: dict[str, str],
+    base: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Resolve an exact classification-only scope, or signal legacy fallback."""
+    normalized = _normalized_search_storage(conn)
+    candidates = _ncs_exact_classification_scope_candidates(
+        conn,
+        normalized_job_scope,
+        normalized=normalized,
+    )
+    if not candidates:
+        return None
+
+    compatible, pruned = _ncs_prune_exact_scope_candidates(
+        candidates,
+        normalized_filter,
+    )
+    if not compatible:
+        top = pruned[0]
+        base["selected_candidate"] = _ncs_context_candidate_public(top)
+        base["alternative_candidates"] = [
+            _ncs_context_candidate_public(item) for item in pruned[1:4]
+        ]
+        base["alternative_count"] = max(0, len(pruned) - 1)
+        # No candidate survives the hard filter, so a numeric score margin is
+        # not meaningful; zero is the explicit fail-closed contract value.
+        base["resolution_margin"] = 0.0
+        base.update(status="conflict", needs_context=True)
+        base["warnings"].append("context_conflicts_with_hard_filter")
+        return base
+    if len(compatible) != 1:
+        base["alternative_candidates"] = [
+            _ncs_context_candidate_public(item) for item in compatible[:3]
+        ]
+        base["alternative_count"] = len(compatible)
+        base["resolution_margin"] = 0.0
+        base.update(status="ambiguous", needs_context=True)
+        return base
+
+    selected = compatible[0]
+    base["selected_candidate"] = _ncs_context_candidate_public(selected)
+    base["alternative_candidates"] = []
+    base["alternative_count"] = 0
+    base["resolution_margin"] = 1.0
+    base.update(status="resolved", needs_context=False)
+    return base
+
+
 def resolve_ncs_search_context(
     conn: Any,
     *,
@@ -557,6 +810,19 @@ def resolve_ncs_search_context(
     if not normalized_context and not normalized_job_scope:
         base["status"] = "filtered" if normalized_filter else "not_provided"
         return base
+
+    # A classification-only exact label is safe to resolve without scanning
+    # and aggregating every unit name.  Any miss falls through to the existing
+    # resolver so unit-name, boundary, and fuzzy semantics remain unchanged.
+    if normalized_job_scope and not normalized_context:
+        exact = _ncs_resolve_exact_classification_scope(
+            conn,
+            normalized_job_scope=normalized_job_scope,
+            normalized_filter=normalized_filter,
+            base=base,
+        )
+        if exact is not None:
+            return exact
 
     rows = conn.execute(
         """
@@ -2347,15 +2613,25 @@ def search_ncs(
             requested_types,
             search_context,
         )
+    classification_scope_invariant = _ncs_search_scope_invariant(
+        candidates_by_type,
+        normalized_classification_filter,
+        normalized=normalized_search,
+    )
     # Cross-type balancing must not let new fill rows displace original results
     # from another scope. Keep the entire original round-robin prefix intact.
-    merged = _round_robin_ncs_search_results(
-        {kind: [item for item in rows if item["_match_tier"] != 4]
-         for kind, rows in candidates_by_type.items()}, requested_types,
-    ) + _round_robin_ncs_search_results(
-        {kind: [item for item in rows if item["_match_tier"] == 4]
-         for kind, rows in candidates_by_type.items()}, requested_types,
-    )
+    if classification_scope_invariant and not classification_scope_invariant["ok"]:
+        # A scope mismatch is a containment failure, not a weak match.  Do not
+        # expose even a page that happened not to contain the offending row.
+        merged = []
+    else:
+        merged = _round_robin_ncs_search_results(
+            {kind: [item for item in rows if item["_match_tier"] != 4]
+             for kind, rows in candidates_by_type.items()}, requested_types,
+        ) + _round_robin_ncs_search_results(
+            {kind: [item for item in rows if item["_match_tier"] == 4]
+             for kind, rows in candidates_by_type.items()}, requested_types,
+        )
     page_end = applied_offset + max_rows
     page = merged[applied_offset:page_end]
     consumed_by_type = {item_type: 0 for item_type in requested_types}
@@ -2375,6 +2651,8 @@ def search_ncs(
             len(selected_candidates) > consumed_by_type[item_type]
             or may_have_more_selected
         )
+    if classification_scope_invariant and not classification_scope_invariant["ok"]:
+        has_more_by_type = dict(empty_more)
     counts_by_type = {item_type: 0 for item_type in requested_types}
     for item in page:
         counts_by_type[item["type"]] += 1
@@ -2401,6 +2679,11 @@ def search_ncs(
         "scope": normalized_scope,
         "classification_filter": normalized_classification_filter,
         "classification_filter_applied": bool(normalized_classification_filter),
+        **(
+            {"classification_scope_invariant": classification_scope_invariant}
+            if classification_scope_invariant
+            and not classification_scope_invariant["ok"] else {}
+        ),
         "match_mode": match_mode,
         "match_mode_by_type": match_mode_by_type,
         "query_expansions": applied_token_expansions,

@@ -282,7 +282,7 @@ class NcsQueryRouterTests(unittest.TestCase):
         )
 
     def test_explicit_job_competency_request_extracts_bounded_scope_and_query(self) -> None:
-        query = "NCSMCP로 인사 직무에 필요한 역량을 알려줘."
+        query = "\uC778\uC0AC \uC9C1\uBB34\uC5D0 \uD544\uC694\uD55C \uC5ED\uB7C9"
 
         route = route_ncs_query(query)
         repeated = route_ncs_query(query)
@@ -605,7 +605,7 @@ class ExplicitJobScopeServerRoutingTests(unittest.TestCase):
         )
         return {
             "schema": "ncs_search_context_v1",
-            "resolver_version": "ncs-classification-context-resolver-v1",
+            "resolver_version": "ncs-classification-context-resolver-v2",
             "requested": {
                 "context_text_present": False,
                 "context_text_length": 0,
@@ -724,6 +724,213 @@ class ExplicitJobScopeServerRoutingTests(unittest.TestCase):
         self.assertEqual(route["search_context"]["status"], "ambiguous")
         self.assertTrue(route["search_context"]["needs_context"])
 
+    def test_direct_ambiguous_job_scope_fails_closed_before_search(self) -> None:
+        search = Mock(return_value={"results": []})
+        with patch.object(
+            self.server,
+            "resolve_ncs_search_context",
+            return_value=self._context(status="ambiguous"),
+        ), patch.object(self.server, "search_ncs", search):
+            result = self.server.ncs_search(
+                query="ambiguous task",
+                job_scope="ambiguous",
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "route_context_required")
+        search.assert_not_called()
+
+    def test_direct_job_scope_with_context_still_binds_a_hard_filter(self) -> None:
+        expected_filter = {
+            "major_code": "02",
+            "middle_code": "02",
+            "small_code": "02",
+            "sub_code": "01",
+        }
+        search = Mock(
+            return_value={
+                "ok": True,
+                "results": [
+                    {
+                        "id": "0202020101_23v3",
+                        "path": dict(expected_filter),
+                    }
+                ],
+                "classification_filter_applied": True,
+            }
+        )
+        with patch.object(
+            self.server,
+            "resolve_ncs_search_context",
+            return_value=self._context(),
+        ), patch.object(self.server, "search_ncs", search):
+            result = self.server.ncs_search(
+                query="task",
+                context_text="caller context",
+                job_scope="job scope",
+            )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(search.call_args.kwargs["classification_filter"], expected_filter)
+
+    def test_direct_job_scope_conflicting_filter_fails_closed(self) -> None:
+        search = Mock(return_value={"results": []})
+        conflicting_filter = {"major_code": "13"}
+        with patch.object(
+            self.server,
+            "resolve_ncs_search_context",
+            return_value=self._context(
+                status="conflict", classification_filter=conflicting_filter
+            ),
+        ), patch.object(self.server, "search_ncs", search):
+            result = self.server.ncs_search(
+                query="task",
+                context_text="caller context",
+                job_scope="job scope",
+                classification_filter=conflicting_filter,
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "route_context_required")
+        search.assert_not_called()
+
+    def test_direct_job_scope_compatible_parent_filter_is_allowed(self) -> None:
+        compatible_filter = {"major_code": "02"}
+        expected_filter = {
+            "major_code": "02",
+            "middle_code": "02",
+            "small_code": "02",
+            "sub_code": "01",
+        }
+        search = Mock(
+            return_value={
+                "ok": True,
+                "results": [
+                    {
+                        "id": "0202020101_23v3",
+                        "path": dict(expected_filter),
+                    }
+                ],
+                "classification_filter_applied": True,
+            }
+        )
+        with patch.object(
+            self.server,
+            "resolve_ncs_search_context",
+            return_value=self._context(
+                classification_filter=compatible_filter
+            ),
+        ), patch.object(self.server, "search_ncs", search):
+            result = self.server.ncs_search(
+                query="task",
+                job_scope="job scope",
+                classification_filter=compatible_filter,
+            )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(
+            search.call_args.kwargs["classification_filter"], expected_filter
+        )
+
+    def test_direct_parent_filter_cannot_weaken_exact_job_scope(self) -> None:
+        compatible_filter = {"major_code": "02"}
+        search = Mock(
+            return_value={
+                "ok": True,
+                "results": [
+                    {
+                        "id": "0202029901_23v3",
+                        "path": {
+                            "major_code": "02",
+                            "middle_code": "02",
+                            "small_code": "99",
+                            "sub_code": "01",
+                        },
+                    }
+                ],
+                "classification_filter_applied": True,
+            }
+        )
+        with patch.object(
+            self.server,
+            "resolve_ncs_search_context",
+            return_value=self._context(classification_filter=compatible_filter),
+        ), patch.object(self.server, "search_ncs", search):
+            result = self.server.ncs_search(
+                query="task",
+                job_scope="job scope",
+                classification_filter=compatible_filter,
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(
+            result["error"]["code"], "search_scope_containment_violation"
+        )
+        search.assert_called_once()
+
+    def test_scope_validator_accepts_public_name_path_fields(self) -> None:
+        payload = {
+            "results": [
+                {
+                    "id": "unit-1",
+                    "path": {
+                        "major": "Major name",
+                        "middle": "Middle name",
+                        "small": "Small name",
+                        "sub": "Sub name",
+                    },
+                }
+            ]
+        }
+
+        self.assertIsNone(
+            self.server._validate_ncs_search_scope_payload(
+                payload,
+                {"major_name": "Major name"},
+            )
+        )
+
+    def test_scope_validator_uses_name_boundary_and_nfkc_matching(self) -> None:
+        def validate(actual: str, expected: str) -> dict[str, object] | None:
+            return self.server._validate_ncs_search_scope_payload(
+                {"results": [{"path": {"major": actual}}]},
+                {"major_name": expected},
+            )
+
+        self.assertIsNone(validate("Major name", "Ｍａｊｏｒ"))
+        self.assertIsNone(validate("Major·name", "Major"))
+        self.assertIsNotNone(validate("수출입", "출입"))
+
+    def test_name_filter_accepts_classification_listing_payload(self) -> None:
+        classification_filter = {"major_name": "Major name"}
+        listing = {
+            "classifications": [
+                {
+                    "classification_id": "major-1",
+                    "major_name": "Major name",
+                    "middle_name": "Middle name",
+                    "small_name": "Small name",
+                    "sub_name": "Sub name",
+                }
+            ]
+        }
+        with patch.object(
+            self.server,
+            "list_classifications",
+            return_value=listing,
+        ), patch.object(
+            self.server,
+            "resolve_ncs_search_context",
+            return_value=self._context(classification_filter=classification_filter),
+        ):
+            result = self.server.ncs_search(
+                query="",
+                classification_filter=classification_filter,
+            )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["classifications"], listing["classifications"])
+
     def test_resolved_nonexact_scope_fails_closed_before_meta_handler(self) -> None:
         context = self._context()
         context["selected_candidate"]["confidence"] = 0.9
@@ -840,6 +1047,74 @@ class ExplicitJobScopeServerRoutingTests(unittest.TestCase):
             result["meta_execution"]["search_context_binding_verified"]
         )
 
+    def test_caller_job_scope_route_matches_direct_binding_and_context_hash(self) -> None:
+        route_test_query = "shared planning NCS search"
+        expected_filter = {
+            "major_code": "02",
+            "middle_code": "02",
+            "small_code": "02",
+            "sub_code": "01",
+        }
+
+        def resolve(*_args, classification_filter=None, **_kwargs):
+            return self._context(classification_filter=classification_filter)
+
+        def fake_search(
+            query="",
+            scope="all",
+            limit=20,
+            offset=0,
+            classification_filter=None,
+            context_text=None,
+            job_scope=None,
+        ):
+            return {
+                "ok": True,
+                "results": [
+                    {
+                        "id": "0202020101_23v3",
+                        "path": dict(expected_filter),
+                    }
+                ],
+                "classification_filter": classification_filter,
+                "classification_filter_applied": True,
+                "search_context": resolve(
+                    classification_filter=classification_filter,
+                    job_scope=job_scope,
+                ),
+            }
+
+        query = "NCSMCP로 인사 직무에 필요한 역량을 알려줘."
+        with patch.object(
+            self.server, "resolve_ncs_search_context", side_effect=resolve
+        ), patch.dict(
+            self.server.NCS_EXECUTABLE_TOOL_HANDLERS,
+            {"ncs_search": fake_search},
+        ):
+            route = self.server.ncs_discover_tools(
+                route_test_query,
+                context_text="caller context",
+                job_scope="인사",
+                classification_filter={"major_code": "02"},
+            )["query_route"]
+            result = self.server.ncs_execute_tool(
+                "ncs_search",
+                {
+                    **route["params"],
+                    "context_text": "caller context",
+                    "_route_query": route_test_query,
+                    "_route_fingerprint": route["route_fingerprint"],
+                },
+            )
+
+        self.assertEqual(route["params"]["classification_filter"], expected_filter)
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["meta_execution"]["search_context_binding_verified"])
+        self.assertEqual(
+            result["meta_execution"]["search_context_hash"],
+            route["route_contract"]["search_context_hash"],
+        )
+
     def test_meta_execution_stops_ambiguous_query_derived_scope(self) -> None:
         query = "NCSMCP로 중복기능 직무에 필요한 역량을 알려줘."
         handler = Mock(return_value={"ok": True})
@@ -865,6 +1140,57 @@ class ExplicitJobScopeServerRoutingTests(unittest.TestCase):
         self.assertEqual(result["error"]["code"], "route_context_required")
         handler.assert_not_called()
 
+    def test_meta_execution_rejects_injected_off_scope_handler_payload(self) -> None:
+        query = "NCSMCP로 인사 직무에 필요한 역량을 알려줘."
+        handler = Mock(
+            return_value={
+                "ok": True,
+                "results": [
+                    {
+                        "id": "1301020103_22v4",
+                        "path": {
+                            "major_code": "13",
+                            "middle_code": "01",
+                            "small_code": "02",
+                            "sub_code": "01",
+                        },
+                    }
+                ],
+            }
+        )
+
+        def resolve(*_args, classification_filter=None, **_kwargs):
+            return self._context(classification_filter=classification_filter)
+
+        with patch.object(
+            self.server, "resolve_ncs_search_context", side_effect=resolve
+        ), patch.dict(
+            self.server.NCS_EXECUTABLE_TOOL_HANDLERS,
+            {"ncs_search": handler},
+        ):
+            route = self.server.ncs_discover_tools(query)["query_route"]
+            result = self.server.ncs_execute_tool(
+                "ncs_search",
+                {
+                    **route["params"],
+                    "_route_query": query,
+                    "_route_fingerprint": route["route_fingerprint"],
+                },
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(
+            result["error"]["code"], "search_scope_containment_violation"
+        )
+        self.assertFalse(result["meta_execution"]["scope_containment_verified"])
+        self.assertEqual(
+            result["error"]["scope_containment"]["classification_filter"][
+                "major_code"
+            ],
+            "02",
+        )
+        handler.assert_called_once()
+
     def test_filtered_not_found_forbids_unsupported_downstream_claims(self) -> None:
         classification_filter = {
             "major_code": "02",
@@ -876,6 +1202,10 @@ class ExplicitJobScopeServerRoutingTests(unittest.TestCase):
             self.server,
             "search_ncs",
             return_value={"results": [], "search_context": {"status": "resolved"}},
+        ), patch.object(
+            self.server,
+            "resolve_ncs_search_context",
+            return_value=self._context(classification_filter=classification_filter),
         ):
             result = self.server.ncs_search(
                 query="인사하기",
@@ -886,6 +1216,8 @@ class ExplicitJobScopeServerRoutingTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"]["code"], "NOT_FOUND")
         self.assertIn("do not use it as evidence", result["ncs_evidence_guidance"])
+        self.assertEqual(result["evidence_status"]["status"], "filtered_no_match")
+        self.assertFalse(result["evidence_status"]["usable_as_evidence"])
         description = self.tool_registry.NCS_TOOL_PROFILES["ncs_search"]["description"]
         self.assertIn("classification_filter returned by ncs_discover_tools", description)
         self.assertIn("filtered NOT_FOUND", description)
@@ -939,6 +1271,110 @@ class ExplicitJobScopeRealDbRegressionTests(unittest.TestCase):
                         all(path.get(key) == value for key, value in expected_filter.items()),
                         row,
                     )
+
+    def test_direct_hr_scope_cannot_leak_hospitality_or_social_welfare_rows(self) -> None:
+        from ncs_mcp import server
+
+        result = server.ncs_search(
+            query="\uC778\uC0AC",
+            job_scope="\uC778\uC0AC",
+            scope="all",
+            limit=30,
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["results"], result)
+        self.assertTrue(result["classification_filter_applied"], result)
+        expected_filter = {
+            "major_code": "02",
+            "middle_code": "02",
+            "small_code": "02",
+            "sub_code": "01",
+        }
+        for row in result["results"]:
+            path = row.get("path") or {}
+            self.assertTrue(
+                all(path.get(key) == value for key, value in expected_filter.items()),
+                row,
+            )
+            self.assertNotEqual(path.get("major_code"), "12")
+            self.assertNotEqual(path.get("major_code"), "13")
+            self.assertNotEqual(path.get("major_code"), "07")
+
+    def test_direct_explicit_job_request_infers_and_binds_its_scope(self) -> None:
+        from ncs_mcp import server
+
+        result = server.ncs_search(
+            query="\uC778\uC0AC \uC9C1\uBB34\uC5D0 \uD544\uC694\uD55C \uC5ED\uB7C9",
+            scope="all",
+            limit=30,
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["query"], "\uC778\uC0AC")
+        expected_filter = {
+            "major_code": "02",
+            "middle_code": "02",
+            "small_code": "02",
+            "sub_code": "01",
+        }
+        self.assertEqual(result["classification_filter"], expected_filter)
+        self.assertTrue(
+            all(
+                all((row.get("path") or {}).get(key) == value for key, value in expected_filter.items())
+                for row in result["results"]
+            ),
+            result,
+        )
+
+    def test_direct_bare_task_keeps_generic_unscoped_search(self) -> None:
+        from ncs_mcp import server
+
+        result = server.ncs_search(
+            query="\uC778\uC0AC\uD558\uAE30",
+            scope="all",
+            limit=30,
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(result["classification_filter_applied"], result)
+        self.assertTrue(
+            any((row.get("path") or {}).get("major_code") == "13" for row in result["results"]),
+            result,
+        )
+
+    def test_direct_unknown_explicit_job_request_fails_closed(self) -> None:
+        from ncs_mcp import server
+
+        result = server.ncs_search(
+            query="Unknown Synthetic Function \uC9C1\uBB34\uC5D0 \uD544\uC694\uD55C \uC5ED\uB7C9",
+            scope="all",
+            limit=30,
+        )
+
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["error"]["code"], "route_context_required")
+
+    def test_hospitality_scope_still_returns_its_target_element(self) -> None:
+        from ncs_mcp import server
+
+        result = server.ncs_search(
+            query="\uC778\uC0AC\uD558\uAE30",
+            scope="element",
+            classification_filter={"major_code": "13"},
+            limit=10,
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["results"], result)
+        self.assertTrue(
+            any("\uC778\uC0AC\uD558\uAE30" in str(row.get("text")) for row in result["results"]),
+            result,
+        )
+        self.assertTrue(
+            all((row.get("path") or {}).get("major_code") == "13" for row in result["results"]),
+            result,
+        )
 
     def test_nonexact_hospitality_scope_cannot_run_unfiltered_mixed_search(self) -> None:
         from ncs_mcp import server

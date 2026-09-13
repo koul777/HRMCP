@@ -99,6 +99,71 @@ class BuilderDesktopTests(unittest.TestCase):
         self.assertFalse(window.cancel_requested.is_set())
         window.root.withdraw.assert_not_called()
 
+    def test_copy_current_uses_guarded_builder_operation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            window = BuilderWindow.__new__(BuilderWindow)
+            window.engine = Mock()
+            window.engine.state = Path(tmp)
+            (Path(tmp) / "deployed.json").write_text(
+                '{"version":"deployed-version"}', encoding="utf-8"
+            )
+            window.start = Mock()
+
+            window.copy_current()
+
+            title, operation = window.start.call_args.args
+            self.assertIn("코드 배포용 Builder 버전", title)
+            self.assertEqual(
+                window.start.call_args.kwargs, {"journal_phase": "copy_current"}
+            )
+            operation()
+            window.engine.copy_current.assert_called_once_with()
+
+    def test_copy_current_rejects_missing_deployed_pointer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            window = BuilderWindow.__new__(BuilderWindow)
+            window.engine = Mock()
+            window.engine.state = Path(tmp)
+            window.start = Mock()
+
+            with patch("ncs_mcp.builder_desktop.messagebox.showerror") as showerror:
+                window.copy_current()
+
+            window.start.assert_not_called()
+            showerror.assert_called_once()
+
+    def test_non_phase_copy_result_persists_selected_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            window = BuilderWindow.__new__(BuilderWindow)
+            window.root = Mock()
+            window.events = queue.Queue()
+            window.events.put(("result", {"version": "new-version"}))
+            window.events.put(("done", None))
+            window.busy = True
+            window.closing = False
+            window.active_phase = None
+            window.active_journal = True
+            window.started_at = None
+            window.selected_version = "old-version"
+            window.session = BuilderSession(Path(tmp))
+            window.session.start("copy_current", "old-version")
+            window.selection_label = Mock()
+            window.deploy_selection = Mock()
+            window.restore_phase_states = Mock()
+            window.preview_text = Mock()
+            window.bar = Mock()
+            window.status = Mock()
+            window.log = Mock()
+            window._buttons = []
+            window.reload_history = Mock()
+
+            window.poll()
+
+            restored = BuilderSession(Path(tmp))
+            self.assertEqual(restored.data["selected_version"], "new-version")
+            self.assertEqual(restored.data["attempts"][-1]["status"], "completed")
+            self.assertEqual(restored.data["attempts"][-1]["phase"], "copy_current")
+
     def test_reopen_restores_completed_version_and_package_after_deploy_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine = DataBuilder(Path(tmp))

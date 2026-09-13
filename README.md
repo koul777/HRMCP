@@ -1,5 +1,13 @@
 # HRMCP — NCS 기반 HR 실무용 MCP
 
+## 2026-09-14 scope-safety and release update
+
+- Added a source-backed hierarchy gate for every explicit job scope. Exact and unique NCS paths are promoted to a hard containment filter; unresolved, fuzzy, cross-major, cross-type, and Unicode-equivalent collisions fail closed with bounded clarification candidates.
+- Applied the same rule to task-transition recommendations so partial job labels can never fall through to a historical `LIKE ... LIMIT 1` choice.
+- Added all-major execution-gate and collision-audit scripts. The latest gate covers 24/24 majors, 96 hierarchy samples, and 288 calls with zero unexpected results and no holdout inspection or database mutation.
+- Added Builder safeguards for code-only releases: a missing deployed-version pointer is rejected, and the operation is journaled as `copy_current` with restart-safe version persistence. Superseded Builder versions are recoverably archived off the system drive; the active production pointer is unchanged.
+- Verified the canonical source and `deploy/vercel_mcp_app` mirror remain synchronized. Lint, smoke, scope/recommendation, public payload, Builder, and deployment-source tests pass.
+
 > 운영 원칙(2026-09-11): production DB/API 갱신, 온톨로지 재구축, 경량
 > 패키지 생성, Vercel 반영, 기준본 승격은 Windows NCS Data Builder
 > (`run_ncs_builder.bat`) 한 경로로만 수행합니다. GitHub Actions는 CI
@@ -105,6 +113,12 @@ Builder/Publisher 스크립트와 Vercel CLI는 구현 구성요소이지 운영
 | ② API 갱신 | 필요한 API를 선택하고 `선택 API 점검 · 갱신`을 누릅니다. | 선택 버전에 전체 NCS 범위의 API 근거와 연결 관계를 갱신합니다. |
 | ③ 경량 DB 생성 | 자동으로 표시된 MCP 프로젝트 이름을 확인하고 `경량 DB 만들기 · 검증`을 누릅니다. | 온톨로지를 포함한 경량 DB·ZIP과 검증 결과가 저장됩니다. 아직 운영 반영 전입니다. |
 | ④ Vercel 반영 | 선택 버전·대상 프로젝트·운영 URL을 확인하고 `Vercel MCP 업데이트`를 누릅니다. | 검증용 배포 → 연결 검사 → 운영 전환 → 운영 MCP 검사까지 수행합니다. |
+
+**NCS 데이터는 그대로이고 MCP 코드만 바뀐 경우**에는 ③ 탭에서
+`현재 운영 DB로 코드 배포 버전 준비`를 먼저 누릅니다. 마지막 성공 배포의
+검증된 DB를 새 Builder 버전으로 로컬 복사하므로 API 재수집이나 온톨로지
+재계산은 하지 않습니다. 이어서 ③·④를 실행합니다. 이 대용량 로컬 복사본은
+compact snapshot 생성·검증용이며 Vercel에는 업로드되지 않습니다.
 
 **3·4단계 폴더는 자동 입력됩니다.** 마지막 성공 배포의 연결 폴더를 먼저 확인하고, 없거나 유효하지 않으면 이 저장소의 `deploy/vercel_mcp_app/.vercel/project.json`을 확인합니다. 프로젝트 이름으로 운영 MCP URL도 채웁니다. `기존 연결 자동 찾기`로 다시 탐색할 수 있습니다. 찾지 못할 때만 `찾아보기`에서 기존 MCP 연결 폴더를 선택하세요. 저장소 루트는 별도 Vercel 프로젝트일 수 있으므로 임의 선택하지 않습니다. 현재는 기본 `https://<projectName>.vercel.app/api/mcp` 주소를 지원합니다.
 

@@ -263,6 +263,91 @@ class NcsSearchRecallTests(unittest.TestCase):
         self.assertEqual(filtered_out["classification_filter"], {"major_code": "99"})
         self.assertTrue(filtered_out["classification_filter_applied"])
 
+    def test_post_query_scope_guard_fails_closed_on_leaked_candidate(self) -> None:
+        with self._open_db() as conn:
+            conn.execute(
+                "INSERT INTO classifications VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (77, "77", "Foreign", "01", "Foreign", "01", "Foreign", "01", "Foreign", "7"),
+            )
+            conn.executemany(
+                "INSERT INTO competency_units VALUES (?, ?, ?, ?, ?)",
+                (
+                    ("U_SCOPE_LOCAL", "scope", "", "4", 1),
+                    ("U_SCOPE_FOREIGN", "scope", "", "4", 77),
+                ),
+            )
+            conn.commit()
+
+        # Simulate a broken/custom executor that forgot to apply the hard
+        # classification predicate. The post-query guard must still contain it.
+        with patch.object(
+            search_core,
+            "_apply_ncs_classification_filter_to_tiers",
+            side_effect=lambda tiers, *_args, **_kwargs: tiers,
+        ):
+            result = server.search_ncs(
+                "scope",
+                scope="unit",
+                limit=10,
+                classification_filter={"major_code": "02"},
+            )
+
+        self.assertEqual(result["results"], [])
+        self.assertEqual(result["returned"], 0)
+        self.assertEqual(result["next_offset"], None)
+        invariant = result["classification_scope_invariant"]
+        self.assertFalse(invariant["ok"])
+        self.assertEqual(invariant["status"], "failed_closed")
+        self.assertEqual(
+            invariant["violation"],
+            "classification_filter_post_query_mismatch",
+        )
+        self.assertGreaterEqual(invariant["checked_rows"], 2)
+        self.assertTrue(invariant["mismatches"])
+
+    def test_scoped_results_strip_private_scope_values_and_keep_full_path(self) -> None:
+        result = server.search_ncs(
+            "data workflow analysis",
+            scope="unit",
+            limit=5,
+            classification_filter={"major_code": "02"},
+        )
+
+        self.assertTrue(result["results"])
+        self.assertNotIn("_classification_codes", result["results"][0])
+        self.assertEqual(
+            set(result["results"][0]["path"]),
+            {
+                "major_code", "major", "middle_code", "middle",
+                "small_code", "small", "sub_code", "sub",
+                "duty_order",
+            },
+        )
+        self.assertNotIn("classification_scope_invariant", result)
+
+    def test_normalized_name_filter_matches_unicode_punctuation_and_spacing(self) -> None:
+        with self._open_db() as conn:
+            conn.execute(
+                "UPDATE classifications SET major_name = ?, middle_name = ? "
+                "WHERE classification_id = 1",
+                ("Class_Name", "Straße"),
+            )
+            self._add_normalized_columns(conn)
+            conn.commit()
+
+        result = server.search_ncs(
+            "data workflow analysis",
+            scope="unit",
+            limit=5,
+            classification_filter={
+                "major_name": "  class-name  ",
+                "middle_name": "  strasse  ",
+            },
+        )
+
+        self.assertEqual([row["id"] for row in result["results"]], ["U_ASCII"])
+        self.assertNotIn("classification_scope_invariant", result)
+
     def _seed_context_shadow_candidates(self) -> None:
         with self._open_db() as conn:
             conn.executemany(
@@ -530,7 +615,12 @@ class NcsSearchRecallTests(unittest.TestCase):
         )
         self.assertEqual(
             [item["id"] for item in executed["results"][:2]],
-            ["A_CONTEXT_OTHER", "Z_CONTEXT_ADMIN"],
+            ["Z_CONTEXT_ADMIN"],
+        )
+        self.assertTrue(executed["search_context"]["hard_filter_applied"])
+        self.assertEqual(
+            executed["search_context"]["selected_candidate"]["sub_code"],
+            "01",
         )
         missing = dict(params)
         missing.pop("_route_fingerprint")

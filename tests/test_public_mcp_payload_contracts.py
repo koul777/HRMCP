@@ -629,12 +629,20 @@ class PublicMcpPayloadContractTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            [item["id"] for item in contextual["results"]],
             [item["id"] for item in baseline["results"]],
+            [EXACT_UNIT, PREFIX_UNIT, PARTIAL_UNIT, CLASSIFICATION_UNIT, DEFINITION_UNIT],
+        )
+        # An exact, source-backed job scope is now a containment filter. It
+        # must remove results from the unrelated fixture majors rather than
+        # merely annotate them as a shadow prior.
+        self.assertEqual(
+            [item["id"] for item in contextual["results"]],
+            [EXACT_UNIT, PREFIX_UNIT, PARTIAL_UNIT],
         )
         context = contextual["search_context"]
         self.assertEqual(context["schema"], "ncs_search_context_v1")
         self.assertFalse(context["prior_applied"])
+        self.assertTrue(context["hard_filter_applied"])
         self.assertEqual(context["policy"]["rollout_phase"], "shadow")
         self.assertNotIn(raw_context, json.dumps(contextual, ensure_ascii=False))
         self.assertLessEqual(_json_size(contextual), MAX_PUBLIC_PAYLOAD_CHARS)
@@ -654,7 +662,9 @@ class PublicMcpPayloadContractTests(unittest.TestCase):
             route["route_contract"]["fingerprint_version"],
             "route-fingerprint-v2",
         )
-        self.assertEqual(route["classification_context"]["mode"], "soft_prior")
+        self.assertEqual(
+            route["classification_context"]["mode"], "source_backed_hard_filter"
+        )
         self.assertNotIn(raw_context, json.dumps(discovery, ensure_ascii=False))
         self.assertLessEqual(_json_size(discovery), MAX_PUBLIC_PAYLOAD_CHARS)
 

@@ -4,6 +4,7 @@ import json
 import math
 import re
 import sqlite3
+import unicodedata
 from collections import Counter
 from typing import Any
 
@@ -34,6 +35,7 @@ from ncs_mcp.db import (
     normalize_spaces,
     now_utc,
     resolve_task_criteria,
+    resolve_task_criteria_candidates,
     row_to_dict,
     rows_to_dicts,
 )
@@ -148,6 +150,12 @@ def _json(payload: Any) -> str:
 
 def _clean(value: Any) -> str:
     return normalize_spaces("" if value is None else str(value))
+
+
+def _scope_lookup_key(value: Any) -> str:
+    """Normalize recommendation scope labels without changing ontology keys."""
+    normalized = unicodedata.normalize("NFKC", _clean(value))
+    return re.sub(r"[\W_]+", "", normalized, flags=re.UNICODE).casefold()
 
 
 def _with_korean_direction_particle(value: str) -> str:
@@ -1697,7 +1705,7 @@ def _exact_unit_name_match(
     small_code: str | None = None,
     sub_code: str | None = None,
 ) -> dict[str, Any] | None:
-    query_key = normalize_concept_key(query or "")
+    query_key = _scope_lookup_key(query or "")
     if not query_key:
         return None
     rows = conn.execute(
@@ -1718,9 +1726,56 @@ def _exact_unit_name_match(
     ).fetchall()
     for row in rows:
         rowd = dict(row)
-        if normalize_concept_key(rowd.get("unit_name_raw") or "") == query_key:
+        if _scope_lookup_key(rowd.get("unit_name_raw") or "") == query_key:
             return rowd
     return None
+
+
+def _exact_classification_name_match(
+    conn: sqlite3.Connection,
+    query: str | None,
+    *,
+    major_code: str | None = None,
+    middle_code: str | None = None,
+    small_code: str | None = None,
+    sub_code: str | None = None,
+) -> dict[str, Any] | None:
+    """Return one exact classification path, if the source is unambiguous."""
+    query_key = _scope_lookup_key(query or "")
+    if not query_key:
+        return None
+    rows = conn.execute(
+        """
+        SELECT * FROM classifications
+        WHERE (? IS NULL OR major_code = ?)
+          AND (? IS NULL OR middle_code = ?)
+          AND (? IS NULL OR small_code = ?)
+          AND (? IS NULL OR sub_code = ?)
+        ORDER BY classification_id
+        """,
+        (major_code, major_code, middle_code, middle_code, small_code, small_code, sub_code, sub_code),
+    ).fetchall()
+    matches: list[dict[str, Any]] = []
+    for row in rows:
+        rowd = dict(row)
+        for level, field in (
+            ("major_classification", "major_name"),
+            ("middle_classification", "middle_name"),
+            ("small_classification", "small_name"),
+            ("sub_classification", "sub_name"),
+        ):
+            if _scope_lookup_key(rowd.get(field) or "") == query_key:
+                matches.append({"match_level": level, "matched_text": rowd.get(field), **rowd})
+    identities = {row.get("classification_id") for row in matches}
+    if len(identities) != 1:
+        return None
+    specificity = {
+        "major_classification": 1,
+        "middle_classification": 2,
+        "small_classification": 3,
+        "sub_classification": 4,
+    }
+    return max(matches, key=lambda row: specificity.get(str(row.get("match_level")), 0))
 
 
 def _alias_unit_conflicts_with_exact_unit(
@@ -1760,8 +1815,8 @@ def _alias_unit_conflicts_with_exact_unit(
 
 
 def _candidate_score(text: str, query: str, *, exact_bonus: float = 0.0) -> float:
-    text_key = normalize_concept_key(text)
-    query_key = normalize_concept_key(query)
+    text_key = _scope_lookup_key(text)
+    query_key = _scope_lookup_key(query)
     if not query_key:
         return 0.0
     if text_key == query_key:
@@ -1805,6 +1860,150 @@ def _levenshtein(left: str, right: str) -> int:
             curr.append(min(curr[-1] + 1, prev[j] + 1, prev[j - 1] + (0 if c1 == c2 else 1)))
         prev = curr
     return prev[-1]
+
+
+def _trusted_query_alias(alias: dict[str, Any] | None) -> bool:
+    return bool(alias and _clean(alias.get("review_status")) in TRUSTED_TRANSITION_REVIEW_STATUSES)
+
+
+def _candidate_scope_key(candidate: dict[str, Any]) -> tuple[Any, ...]:
+    """Return the canonical scope identity used for ambiguity checks."""
+    level = _clean(candidate.get("match_level"))
+    fields_by_level = {
+        "major_classification": ("major_code",),
+        "middle_classification": ("major_code", "middle_code"),
+        "small_classification": ("major_code", "middle_code", "small_code"),
+        "sub_classification": ("major_code", "middle_code", "small_code", "sub_code"),
+    }
+    if candidate.get("candidate_type") == "classification":
+        return ("classification", *(candidate.get(field) for field in fields_by_level.get(level, ())))
+    if candidate.get("candidate_type") == "element":
+        return ("element", candidate.get("element_id"), candidate.get("unit_code"))
+    return ("unit", candidate.get("unit_code"))
+
+
+def _candidate_paths_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """Whether two candidates can describe the same NCS classification path."""
+    for field in ("major_code", "middle_code", "small_code", "sub_code"):
+        left_value = _clean(left.get(field))
+        right_value = _clean(right.get(field))
+        if left_value and right_value and left_value != right_value:
+            return False
+    return True
+
+
+def _element_candidate_within_scope(
+    element: dict[str, Any], other: dict[str, Any]
+) -> bool:
+    """Whether an exact element is canonically inside the other candidate."""
+    if other.get("candidate_type") == "unit":
+        return bool(
+            _clean(element.get("unit_code"))
+            and _clean(element.get("unit_code")) == _clean(other.get("unit_code"))
+        )
+    if other.get("candidate_type") != "classification":
+        return False
+    fields_by_level = {
+        "major_classification": ("major_code",),
+        "middle_classification": ("major_code", "middle_code"),
+        "small_classification": ("major_code", "middle_code", "small_code"),
+        "sub_classification": (
+            "major_code",
+            "middle_code",
+            "small_code",
+            "sub_code",
+        ),
+    }
+    fields = fields_by_level.get(_clean(other.get("match_level")), ())
+    return bool(fields) and all(
+        _clean(element.get(field)) == _clean(other.get(field)) for field in fields
+    )
+
+
+def _resolution_ambiguity(
+    candidates: list[dict[str, Any]],
+    *,
+    effective_query: str,
+    alias: dict[str, Any] | None,
+    alias_guarded: bool = False,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Find exact scope collisions and return a safe canonical candidate."""
+    query_key = _scope_lookup_key(effective_query)
+    exact = [
+        item
+        for item in candidates
+        if item.get("candidate_type") in {"classification", "unit", "element"}
+        and not item.get("alias_derived")
+        and _scope_lookup_key(item.get("matched_text") or "") == query_key
+    ]
+    # Keep one row per canonical identity so an alias annotation does not make
+    # an otherwise unique direct unit look like two source units.
+    unique_exact: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for item in exact:
+        identity = _candidate_scope_key(item)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique_exact.append(item)
+
+    exact_units = [item for item in unique_exact if item.get("candidate_type") == "unit"]
+    exact_elements = [item for item in unique_exact if item.get("candidate_type") == "element"]
+    exact_classes = [item for item in unique_exact if item.get("candidate_type") == "classification"]
+    if len(exact_units) > 1:
+        return "multiple_same_name_units", None
+    if len(exact_elements) > 1:
+        return "multiple_same_name_source_tasks", None
+    if len(exact_classes) > 1:
+        for index, left in enumerate(exact_classes):
+            if any(not _candidate_paths_compatible(left, right) for right in exact_classes[index + 1 :]):
+                return "exact_classification_tie", None
+    if exact_elements:
+        element = exact_elements[0]
+        if any(
+            not _element_candidate_within_scope(element, other)
+            for other in [*exact_units, *exact_classes]
+        ):
+            return "cross_type_scope_collision", None
+    if exact_units and exact_classes:
+        if any(not _candidate_paths_compatible(exact_units[0], item) for item in exact_classes):
+            return "unit_classification_collision", None
+
+    # A candidate alias is evidence for review, never a locator.  A direct
+    # exact unit may still win if the alias points to that same unit; a stale
+    # alias pointing elsewhere is an explicit collision.
+    if alias and not alias_guarded and not _trusted_query_alias(alias) and not _clean(alias.get("unit_code")):
+        return "candidate_alias_scope_requires_review", None
+    if alias and not alias_guarded and not _trusted_query_alias(alias) and _clean(alias.get("unit_code")):
+        if _scope_lookup_key(alias.get("alias_text") or "") != _scope_lookup_key(effective_query):
+            return "candidate_alias_scope_requires_review", None
+        alias_unit = _clean(alias.get("unit_code"))
+        direct_units = {
+            _clean(item.get("unit_code"))
+            for item in exact_units
+            if item.get("match_level") != "query_alias_unit"
+        }
+        if direct_units and alias_unit not in direct_units:
+            return "candidate_alias_scope_requires_review", None
+        if not direct_units:
+            return "candidate_alias_scope_requires_review", None
+
+    # Specificity is intentional only after collision checks: element > unit
+    # > classification, while same-branch unit/classification matches remain
+    # unambiguous.
+    if len(exact_elements) == 1:
+        return None, exact_elements[0]
+    if len(exact_units) == 1:
+        return None, exact_units[0]
+    if exact_classes:
+        specificity = {
+            "major_classification": 1,
+            "middle_classification": 2,
+            "small_classification": 3,
+            "sub_classification": 4,
+        }
+        return None, max(exact_classes, key=lambda item: specificity.get(_clean(item.get("match_level")), 0))
+    return None, None
 
 
 def resolve_ncs_query_scope(
@@ -1851,6 +2050,30 @@ def resolve_ncs_query_scope(
         alias=query_alias,
         **requested_filters,
     )
+    if query_alias and not alias_guard and not _trusted_query_alias(query_alias):
+        alias_unit = _clean(query_alias.get("unit_code"))
+        direct_unit = _exact_unit_name_match(conn, requested_text, **requested_filters)
+        if direct_unit:
+            alias_guard = {
+                "reason": "candidate_alias_ignored_exact_unit",
+                "alias_unit_code": alias_unit,
+                "exact_unit_code": _clean(direct_unit.get("unit_code")),
+                "exact_unit_name": direct_unit.get("unit_name_raw"),
+            }
+        if not alias_guard:
+            direct_classification = _exact_classification_name_match(
+                conn,
+                requested_text,
+                **requested_filters,
+            )
+            if direct_classification:
+                alias_guard = {
+                    "reason": "candidate_alias_ignored_exact_classification",
+                    "alias_unit_code": alias_unit or None,
+                    "exact_classification_id": direct_classification.get("classification_id"),
+                    "exact_classification_level": direct_classification.get("match_level"),
+                    "exact_classification_name": direct_classification.get("matched_text"),
+                }
     if alias_guard:
         alias_unit_code = None
         if query_alias:
@@ -1862,8 +2085,16 @@ def resolve_ncs_query_scope(
         sub_code = requested_filters["sub_code"]
     if aliased_query:
         text = _clean(aliased_query) or text
-    if query_alias and not alias_guard:
+    alias_is_trusted = _trusted_query_alias(query_alias)
+    if query_alias and not alias_guard and alias_is_trusted:
         alias_unit_code = _clean(query_alias.get("unit_code"))
+    elif query_alias and not alias_guard:
+        # Preserve the alias as a review candidate, but do not let its unit or
+        # classification filters select a scope automatically.
+        major_code = requested_filters["major_code"]
+        middle_code = requested_filters["middle_code"]
+        small_code = requested_filters["small_code"]
+        sub_code = requested_filters["sub_code"]
     candidates: list[dict[str, Any]] = []
     class_rows = conn.execute(
         """
@@ -1935,6 +2166,54 @@ def resolve_ncs_query_scope(
                 **rowd,
             }
         )
+    if query_alias and not alias_guard and not alias_is_trusted and _clean(query_alias.get("unit_code")):
+        alias_code = _clean(query_alias.get("unit_code"))
+        alias_row = next((dict(row) for row in unit_rows if _clean(row["unit_code"]) == alias_code), None)
+        if alias_row is None:
+            alias_row = next(
+                (
+                    dict(row)
+                    for row in conn.execute(
+                        """
+                        SELECT cu.*, c.major_code, c.major_name, c.middle_code, c.middle_name,
+                               c.small_code, c.small_name, c.sub_code, c.sub_name
+                        FROM competency_units cu
+                        JOIN classifications c ON c.classification_id = cu.classification_id
+                        WHERE cu.unit_code = ?
+                        """,
+                        (alias_code,),
+                    ).fetchall()
+                ),
+                None,
+            )
+        if alias_row is not None:
+            candidates.append(
+                {
+                    "candidate_type": "unit",
+                    "match_level": "competency_unit",
+                    "matched_text": alias_row.get("unit_name_raw"),
+                    "unit_name": alias_row.get("unit_name_raw"),
+                    "unit_code": alias_code,
+                    "query_alias_review_status": query_alias.get("review_status"),
+                    "alias_derived": True,
+                    "automatic_resolution_allowed": False,
+                    "confidence_score": round(min(float(query_alias.get("confidence_score") or 0.0), 1.0), 4),
+                    **alias_row,
+                }
+            )
+            candidates.append(
+                {
+                    "candidate_type": "unit",
+                    "match_level": "query_alias_unit",
+                    "matched_text": alias_row.get("unit_name_raw"),
+                    "unit_name": alias_row.get("unit_name_raw"),
+                    "unit_code": alias_code,
+                    "query_alias_review_status": query_alias.get("review_status"),
+                    "automatic_resolution_allowed": False,
+                    "confidence_score": round(min(float(query_alias.get("confidence_score") or 0.0), 1.0), 4),
+                    **alias_row,
+                }
+            )
     element_rows = conn.execute(
         """
         SELECT ce.*, cu.unit_name_raw, c.major_code, c.major_name, c.middle_code, c.middle_name,
@@ -1949,6 +2228,12 @@ def resolve_ncs_query_scope(
         rowd = dict(row)
         if major_code and rowd.get("major_code") != major_code:
             continue
+        if middle_code and rowd.get("middle_code") != middle_code:
+            continue
+        if small_code and rowd.get("small_code") != small_code:
+            continue
+        if sub_code and rowd.get("sub_code") != sub_code:
+            continue
         score = _candidate_score(rowd.get("element_name_raw") or "", text)
         if score <= 0:
             continue
@@ -1961,7 +2246,7 @@ def resolve_ncs_query_scope(
                 **rowd,
             }
         )
-    query_key = normalize_concept_key(text)
+    concept_query_key = normalize_concept_key(text)
     concept_rows = conn.execute(
         """
         SELECT concept_id, concept_name, concept_type, definition_status, review_status
@@ -1973,7 +2258,7 @@ def resolve_ncs_query_scope(
         ORDER BY concept_id
         LIMIT 2000
         """,
-        (query_key, f"{query_key}%", f"%{query_key}%", f"%{text}%"),
+        (concept_query_key, f"{concept_query_key}%", f"%{concept_query_key}%", f"%{text}%"),
     ).fetchall()
     for row in concept_rows:
         rowd = dict(row)
@@ -2016,16 +2301,40 @@ def resolve_ncs_query_scope(
             str(item.get("matched_text") or ""),
         )
 
-    candidates.sort(
-        key=candidate_sort_key
+    candidates.sort(key=candidate_sort_key)
+    ambiguity_reason, selected_candidate = _resolution_ambiguity(
+        candidates,
+        effective_query=text,
+        alias=query_alias,
+        alias_guarded=bool(alias_guard),
     )
+    if alias_is_trusted and alias_unit_code:
+        trusted_unit_candidate = next(
+            (
+                item
+                for item in candidates
+                if item.get("candidate_type") == "unit"
+                and not item.get("alias_derived")
+                and _clean(item.get("unit_code")) == alias_unit_code
+            ),
+            None,
+        )
+        if trusted_unit_candidate is not None:
+            # A human-reviewed alias with a verified in-scope canonical code
+            # is safe even when its normalized label differs from the unit
+            # name. It remains auditable as the selected query alias.
+            ambiguity_reason = None
+            selected_candidate = trusted_unit_candidate
     return {
         "ok": bool(candidates),
+        "needs_clarification": bool(ambiguity_reason),
+        "ambiguity_reason": ambiguity_reason,
+        "selected_candidate": selected_candidate,
         "query": query,
         "effective_query": text,
         "query_alias": query_alias,
         "query_normalization": query_normalization,
-        "normalized_query": normalize_concept_key(text),
+        "normalized_query": _scope_lookup_key(text),
         "candidates": candidates[:max_rows],
     }
 
@@ -2060,6 +2369,11 @@ def _resolution_classification_filters(
 
 
 def _resolution_classification_scope_candidate(resolution: dict[str, Any]) -> dict[str, Any] | None:
+    selected = resolution.get("selected_candidate") if isinstance(resolution, dict) else None
+    if resolution.get("canonical_scope_selected") and isinstance(selected, dict) and selected.get("candidate_type") == "classification":
+        effective_query = _clean(resolution.get("effective_query"))
+        if effective_query and _scope_lookup_key(selected.get("matched_text")) == _scope_lookup_key(effective_query):
+            return selected
     candidates = resolution.get("candidates") if isinstance(resolution, dict) else []
     top = candidates[0] if isinstance(candidates, list) and candidates else None
     if not isinstance(top, dict) or top.get("candidate_type") != "classification":
@@ -2267,6 +2581,291 @@ def _course_payload(
             "delivery_relations": delivery_meta,
         },
     }
+
+
+def _canonical_task_locator(resolution: dict[str, Any] | None) -> dict[str, Any]:
+    candidate = resolution.get("selected_candidate") if isinstance(resolution, dict) else None
+    if not isinstance(candidate, dict):
+        return {}
+    locator: dict[str, Any] = {}
+    for field in ("criteria_id", "element_id", "unit_code"):
+        value = candidate.get(field)
+        if value not in (None, ""):
+            locator[field] = value
+    return locator
+
+
+def _task_candidate_projection(row: dict[str, Any]) -> dict[str, Any]:
+    """Expose bounded canonical task identity for a clarification choice."""
+    return {
+        "candidate_type": "task",
+        "match_level": "source_task",
+        "matched_text": row.get("criteria_text_raw") or row.get("element_name_raw") or row.get("unit_name_raw"),
+        "criteria_id": row.get("criteria_id"),
+        "element_id": row.get("element_id"),
+        "unit_code": row.get("unit_code"),
+        "unit_name": row.get("unit_name_raw"),
+        "element_name": row.get("element_name_raw"),
+        "major_code": row.get("major_code"),
+        "major_name": row.get("major_name"),
+        "middle_code": row.get("middle_code"),
+        "middle_name": row.get("middle_name"),
+        "small_code": row.get("small_code"),
+        "small_name": row.get("small_name"),
+        "sub_code": row.get("sub_code"),
+        "sub_name": row.get("sub_name"),
+        "confidence_score": 1.0,
+    }
+
+
+def _unique_task_rows(rows: list[dict[str, Any]], field: str) -> list[dict[str, Any]]:
+    unique: list[dict[str, Any]] = []
+    seen: set[Any] = set()
+    for row in rows:
+        identity = row.get(field)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique.append(row)
+    return unique
+
+
+def _scan_scope_key_equivalent_criteria(
+    conn: sqlite3.Connection,
+    *,
+    query: str,
+    major_code: str | None = None,
+    middle_code: str | None = None,
+    small_code: str | None = None,
+    sub_code: str | None = None,
+    limit: int = 9,
+) -> list[dict[str, Any]]:
+    """Prove criteria uniqueness with the exact Python NFKC scope key.
+
+    SQLite has no built-in NFKC/Unicode punctuation normalizer. This bounded
+    fallback is used only after the cheap SQL lookup found one plausible row;
+    unknown labels still fail closed without a full scan.
+    """
+    clauses: list[str] = []
+    params: list[Any] = []
+    for column, value in (
+        ("c.major_code", major_code),
+        ("c.middle_code", middle_code),
+        ("c.small_code", small_code),
+        ("c.sub_code", sub_code),
+    ):
+        if value:
+            clauses.append(f"{column} = ?")
+            params.append(value)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    query_key = _scope_lookup_key(query)
+    matches: list[dict[str, Any]] = []
+    rows = conn.execute(
+        f"""
+        SELECT
+            pc.criteria_id, pc.criteria_no, pc.criteria_text_raw,
+            ce.element_id, ce.element_no, ce.element_name_raw,
+            cu.unit_code, cu.unit_name_raw, cu.unit_level_raw,
+            c.major_code, c.major_name, c.middle_code, c.middle_name,
+            c.small_code, c.small_name, c.sub_code, c.sub_name
+        FROM performance_criteria pc
+        JOIN competency_elements ce ON ce.element_id = pc.element_id
+        JOIN competency_units cu ON cu.unit_code = ce.unit_code
+        JOIN classifications c ON c.classification_id = cu.classification_id
+        {where}
+        ORDER BY pc.criteria_id
+        """,
+        tuple(params),
+    )
+    for row in rows:
+        if _scope_lookup_key(row["criteria_text_raw"]) != query_key:
+            continue
+        matches.append(dict(row))
+        if len(matches) >= max(2, limit):
+            break
+    return matches
+
+
+def _mark_task_scope_ambiguity(resolution: dict[str, Any], reason: str) -> None:
+    resolution["needs_clarification"] = True
+    resolution["ambiguity_reason"] = reason
+    resolution["selected_candidate"] = None
+
+
+def _task_resolution_gate(
+    conn: sqlite3.Connection,
+    *,
+    query: str | None,
+    resolution: dict[str, Any] | None,
+    major_code: str | None = None,
+    middle_code: str | None = None,
+    small_code: str | None = None,
+    sub_code: str | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Validate query scope and return a canonical task locator when possible."""
+    if not isinstance(resolution, dict):
+        return None, None
+    if resolution.get("needs_clarification"):
+        return None, _clean(resolution.get("ambiguity_reason")) or "ambiguous_scope"
+    locator = _canonical_task_locator(resolution)
+    if locator:
+        return locator, None
+    selected = resolution.get("selected_candidate")
+    if isinstance(selected, dict) and selected.get("candidate_type") == "classification":
+        # A uniquely selected classification is a canonical scope; downstream
+        # resolution must use its path filters, never the free-text label.
+        resolution["canonical_scope_selected"] = True
+        return {"classification_scope": True}, None
+    text = _clean(query)
+    if not text:
+        return None, None
+    rows = resolve_task_criteria_candidates(
+        conn,
+        query=None,
+        exact_criteria_query=text,
+        major_code=major_code,
+        middle_code=middle_code,
+        small_code=small_code,
+        sub_code=sub_code,
+        # Full scan is required before deciding whether an exact identity is
+        # duplicated; only the response candidates are bounded later.
+        limit=None,
+    )
+    if len(rows) == 1 or (not rows and re.search(r"[^\w\s]", text, flags=re.UNICODE)):
+        # A single cheap exact hit is not enough to prove uniqueness: another
+        # source task may differ only by punctuation. Run the broader C-level
+        # comparison before accepting that row so the gate cannot choose the
+        # first of two scope-key-equivalent criteria. A plain query with no
+        # cheap hit remains fail-closed without paying for a broad scan.
+        punctuation_rows = resolve_task_criteria_candidates(
+            conn,
+            query=None,
+            exact_criteria_query=text,
+            punctuation_normalized=True,
+            major_code=major_code,
+            middle_code=middle_code,
+            small_code=small_code,
+            sub_code=sub_code,
+            limit=None,
+        )
+        if punctuation_rows:
+            rows = punctuation_rows
+    if len(rows) == 1:
+        # SQL's common-punctuation approximation cannot prove equivalence for
+        # full-width or other Unicode variants. Before accepting a unique raw
+        # row, scan the source text with the same NFKC key used by the resolver.
+        rows = _scan_scope_key_equivalent_criteria(
+            conn,
+            query=text,
+            major_code=major_code,
+            middle_code=middle_code,
+            small_code=small_code,
+            sub_code=sub_code,
+        )
+    exact_criteria = rows
+    # Unit/element exact and punctuation-normalized identities are selected by
+    # resolve_ncs_query_scope before this criteria-only fallback is reached.
+    exact_elements: list[dict[str, Any]] = []
+    exact_units: list[dict[str, Any]] = []
+    unique_criteria = _unique_task_rows(exact_criteria, "criteria_id")
+    unique_elements = _unique_task_rows(exact_elements, "element_id")
+    unique_units = _unique_task_rows(exact_units, "unit_code")
+    if len(unique_criteria) > 1:
+        resolution["task_candidates"] = [_task_candidate_projection(row) for row in unique_criteria[:8]]
+        _mark_task_scope_ambiguity(resolution, "multiple_same_name_source_tasks")
+        return None, "multiple_same_name_source_tasks"
+    if len(unique_criteria) == 1:
+        return {"criteria_id": unique_criteria[0]["criteria_id"]}, None
+    if len(unique_elements) > 1:
+        resolution["task_candidates"] = [_task_candidate_projection(row) for row in unique_elements[:8]]
+        _mark_task_scope_ambiguity(resolution, "multiple_same_name_source_tasks")
+        return None, "multiple_same_name_source_tasks"
+    if len(unique_elements) == 1:
+        return {"element_id": unique_elements[0]["element_id"]}, None
+    if len(unique_units) > 1:
+        resolution["task_candidates"] = [_task_candidate_projection(row) for row in unique_units[:8]]
+        _mark_task_scope_ambiguity(resolution, "multiple_same_name_units")
+        return None, "multiple_same_name_units"
+    if len(unique_units) == 1:
+        return {"unit_code": unique_units[0]["unit_code"]}, None
+    # A partial/fuzzy/unknown label is not a task locator.  Returning no
+    # ambiguity here would let resolve_task_criteria's historical LIKE/LIMIT 1
+    # behavior silently choose an unrelated task.
+    _mark_task_scope_ambiguity(resolution, "non_exact_scope_requires_clarification")
+    return None, "non_exact_scope_requires_clarification"
+
+
+def _needs_clarification_response(
+    *,
+    requested_query: str | None,
+    resolution: dict[str, Any] | None,
+    reason: str,
+    field: str = "query",
+    other_resolution: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    resolution = resolution if isinstance(resolution, dict) else {}
+    candidate_rows = list(resolution.get("task_candidates") or [])
+    candidate_rows.extend(resolution.get("candidates") or [])
+    candidates = [
+        {
+            key: item.get(key)
+            for key in (
+                "candidate_type",
+                "match_level",
+                "matched_text",
+                "criteria_id",
+                "unit_code",
+                "element_id",
+                "unit_name",
+                "element_name",
+                "major_code",
+                "major_name",
+                "middle_code",
+                "middle_name",
+                "small_code",
+                "small_name",
+                "sub_code",
+                "sub_name",
+                "confidence_score",
+                "query_alias_review_status",
+            )
+            if item.get(key) not in (None, "")
+        }
+        for item in candidate_rows[:8]
+        if isinstance(item, dict)
+    ]
+    suggestions: list[str] = []
+    for item in candidates:
+        label = _clean(item.get("matched_text"))
+        if label and label not in suggestions:
+            suggestions.append(label)
+    payload: dict[str, Any] = {
+        "ok": False,
+        "needs_clarification": True,
+        "error": {
+            "code": "needs_clarification",
+            "message": "The NCS scope is ambiguous; choose one of the bounded candidates.",
+            "field": field,
+            "suggestions": suggestions[:8],
+        },
+        "requested_query": requested_query,
+        "content": [{"type": "text", "text": "NCS scope clarification is required before training recommendations can be generated."}],
+        "clarification": {
+            "reason": reason,
+            "field": field,
+            "candidates": candidates,
+        },
+        "query_resolution": resolution,
+    }
+    if other_resolution is not None:
+        payload["other_query_resolution"] = other_resolution
+    payload["input_quality"] = {
+        "ok": False,
+        "warnings": [{"code": reason, "field": field}],
+        "suggestions": suggestions[:8],
+        "candidate_queries": {field: candidates[:8]},
+    }
+    return payload
 
 
 def _course_summary_payload(course: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
@@ -3347,6 +3946,24 @@ def recommend_training_for_task(
             },
                 "error": {"code": "low_quality_query"},
         }
+    task_locator: dict[str, Any] = {}
+    if criteria_id is None and unit_code is None and query is not None:
+        task_locator, task_ambiguity = _task_resolution_gate(
+            conn,
+            query=query,
+            resolution=query_resolution,
+            major_code=major_code,
+            middle_code=middle_code,
+            small_code=small_code,
+            sub_code=sub_code,
+        )
+        task_locator = task_locator or {}
+        if task_ambiguity:
+            return _needs_clarification_response(
+                requested_query=requested_query,
+                resolution=query_resolution,
+                reason=task_ambiguity,
+            )
     requested_filters = {
         "major_code": major_code,
         "middle_code": middle_code,
@@ -3377,7 +3994,7 @@ def recommend_training_for_task(
         middle_code = requested_filters["middle_code"]
         small_code = requested_filters["small_code"]
         sub_code = requested_filters["sub_code"]
-    if alias and not unit_code:
+    if alias and not unit_code and _trusted_query_alias(alias):
         unit_code = alias_unit_code or unit_code
     query_filters = _resolution_classification_filters(
         query_resolution,
@@ -3391,11 +4008,15 @@ def recommend_training_for_task(
     small_code = query_filters["small_code"]
     sub_code = query_filters["sub_code"]
     source_query = None if _resolution_classification_scope_candidate(query_resolution) else query
+    canonical_criteria_id = task_locator.get("criteria_id", criteria_id)
+    canonical_element_id = task_locator.get("element_id")
+    canonical_unit_code = task_locator.get("unit_code", unit_code)
     source = resolve_task_criteria(
         conn,
-        criteria_id=criteria_id,
-        query=None if alias_unit_code else source_query,
-        unit_code=unit_code,
+        criteria_id=canonical_criteria_id,
+        element_id=canonical_element_id,
+        query=None if (alias_unit_code or task_locator) else source_query,
+        unit_code=canonical_unit_code,
         major_code=major_code,
         middle_code=middle_code,
         small_code=small_code,
@@ -8010,8 +8631,20 @@ def recommend_training_transition(
         small_code=target_small_code,
         sub_code=target_sub_code,
     )
-    current_unit_code = _clean(current_alias.get("unit_code")) if current_alias else None
-    target_unit_code = _clean(target_alias.get("unit_code")) if target_alias else None
+    current_unit_code = _clean(current_alias.get("unit_code")) if current_alias and _trusted_query_alias(current_alias) else None
+    target_unit_code = _clean(target_alias.get("unit_code")) if target_alias and _trusted_query_alias(target_alias) else None
+    if current_alias and not _trusted_query_alias(current_alias):
+        current_query = requested_current_query
+        effective_current_major = requested_current_filters["major_code"]
+        current_middle_code = requested_current_filters["middle_code"]
+        current_small_code = requested_current_filters["small_code"]
+        current_sub_code = requested_current_filters["sub_code"]
+    if target_alias and not _trusted_query_alias(target_alias):
+        target_query = requested_target_query
+        effective_target_major = requested_target_filters["major_code"]
+        target_middle_code = requested_target_filters["middle_code"]
+        target_small_code = requested_target_filters["small_code"]
+        target_sub_code = requested_target_filters["sub_code"]
     current_alias_guard = _alias_unit_conflicts_with_exact_unit(
         conn,
         requested_query=requested_current_query,
@@ -8020,7 +8653,11 @@ def recommend_training_transition(
     )
     if current_alias_guard:
         if current_alias:
-            current_alias = {**current_alias, "ignored_unit_code": current_unit_code, "ignore_guard": current_alias_guard}
+            current_alias = {
+                **current_alias,
+                "ignored_unit_code": current_unit_code or _clean(current_alias.get("unit_code")),
+                "ignore_guard": current_alias_guard,
+            }
         current_unit_code = None
         current_query = requested_current_query
         effective_current_major = requested_current_filters["major_code"]
@@ -8035,7 +8672,11 @@ def recommend_training_transition(
     )
     if target_alias_guard:
         if target_alias:
-            target_alias = {**target_alias, "ignored_unit_code": target_unit_code, "ignore_guard": target_alias_guard}
+            target_alias = {
+                **target_alias,
+                "ignored_unit_code": target_unit_code or _clean(target_alias.get("unit_code")),
+                "ignore_guard": target_alias_guard,
+            }
         target_unit_code = None
         target_query = requested_target_query
         effective_target_major = requested_target_filters["major_code"]
@@ -8070,6 +8711,40 @@ def recommend_training_transition(
         target_query_normalization,
         normalized_target_query,
     )
+    current_locator, current_ambiguity = _task_resolution_gate(
+        conn,
+        query=current_query,
+        resolution=current_resolution,
+        major_code=effective_current_major,
+        middle_code=current_middle_code,
+        small_code=current_small_code,
+        sub_code=current_sub_code,
+    )
+    if current_ambiguity:
+        return _needs_clarification_response(
+            requested_query=requested_current_query,
+            resolution=current_resolution,
+            reason=current_ambiguity,
+            field="current_query",
+            other_resolution=target_resolution,
+        )
+    target_locator, target_ambiguity = _task_resolution_gate(
+        conn,
+        query=target_query,
+        resolution=target_resolution,
+        major_code=effective_target_major,
+        middle_code=target_middle_code,
+        small_code=target_small_code,
+        sub_code=target_sub_code,
+    )
+    if target_ambiguity:
+        return _needs_clarification_response(
+            requested_query=requested_target_query,
+            resolution=target_resolution,
+            reason=target_ambiguity,
+            field="target_query",
+            other_resolution=current_resolution,
+        )
     current_filters = _resolution_classification_filters(
         current_resolution,
         major_code=effective_current_major,
@@ -8096,8 +8771,10 @@ def recommend_training_transition(
     target_source_query = None if _resolution_classification_scope_candidate(target_resolution) else target_query
     current_source = resolve_task_criteria(
         conn,
-        query=None if current_unit_code else current_source_query,
-        unit_code=current_unit_code,
+        criteria_id=(current_locator or {}).get("criteria_id"),
+        element_id=(current_locator or {}).get("element_id"),
+        query=None if (current_unit_code or current_locator) else current_source_query,
+        unit_code=(current_locator or {}).get("unit_code") or current_unit_code,
         major_code=effective_current_major,
         middle_code=current_middle_code,
         small_code=current_small_code,
@@ -8105,8 +8782,10 @@ def recommend_training_transition(
     )
     target_source = resolve_task_criteria(
         conn,
-        query=None if target_unit_code else target_source_query,
-        unit_code=target_unit_code,
+        criteria_id=(target_locator or {}).get("criteria_id"),
+        element_id=(target_locator or {}).get("element_id"),
+        query=None if (target_unit_code or target_locator) else target_source_query,
+        unit_code=(target_locator or {}).get("unit_code") or target_unit_code,
         major_code=effective_target_major,
         middle_code=target_middle_code,
         small_code=target_small_code,

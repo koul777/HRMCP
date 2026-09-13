@@ -5956,7 +5956,7 @@ class TrainingRecommendationTests(unittest.TestCase):
                 task_result = recommend_training_for_task(conn, query="없는직무", save=False)
                 transition_result = recommend_training_transition(
                     conn,
-                    current_query="workforce",
+                    current_query="Build a workforce plan from business strategy.",
                     target_query="HR planninh",
                     save=False,
                 )
@@ -9454,6 +9454,13 @@ class TrainingRecommendationTests(unittest.TestCase):
                 ],
             )
             build_training_course_ontology_links(conn)
+
+            # This fixture intentionally exercises a trusted role alias; the
+            # default candidate aliases remain review-only elsewhere.
+            conn.execute(
+                "UPDATE ncs_query_aliases SET review_status = 'accepted' WHERE alias_text = ?",
+                ("\uc778\uc0ac\ud300\uc7a5",),
+            )
 
             result = recommend_training_transition(
                 conn,

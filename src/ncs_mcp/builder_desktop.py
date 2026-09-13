@@ -31,6 +31,7 @@ class BuilderWindow:
         self.closing = False
         self.cancel_requested = threading.Event()
         self.active_phase = None
+        self.active_journal = False
         self.started_at = None
         self.operation_failed = False
         self.phase_states = {number: "pending" for number in range(1, 5)}
@@ -117,10 +118,15 @@ class BuilderWindow:
         ttk.Entry(deploy_tab, textvariable=self.production_url).pack(fill="x")
         row = ttk.Frame(release_tab)
         row.pack(fill="x", pady=20)
+        self.button(
+            row,
+            "현재 운영 DB로 코드 배포 버전 준비",
+            self.copy_current,
+        ).pack(side="left", padx=(0, 8))
         self.button(row, "경량 DB 만들기 · 검증", self.package, accent=True).pack(side="left", padx=(0, 8))
         self.button(row, "프로젝트 확인", self.show_project).pack(side="left")
         self.button(deploy_tab, "④ Vercel MCP 업데이트", self.deploy, accent=True).pack(anchor="w", pady=16)
-        ttk.Label(release_tab, text="검증된 경량 패키지만 별도 배포 폴더에 넣습니다.\n원본 Excel과 대용량 로컬 DB는 Vercel에 업로드하지 않습니다.\n임시 배포 검증 → 운영 도메인 전환 → 운영 MCP 검증 순서로 진행합니다.\n운영 검증까지 성공한 버전이 다음 변경분 비교의 기준이 됩니다.", wraplength=930).pack(anchor="w", pady=12)
+        ttk.Label(release_tab, text="코드만 바뀐 경우에는 현재 운영 DB로 새 불변 버전을 먼저 준비한 뒤 경량 DB를 만듭니다. 이 복사본은 로컬 Builder 검증용이며 Vercel에는 올라가지 않습니다.\n검증된 경량 패키지만 별도 배포 폴더에 넣습니다. 원본 Excel과 대용량 로컬 DB는 Vercel에 업로드하지 않습니다.\n임시 배포 검증 → 운영 도메인 전환 → 운영 MCP 검증 순서로 진행합니다.\n운영 검증까지 성공한 버전이 다음 변경분 비교의 기준이 됩니다.", wraplength=930).pack(anchor="w", pady=12)
         self.selection_label = ttk.Label(release_tab, text="선택된 버전 없음", wraplength=900)
         self.selection_label.pack(anchor="w", pady=10)
         self.deploy_selection = ttk.Label(deploy_tab, text="선택된 버전 없음", wraplength=900)
@@ -322,17 +328,18 @@ class BuilderWindow:
             raise BuilderCancelled()
         self.events.put(('progress', value))
 
-    def start(self, title, operation, phase=None):
+    def start(self, title, operation, phase=None, journal_phase=None):
         if self.busy:
             return
         if (self.engine.state / 'operation.lock').exists():
             messagebox.showinfo('작업 실행 확인', '기존 Builder 작업 잠금이 있습니다. 실행 중인 작업의 완료 여부를 먼저 확인하세요.')
             return
-        if phase:
-            self.session.start(phase, self.selected_version)
+        if phase or journal_phase:
+            self.session.start(journal_phase or phase, self.selected_version)
         self.busy = True
         self.cancel_requested.clear()
         self.active_phase = phase
+        self.active_journal = bool(phase or journal_phase)
         self.started_at = time.monotonic()
         self.operation_failed = False
         if phase:
@@ -405,6 +412,19 @@ class BuilderWindow:
         deploy_root = Path(self.deploy_root.get())
         if version:
             self.start("온톨로지를 포함한 경량 DB와 ZIP을 생성·검증합니다.", lambda: self.engine.package(version, deploy_root), phase=3)
+
+    def copy_current(self):
+        if not (self.engine.state / "deployed.json").is_file():
+            messagebox.showerror(
+                "운영 버전 확인 필요",
+                "Builder가 마지막으로 배포한 운영 버전 기록이 없습니다. 코드 전용 배포 버전을 준비할 수 없습니다.",
+            )
+            return
+        self.start(
+            "현재 운영 NCS DB를 보존한 코드 배포용 Builder 버전을 준비합니다.",
+            self.engine.copy_current,
+            journal_phase="copy_current",
+        )
 
     def show_project(self):
         try:
@@ -646,7 +666,7 @@ class BuilderWindow:
                     if isinstance(value, dict) and value.get('snapshot_capacity'):
                         self.capacity_status.set(snapshot_capacity_message(
                             capacity_for_version(value, self.selected_version)))
-                    if self.active_phase and time.monotonic() - self.last_journal_at >= 2:
+                    if self.active_journal and time.monotonic() - self.last_journal_at >= 2:
                         self.session.progress(value if isinstance(value, dict) else {'stage': value})
                         self.last_journal_at = time.monotonic()
                     description, percent = describe_progress(value)
@@ -671,8 +691,10 @@ class BuilderWindow:
                         self.selection_label.configure(text=f"선택 버전: {self.selected_version}")
                         self.deploy_selection.configure(text=f"선택 버전: {self.selected_version}")
                         self.restore_phase_states(self.selected_version)
-                    if self.active_phase:
+                    if self.active_journal:
                         self.session.finish(self.selected_version)
+                        self.active_journal = False
+                    if self.active_phase:
                         self.phase_states[self.active_phase] = "done"
                         self.phase_labels[self.active_phase].set(f"{self.active_phase}단계 · 완료 100%")
                         self.update_overall()
@@ -682,6 +704,7 @@ class BuilderWindow:
                     self.log.insert("end", "작업 완료\n")
                 elif kind in {"error", "cancelled"}:
                     self.session.fail(value)
+                    self.active_journal = False
                     self.operation_failed = True
                     if self.active_phase:
                         self.phase_states[self.active_phase] = "failed"

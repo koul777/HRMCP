@@ -1604,6 +1604,186 @@ def has_not_found_error(result: dict[str, Any]) -> bool:
     return code.upper() == "NOT_FOUND" or "not_found" in code.lower()
 
 
+_NCS_SCOPE_FILTER_FIELDS = (
+    "major_code",
+    "major_name",
+    "middle_code",
+    "middle_name",
+    "small_code",
+    "small_name",
+    "sub_code",
+    "sub_name",
+)
+
+
+def _effective_ncs_scope_filter(value: Any) -> dict[str, str]:
+    """Keep only non-empty classification constraints understood by NCS search."""
+    if not isinstance(value, dict):
+        return {}
+    effective: dict[str, str] = {}
+    for field in _NCS_SCOPE_FILTER_FIELDS:
+        raw = value.get(field)
+        if raw is None:
+            continue
+        text = str(raw).strip()
+        if text:
+            effective[field] = text
+    return effective
+
+
+def _direct_job_scope_filter(search_context: dict[str, Any]) -> dict[str, str] | None:
+    """Build a hard filter for a resolved explicit direct-call job scope."""
+    promoted = _source_backed_context_filter(search_context)
+    if promoted:
+        return promoted
+    # Context text can reduce an otherwise exact source-backed job match's
+    # confidence, but it must not turn a unique exact scope into a shadow-only
+    # result. The resolver has already enforced its threshold and margin.
+    if (
+        search_context.get("status") != "resolved"
+        or search_context.get("needs_context")
+    ):
+        return None
+    selected = search_context.get("selected_candidate")
+    if not isinstance(selected, dict):
+        return None
+    if not any(
+        str(basis).startswith("job_scope_exact_")
+        and str(basis).endswith("_name")
+        for basis in selected.get("match_basis") or []
+    ):
+        return None
+    codes = {
+        f"{level}_code": str(selected[f"{level}_code"]).strip()
+        for level in ("major", "middle", "small", "sub")
+        if selected.get(f"{level}_code") is not None
+        and str(selected[f"{level}_code"]).strip()
+    }
+    return codes or None
+
+
+def _merge_ncs_scope_filters(
+    resolved_filter: dict[str, str],
+    caller_filter: dict[str, str],
+) -> dict[str, str]:
+    """Keep the resolved path while retaining compatible caller constraints."""
+    merged = dict(resolved_filter)
+    for field, value in caller_filter.items():
+        # A resolved code is authoritative for the explicit job scope. The
+        # resolver has already checked that a duplicate caller constraint is
+        # compatible, so retaining the resolved value prevents weakening it.
+        merged.setdefault(field, value)
+    return merged
+
+
+def _ncs_scope_path_for_result(row: Any) -> dict[str, Any] | None:
+    """Return structured classification path data without parsing display text."""
+    if not isinstance(row, dict):
+        return None
+    path = row.get("path")
+    if isinstance(path, dict):
+        return path
+    # Classification listing rows expose the path fields at the row root.
+    if any(field in row for field in _NCS_SCOPE_FILTER_FIELDS):
+        return row
+    return None
+
+
+def _ncs_scope_value_matches(field: str, expected: str, actual: Any) -> bool:
+    if actual is None:
+        return False
+    expected_text = " ".join(str(expected).split()).casefold()
+    actual_text = " ".join(str(actual).split()).casefold()
+    if field.endswith("_name"):
+        # Share the search boundary semantics (NFKC/casefold plus left lexical
+        # boundary) so a name occurring inside another compound cannot pass.
+        return _ncs_search_boundary_match(actual, expected) == 1
+    return actual_text == expected_text
+
+
+def _validate_ncs_search_scope_payload(
+    result: dict[str, Any],
+    classification_filter: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Reject handler payloads that cannot prove classification containment."""
+    effective_filter = _effective_ncs_scope_filter(classification_filter)
+    if not effective_filter:
+        return None
+    rows: list[Any] = []
+    for key in ("results", "classifications"):
+        value = result.get(key)
+        if isinstance(value, list):
+            rows.extend(value)
+    violations: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        path = _ncs_scope_path_for_result(row)
+        if path is None:
+            violations.append({"index": index, "reason": "missing_structured_path"})
+            continue
+        mismatches = [
+            field
+            for field, expected in effective_filter.items()
+            if not _ncs_scope_value_matches(
+                field,
+                expected,
+                path.get(field)
+                if field in path
+                else path.get(field.removesuffix("_name")),
+            )
+        ]
+        if mismatches:
+            violations.append({"index": index, "fields": mismatches})
+    if not violations:
+        return None
+    return {
+        "schema": "ncs_scope_containment_v1",
+        "status": "rejected",
+        "classification_filter": effective_filter,
+        "violations": violations,
+        "checked_result_count": len(rows),
+    }
+
+
+def _annotate_filtered_ncs_no_evidence(
+    response: dict[str, Any],
+    classification_filter: dict[str, Any] | None,
+    source_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Make a filtered no-match explicit as non-evidence for downstream claims."""
+    effective_filter = _effective_ncs_scope_filter(classification_filter)
+    if not effective_filter:
+        return response
+    evidence_status = {
+        "schema": "ncs_evidence_status_v1",
+        "status": "filtered_no_match",
+        "source_backed": False,
+        "usable_as_evidence": False,
+        "classification_filter": effective_filter,
+    }
+    response["evidence_status"] = evidence_status
+    data = response.get("data")
+    if isinstance(data, dict):
+        data["evidence_status"] = evidence_status
+        data["classification_filter"] = effective_filter
+    response["classification_filter"] = effective_filter
+    response["classification_filter_applied"] = True
+    if isinstance(source_result, dict) and isinstance(
+        source_result.get("classification_scope_invariant"), dict
+    ):
+        response["classification_scope_invariant"] = source_result[
+            "classification_scope_invariant"
+        ]
+        if isinstance(data, dict):
+            data["classification_scope_invariant"] = source_result[
+                "classification_scope_invariant"
+            ]
+    response["ncs_evidence_guidance"] = (
+        "Filtered NOT_FOUND means no source-backed NCS match was returned; "
+        "do not use it as evidence for a downstream NCS-backed claim."
+    )
+    return response
+
+
 @mcp.resource("ontology://schema")
 def ontology_schema() -> str:
     """Return the NCS-SQF ontology schema and MVP modeling principles."""
@@ -1705,6 +1885,64 @@ def ncs_search(
     path. A filtered NOT_FOUND is not evidence for any downstream NCS-backed claim.
     """
     normalized_scope = scope if scope in {"unit", "element", "criteria", "ksa", "all"} else "all"
+    normalized_context, normalized_job_scope = normalize_search_context_inputs(
+        context_text=context_text,
+        job_scope=job_scope,
+    )
+    if query and not normalized_job_scope:
+        # Direct calls may omit discovery. Reuse only the bounded grammatical
+        # extraction used by the router; bare lexical tasks remain unscoped.
+        inferred_route = route_ncs_query(
+            query,
+            available_tool_names=tool_registry.NCS_EXECUTABLE_TOOL_NAMES,
+        )
+        inferred_context = inferred_route.get("classification_context") or {}
+        if (
+            inferred_route.get("tool") == "ncs_search"
+            and inferred_context.get("source") == "explicit_query_job_scope"
+        ):
+            inferred_params = inferred_route.get("params") or {}
+            inferred_scope = inferred_params.get("job_scope")
+            _, normalized_job_scope = normalize_search_context_inputs(
+                job_scope=inferred_scope,
+            )
+            if normalized_job_scope:
+                query = str(inferred_params.get("query") or query)
+    supplied_filter = _effective_ncs_scope_filter(classification_filter)
+    if normalized_job_scope:
+        # Direct calls do not carry a discovery fingerprint. Resolve the same
+        # source-backed exact scope used by the route layer, promote it to a
+        # hard filter, and fail closed for ambiguity/conflict.
+        with open_db() as conn:
+            direct_context = resolve_ncs_search_context(
+                conn,
+                context_text=normalized_context,
+                job_scope=normalized_job_scope,
+                classification_filter=supplied_filter or None,
+            )
+        if direct_context.get("needs_context"):
+            return error_response(
+                "route_context_required",
+                message=(
+                    "The explicit job scope is unresolved, ambiguous, or conflicts "
+                    "with the caller filter. Clarify the scope before searching."
+                ),
+                search_context=direct_context,
+            )
+        promoted_filter = _direct_job_scope_filter(direct_context)
+        if not promoted_filter:
+            return error_response(
+                "route_context_required",
+                message=(
+                    "The explicit job scope could not be safely bound to one "
+                    "exact NCS classification. Clarify the scope before searching."
+                ),
+                search_context=direct_context,
+            )
+        classification_filter = _merge_ncs_scope_filters(
+            promoted_filter,
+            supplied_filter,
+        )
     if not query:
         filter_kwargs = {
             key: value
@@ -1731,7 +1969,14 @@ def ncs_search(
                     job_scope=job_scope,
                     classification_filter=classification_filter,
                 )
-            return response
+            return _annotate_filtered_ncs_no_evidence(response, classification_filter)
+        containment = _validate_ncs_search_scope_payload(result, classification_filter)
+        if containment is not None:
+            return error_response(
+                "search_scope_containment_violation",
+                message="NCS classification results did not satisfy the effective filter.",
+                scope_containment=containment,
+            )
         with open_db() as conn:
             search_context = resolve_ncs_search_context(
                 conn,
@@ -1763,15 +2008,26 @@ def ncs_search(
         job_scope=job_scope,
     )
     rows = result.get("results", [])
+    invariant = result.get("classification_scope_invariant")
+    if isinstance(invariant, dict) and invariant.get("ok") is False:
+        return error_response(
+            "search_scope_containment_violation",
+            message="NCS search failed its post-query classification scope invariant.",
+            scope_containment=invariant,
+        )
     if not rows:
         response = not_found_response(f"NCS 검색 결과가 없습니다: {query}")
         response["search_context"] = result.get("search_context")
-        if classification_filter:
-            response["ncs_evidence_guidance"] = (
-                "Filtered NOT_FOUND means no source-backed NCS match was returned; "
-                "do not use it as evidence for a downstream NCS-backed claim."
-            )
-        return response
+        return _annotate_filtered_ncs_no_evidence(
+            response, classification_filter, source_result=result
+        )
+    containment = _validate_ncs_search_scope_payload(result, classification_filter)
+    if containment is not None:
+        return error_response(
+            "search_scope_containment_violation",
+            message="NCS search results did not satisfy the effective filter.",
+            scope_containment=containment,
+        )
     return tool_response(
         result,
         audit={
@@ -2207,15 +2463,30 @@ def _route_with_execution_scope(
                 classification_filter=resolver_filter,
             )
             promoted_filter = None
-            if scope_source == "explicit_query_job_scope" and not caller_filter:
-                promoted_filter = _source_backed_context_filter(search_context)
+            if normalized_job_scope:
+                # Caller and query-derived job scopes share the direct-call
+                # contract: an exact, unique source path is mandatory. Keep
+                # compatible caller constraints, but never let a broad parent
+                # filter weaken the resolved path.
+                promoted_filter = _direct_job_scope_filter(search_context)
                 if promoted_filter:
+                    effective_scope_filter = _merge_ncs_scope_filters(
+                        promoted_filter,
+                        caller_filter,
+                    )
+                    initial_warnings = list(search_context.get("warnings") or [])
                     search_context = resolve_ncs_search_context(
                         conn,
                         context_text=normalized_context,
                         job_scope=normalized_job_scope,
-                        classification_filter=promoted_filter,
+                        classification_filter=effective_scope_filter,
                     )
+                    if initial_warnings:
+                        warnings = list(search_context.get("warnings") or [])
+                        for warning in initial_warnings:
+                            if warning not in warnings:
+                                warnings.append(warning)
+                        search_context["warnings"] = warnings
                 else:
                     search_context = dict(search_context)
                     search_context["needs_context"] = True
@@ -2226,12 +2497,29 @@ def _route_with_execution_scope(
                     if "explicit_job_scope_not_safely_promotable" not in warnings:
                         warnings.append("explicit_job_scope_not_safely_promotable")
                     search_context["warnings"] = warnings
-        effective_filter = caller_filter or promoted_filter or {}
+        effective_filter = (
+            _merge_ncs_scope_filters(promoted_filter, caller_filter)
+            if promoted_filter
+            else caller_filter
+        )
         if effective_filter:
             route_params["classification_filter"] = effective_filter
         route_params["job_scope"] = normalized_job_scope
+        binding_route = route
+        if normalized_job_scope and promoted_filter:
+            # The effective full path is part of the route binding. Rebuild
+            # the base route with that canonical filter so discovery using a
+            # broad caller filter and execution echoing the promoted filter
+            # produce the same v2 fingerprint.
+            binding_route = route_ncs_query(
+                query,
+                available_tool_names=available_tool_names,
+                classification_filter=effective_filter or None,
+                context_text=normalized_context,
+                job_scope=normalized_job_scope,
+            )
         fingerprint = route_fingerprint_for_payload(
-            _search_context_fingerprint_payload(route, search_context)
+            _search_context_fingerprint_payload(binding_route, search_context)
         )
         search_context_hash = _search_context_binding_hash(search_context)
         selected_candidate = search_context.get("selected_candidate") or {}
@@ -2279,16 +2567,23 @@ def _route_with_execution_scope(
         contract = dict(route.get("route_contract") or {})
         execution_policy = dict(contract.get("execution_policy") or {})
         execution_policy.update(
-            classification_context_required=(scope_source == "explicit_query_job_scope"),
+            classification_context_required=bool(normalized_job_scope),
             classification_context_satisfied=not bool(search_context.get("needs_context")),
         )
-        if scope_source == "explicit_query_job_scope" and search_context.get(
-            "needs_context"
-        ):
+        if normalized_job_scope and search_context.get("needs_context"):
             execution_policy["meta_executable"] = False
+        # The public route already carries the full redacted classification
+        # context. Keep the contract binding self-describing, but avoid
+        # serializing the sensitive-input digest and the same hierarchy field
+        # lists a second time; this keeps discovery under its 8k payload floor.
+        contract_classification_context = {
+            key: value
+            for key, value in classification_context.items()
+            if key not in {"fields", "context_fields", "requested"}
+        }
         contract.update(
             fingerprint_version=CONTEXT_ROUTE_FINGERPRINT_VERSION,
-            classification_context=classification_context,
+            classification_context=contract_classification_context,
             execution_policy=execution_policy,
             search_context_binding_schema="ncs_search_context_binding_v1",
             search_context_hash=search_context_hash,
@@ -2731,12 +3026,57 @@ def ncs_execute_tool(tool_name: str, params: dict[str, Any] | None = None) -> di
             message=str(exc),
         )
     if isinstance(result, dict):
+        if tool_name == "ncs_search":
+            effective_filter = _effective_ncs_scope_filter(
+                tool_params.get("classification_filter")
+            )
+            invariant = result.get("classification_scope_invariant")
+            if isinstance(invariant, dict) and invariant.get("ok") is False:
+                response = error_response(
+                    "search_scope_containment_violation",
+                    tool_name=tool_name,
+                    message="NCS search failed its post-query classification scope invariant.",
+                    scope_containment=invariant,
+                )
+                response["meta_execution"] = _route_execution_metadata(
+                    tool_name=tool_name,
+                    query_route=query_route,
+                    params=params,
+                )
+                response["meta_execution"]["scope_containment_verified"] = False
+                return response
+            containment = _validate_ncs_search_scope_payload(
+                result, effective_filter
+            )
+            if containment is not None:
+                response = error_response(
+                    "search_scope_containment_violation",
+                    tool_name=tool_name,
+                    message=(
+                        "The search handler returned a row outside the effective "
+                        "classification filter or without a verifiable path."
+                    ),
+                    scope_containment=containment,
+                )
+                response["meta_execution"] = _route_execution_metadata(
+                    tool_name=tool_name,
+                    query_route=query_route,
+                    params=params,
+                )
+                response["meta_execution"]["scope_containment_verified"] = False
+                return response
+            if has_not_found_error(result):
+                _annotate_filtered_ncs_no_evidence(result, effective_filter)
         context_binding_meta: dict[str, Any] = {}
         if tool_name == "ncs_search" and query_route and (
             normalized_context or normalized_job_scope
         ):
             expected_context = query_route.get("search_context")
             actual_context = result.get("search_context")
+            if actual_context is None and isinstance(result.get("error"), dict):
+                actual_context = result["error"].get("search_context")
+            if actual_context is None and isinstance(result.get("data"), dict):
+                actual_context = result["data"].get("search_context")
             expected_binding = _search_context_binding_payload(expected_context)
             actual_binding = _search_context_binding_payload(actual_context)
             expected_hash = _search_context_binding_hash(expected_context)
@@ -3197,7 +3537,7 @@ from .search import (
     configure_search_runtime as _configure_search_runtime,
     search_ncs,
 )
-from .search.core import resolve_ncs_search_context
+from .search.core import _ncs_search_boundary_match, resolve_ncs_search_context
 
 _configure_search_runtime(
     open_db_factory=lambda: open_db(),
