@@ -1007,6 +1007,242 @@ class NcsSearchRecallTests(unittest.TestCase):
             "채용",
         )
 
+    def test_job_scope_compound_expansion_does_not_match_leaf_homograph(self) -> None:
+        with self._open_db() as conn:
+            conn.execute(
+                "INSERT INTO ncs_query_aliases VALUES (?, ?, ?)",
+                ("U_HR_MANAGEMENT", "인사", "인사"),
+            )
+            conn.execute(
+                "INSERT INTO competency_units VALUES (?, ?, ?, '4', 2)",
+                ("U_GREETING", "환영 환송", "고객을 맞이하고 배웅한다"),
+            )
+            conn.execute(
+                "INSERT INTO competency_elements VALUES (?, ?, ?)",
+                (300, "인사하기", "U_GREETING"),
+            )
+            conn.execute(
+                "INSERT INTO performance_criteria VALUES (?, ?, NULL, ?)",
+                (300, "인사하기 절차를 적용할 수 있다", 300),
+            )
+            conn.execute(
+                "INSERT INTO ksa_items VALUES (?, 'attitude', ?, NULL, ?)",
+                (300, "인사하기 태도", 300),
+            )
+            conn.commit()
+
+        query = "인사업무"
+        self.sql_statements.clear()
+        with patch.object(
+            search_core,
+            "_ncs_search_leaf_token_expansions",
+            side_effect=lambda _tokens, expansions: expansions,
+        ):
+            unsafe = server.search_ncs(query, scope="all", limit=20)
+        unsafe_statement_count = len(self.sql_statements)
+        for item_type in ("element", "criteria", "ksa"):
+            self.assertIn(
+                300,
+                [row["id"] for row in unsafe["results"] if row["type"] == item_type],
+            )
+
+        self.sql_statements.clear()
+        result = server.search_ncs(query, scope="all", limit=20)
+        self.assertLessEqual(len(self.sql_statements), unsafe_statement_count)
+        self.assertIn(
+            "U_HR_MANAGEMENT",
+            [row["id"] for row in result["results"] if row["type"] == "unit"],
+        )
+        self.assertNotIn(
+            "U_GREETING",
+            [row.get("path", {}).get("unit_code") for row in result["results"]],
+        )
+        self.assertEqual(result["query_expansions"][query], ["인사"])
+        hr_unit = next(
+            row for row in result["results"] if row["id"] == "U_HR_MANAGEMENT"
+        )
+        self.assertEqual(hr_unit["matched_tokens"], [query])
+        self.assertEqual(hr_unit["matched_expansions"][0]["matched_as"], "인사")
+        for item_type in ("element", "criteria", "ksa"):
+            self.assertEqual(server.search_ncs(query, scope=item_type)["returned"], 0)
+
+        expected_classification = {
+            "major_code": "99",
+            "major": "기타",
+            "middle_code": "99",
+            "middle": "기타",
+            "small_code": "99",
+            "small": "기타",
+            "sub_code": "99",
+            "sub": "데이터분석 직무",
+        }
+        for item_type in ("element", "criteria", "ksa"):
+            direct = server.search_ncs("인사하기", scope=item_type, limit=5)
+            self.assertEqual(direct["results"][0]["id"], 300)
+            self.assertEqual(direct["results"][0]["match_mode"], "phrase")
+            self.assertEqual(direct["results"][0]["matched_expansions"], [])
+            for field, value in expected_classification.items():
+                self.assertEqual(direct["results"][0]["path"][field], value)
+
+        legacy_ids = [(row["type"], row["id"]) for row in result["results"]]
+        with self._open_db() as conn:
+            self._add_normalized_columns(conn)
+            conn.commit()
+        normalized = server.search_ncs(query, scope="all", limit=20)
+        self.assertEqual(
+            [(row["type"], row["id"]) for row in normalized["results"]],
+            legacy_ids,
+        )
+
+    def test_all_low_information_suffix_expansions_are_unit_scope_only(self) -> None:
+        suffix_cases = (
+            ("관리", "나래", "온새"),
+            ("운영", "보람", "가온"),
+            ("업무", "다온", "누리"),
+            ("직무", "해솔", "아람"),
+            ("실무", "마루", "라온"),
+        )
+        with self._open_db() as conn:
+            for index, (suffix, expansion_base, direct_base) in enumerate(
+                suffix_cases, start=1
+            ):
+                classification_id = 100 + index
+                unit_name_code = f"SCOPE_UNIT_{index}"
+                classification_code = f"SCOPE_CLASS_{index}"
+                leaf_code = f"SCOPE_LEAF_{index}"
+                direct_code = f"SCOPE_DIRECT_{index}"
+                conn.execute(
+                    "INSERT INTO classifications VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        classification_id,
+                        f"8{index}",
+                        "합성범위",
+                        f"8{index}",
+                        "합성중분류",
+                        f"8{index}",
+                        "합성소분류",
+                        f"8{index}",
+                        f"{expansion_base}분야",
+                        str(index),
+                    ),
+                )
+                conn.executemany(
+                    "INSERT INTO competency_units VALUES (?, ?, '', '4', ?)",
+                    (
+                        (unit_name_code, f"{expansion_base}기획", 2),
+                        (classification_code, "별도수행", classification_id),
+                        (leaf_code, "무관활동", 2),
+                        (direct_code, "직접활동", 2),
+                    ),
+                )
+                conn.execute(
+                    "INSERT INTO ncs_query_aliases VALUES (?, ?, ?)",
+                    (unit_name_code, expansion_base, expansion_base),
+                )
+                leaf_id = 400 + index
+                direct_id = 500 + index
+                conn.executemany(
+                    "INSERT INTO competency_elements VALUES (?, ?, ?)",
+                    (
+                        (leaf_id, f"{expansion_base}하기", leaf_code),
+                        (direct_id, f"{direct_base}{suffix} 수행하기", direct_code),
+                    ),
+                )
+                conn.executemany(
+                    "INSERT INTO performance_criteria VALUES (?, ?, NULL, ?)",
+                    (
+                        (leaf_id, f"{expansion_base}하기 기준", leaf_id),
+                        (direct_id, f"{direct_base}{suffix} 기준", direct_id),
+                    ),
+                )
+                conn.executemany(
+                    "INSERT INTO ksa_items VALUES (?, 'knowledge', ?, NULL, ?)",
+                    (
+                        (leaf_id, f"{expansion_base}하기 지식", leaf_id),
+                        (direct_id, f"{direct_base}{suffix} 지식", direct_id),
+                    ),
+                )
+            conn.execute(
+                "INSERT INTO competency_elements VALUES (?, ?, ?)",
+                (600, "인사평가하기", "U_HR_MANAGEMENT"),
+            )
+            conn.execute(
+                "INSERT INTO performance_criteria VALUES (?, ?, NULL, ?)",
+                (600, "인사평가하기 기준", 600),
+            )
+            conn.execute(
+                "INSERT INTO ksa_items VALUES (?, 'skill', ?, NULL, ?)",
+                (600, "인사평가하기 기술", 600),
+            )
+            conn.commit()
+
+        def assert_contract() -> None:
+            for index, (suffix, expansion_base, direct_base) in enumerate(
+                suffix_cases, start=1
+            ):
+                query = f"{expansion_base}{suffix}"
+                leaf_id = 400 + index
+                for item_type in ("element", "criteria", "ksa"):
+                    with self.subTest(
+                        suffix=suffix,
+                        scope=item_type,
+                    ):
+                        with patch.object(
+                            search_core,
+                            "_ncs_search_leaf_token_expansions",
+                            side_effect=lambda _tokens, expansions: expansions,
+                        ):
+                            unsafe = server.search_ncs(
+                                query, scope=item_type, limit=20
+                            )
+                        self.assertIn(
+                            leaf_id, [row["id"] for row in unsafe["results"]]
+                        )
+                        safe = server.search_ncs(query, scope=item_type, limit=20)
+                        self.assertNotIn(
+                            leaf_id, [row["id"] for row in safe["results"]]
+                        )
+
+                units = server.search_ncs(query, scope="unit", limit=20)
+                unit_by_id = {row["id"]: row for row in units["results"]}
+                self.assertIn(f"SCOPE_UNIT_{index}", unit_by_id)
+                self.assertIn(f"SCOPE_CLASS_{index}", unit_by_id)
+                self.assertIn(
+                    "classification",
+                    unit_by_id[f"SCOPE_CLASS_{index}"]["match_fields"],
+                )
+
+                direct_query = f"{direct_base}{suffix}"
+                direct_id = 500 + index
+                for item_type in ("element", "criteria", "ksa"):
+                    direct = server.search_ncs(
+                        direct_query, scope=item_type, limit=20
+                    )
+                    self.assertEqual(direct["results"][0]["id"], direct_id)
+                    self.assertEqual(direct["results"][0]["match_mode"], "phrase")
+                    self.assertEqual(direct["results"][0]["matched_expansions"], [])
+
+            for item_type in ("element", "criteria", "ksa"):
+                reviewed = server.search_ncs(
+                    "성과평가", scope=item_type, limit=20
+                )
+                reviewed_row = next(
+                    row for row in reviewed["results"] if row["id"] == 600
+                )
+                self.assertEqual(
+                    reviewed_row["match_mode"], "expanded_token_and"
+                )
+                self.assertEqual(
+                    reviewed_row["matched_expansions"][0]["matched_as"],
+                    "인사평가",
+                )
+
+        assert_contract()
+        with self._open_db() as conn:
+            self._add_normalized_columns(conn)
+            conn.commit()
+        assert_contract()
+
     def test_exact_management_terms_outrank_compound_expansion(self) -> None:
         expectations = {
             "자산관리": "U_ASSET",

@@ -3,10 +3,11 @@ from __future__ import annotations
 import unittest
 import sys
 import json
-from contextlib import ExitStack
+import os
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -280,6 +281,93 @@ class NcsQueryRouterTests(unittest.TestCase):
             {"major_code": "02"},
         )
 
+    def test_explicit_job_competency_request_extracts_bounded_scope_and_query(self) -> None:
+        query = "NCSMCP로 인사 직무에 필요한 역량을 알려줘."
+
+        route = route_ncs_query(query)
+        repeated = route_ncs_query(query)
+
+        self.assertEqual(route["scenario"], "structure_search")
+        self.assertEqual(route["tool"], "ncs_search")
+        self.assertEqual(route["params"]["query"], "인사")
+        self.assertEqual(route["params"]["job_scope"], "인사")
+        self.assertNotIn("classification_filter", route["params"])
+        self.assertEqual(
+            route["classification_context"]["source"],
+            "explicit_query_job_scope",
+        )
+        self.assertEqual(
+            route["classification_context"]["extraction"]["pattern"],
+            "job_need_competency",
+        )
+        self.assertEqual(route["route_fingerprint"], repeated["route_fingerprint"])
+
+    def test_consecutive_assistant_and_mcp_prefixes_are_removed_from_job_scope(self) -> None:
+        cases = (
+            (
+                "@AI비서 NCSMCP로 인사 직무에 필요한 역량을 알려줘.",
+                "인사",
+            ),
+            (
+                "AI비서 NCS MCP로 사회복지 업무에 필요한 역량을 알려줘.",
+                "사회복지",
+            ),
+            ("인사 직무에 필요한 역량을 알려줘.", "인사"),
+            ("NCSMCP로 인사 직무에 필요한 역량을 알려줘.", "인사"),
+        )
+
+        for query, expected_scope in cases:
+            with self.subTest(query=query):
+                route = route_ncs_query(query)
+                self.assertEqual(route["params"]["query"], expected_scope)
+                self.assertEqual(route["params"]["job_scope"], expected_scope)
+
+    def test_job_and_work_marker_particles_preserve_explicit_scope(self) -> None:
+        cases = (
+            "인사 직무의 필요역량",
+            "인사 직무에서 필요한 역량",
+            "인사 업무의 요구역량",
+            "인사 업무에서 요구되는 능력",
+            "인사 직무에 필요한 역량",
+            "인사 직무 필요역량",
+        )
+
+        for query in cases:
+            with self.subTest(query=query):
+                route = route_ncs_query(query)
+                self.assertEqual(route["params"]["query"], "인사")
+                self.assertEqual(route["params"]["job_scope"], "인사")
+                self.assertEqual(
+                    route["classification_context"]["source"],
+                    "explicit_query_job_scope",
+                )
+
+    def test_explicit_job_bars_request_scopes_quoted_leaf_without_inventing_bars(self) -> None:
+        route = route_ncs_query(
+            "NCSMCP 인사직무 필요역량의 '인사하기'를 전사 성과관리 관점에서 "
+            "고성과자의 특성으로 정의하고 팀리더와 팀원의 기대역할에 근거하여 "
+            "5단계 BARS 형태로 정의해줘."
+        )
+
+        self.assertEqual(route["scenario"], "structure_search")
+        self.assertEqual(route["tool"], "ncs_search")
+        self.assertEqual(route["params"]["query"], "인사하기")
+        self.assertEqual(route["params"]["job_scope"], "인사")
+        self.assertTrue(
+            route["classification_context"]["extraction"]["quoted_target"]
+        )
+
+    def test_bare_greeting_and_customer_greeting_do_not_infer_hr_scope(self) -> None:
+        for query in ("인사하기", "고객 접객 인사하기"):
+            with self.subTest(query=query):
+                route = route_ncs_query(query)
+                self.assertNotIn("job_scope", route["params"])
+                self.assertNotIn("classification_filter", route["params"])
+                self.assertNotEqual(
+                    route["classification_context"].get("source"),
+                    "explicit_query_job_scope",
+                )
+
     def test_routes_korean_unit_lookup_to_structure_search(self) -> None:
         cases = (
             "인사담당자 채용 직무 능력단위 찾기",
@@ -481,6 +569,419 @@ class NcsQueryRouterTests(unittest.TestCase):
         self.assertIn("current_query", route["missing_params"])
         guard = next(flag for flag in route["guard_flags"] if flag["code"] == "missing_required_params")
         self.assertIn("current_query", guard["params"])
+
+
+class ExplicitJobScopeServerRoutingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from ncs_mcp import server, tool_registry
+
+        self.server = server
+        self.tool_registry = tool_registry
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.stack.enter_context(
+            patch.object(
+                server,
+                "current_mcp_tool_surface",
+                return_value={
+                    "all_tools": sorted(tool_registry.NCS_EXECUTABLE_TOOL_NAMES)
+                },
+            )
+        )
+        self.stack.enter_context(
+            patch.object(server, "open_db", side_effect=lambda: nullcontext(object()))
+        )
+
+    @staticmethod
+    def _context(
+        *,
+        status: str = "resolved",
+        classification_filter: dict[str, str] | None = None,
+    ) -> dict[str, object]:
+        selected = (
+            {
+                "major_code": "02",
+                "middle_code": "02",
+                "small_code": "02",
+                "sub_code": "01",
+                "path_label": "경영·회계·사무 > 총무·인사 > 인사·조직 > 인사",
+                "confidence": 1.0,
+                "match_basis": ["job_scope_exact_sub_name"],
+            }
+            if status in {"resolved", "conflict"}
+            else None
+        )
+        return {
+            "schema": "ncs_search_context_v1",
+            "resolver_version": "ncs-classification-context-resolver-v1",
+            "requested": {
+                "context_text_present": False,
+                "context_text_length": 0,
+                "context_text_digest": None,
+                "job_scope": "인사",
+                "classification_filter": classification_filter,
+            },
+            "policy": {
+                "query_inference_allowed": False,
+                "soft_prior_source": "caller_supplied_context",
+                "hard_filter_source": (
+                    "caller_supplied" if classification_filter else None
+                ),
+                "lexical_tier_preserved": True,
+                "rollout_phase": "shadow",
+            },
+            "selected_candidate": selected,
+            "alternative_candidates": (
+                [
+                    {
+                        "major_code": "91",
+                        "middle_code": "01",
+                        "small_code": "01",
+                        "sub_code": "01",
+                        "confidence": 1.0,
+                    },
+                    {
+                        "major_code": "92",
+                        "middle_code": "01",
+                        "small_code": "01",
+                        "sub_code": "01",
+                        "confidence": 1.0,
+                    },
+                ]
+                if status == "ambiguous"
+                else []
+            ),
+            "alternative_count": 2 if status == "ambiguous" else 0,
+            "resolution_margin": 0.0 if status == "ambiguous" else 1.0,
+            "prior_applied": False,
+            "hard_filter_applied": bool(classification_filter),
+            "needs_context": status in {"ambiguous", "unresolved", "conflict"},
+            "status": status,
+            "warnings": [],
+        }
+
+    def test_exact_source_scope_is_promoted_to_hard_filter_deterministically(self) -> None:
+        def resolve(*_args, classification_filter=None, **_kwargs):
+            return self._context(classification_filter=classification_filter)
+
+        with patch.object(
+            self.server, "resolve_ncs_search_context", side_effect=resolve
+        ):
+            first = self.server.ncs_discover_tools(
+                "NCSMCP로 인사 직무에 필요한 역량을 알려줘."
+            )["query_route"]
+            second = self.server.ncs_discover_tools(
+                "NCSMCP로 인사 직무에 필요한 역량을 알려줘."
+            )["query_route"]
+
+        expected = {
+            "major_code": "02",
+            "middle_code": "02",
+            "small_code": "02",
+            "sub_code": "01",
+        }
+        self.assertEqual(first["params"]["query"], "인사")
+        self.assertEqual(first["params"]["classification_filter"], expected)
+        self.assertEqual(first["classification_context"]["filter"], expected)
+        self.assertEqual(
+            first["classification_context"]["mode"],
+            "source_backed_hard_filter",
+        )
+        self.assertEqual(first["route_fingerprint"], second["route_fingerprint"])
+        self.assertFalse(first["search_context"]["needs_context"])
+
+    def test_caller_filter_wins_but_conflict_requires_context(self) -> None:
+        caller_filter = {"major_code": "13"}
+
+        def resolve(*_args, classification_filter=None, **_kwargs):
+            return self._context(
+                status="conflict",
+                classification_filter=classification_filter,
+            )
+
+        with patch.object(
+            self.server, "resolve_ncs_search_context", side_effect=resolve
+        ):
+            route = self.server.ncs_discover_tools(
+                "NCSMCP로 인사 직무에 필요한 역량을 알려줘.",
+                classification_filter=caller_filter,
+            )["query_route"]
+
+        self.assertEqual(route["params"]["classification_filter"], caller_filter)
+        self.assertEqual(route["classification_context"]["filter"], caller_filter)
+        self.assertTrue(route["search_context"]["needs_context"])
+        self.assertFalse(
+            route["route_contract"]["execution_policy"]["meta_executable"]
+        )
+        self.assertIn(
+            "classification_context_needs_context",
+            {flag["code"] for flag in route["guard_flags"]},
+        )
+
+    def test_ambiguous_explicit_job_scope_is_not_promoted(self) -> None:
+        with patch.object(
+            self.server,
+            "resolve_ncs_search_context",
+            return_value=self._context(status="ambiguous"),
+        ):
+            route = self.server.ncs_discover_tools(
+                "NCSMCP로 중복기능 직무에 필요한 역량을 알려줘."
+            )["query_route"]
+
+        self.assertNotIn("classification_filter", route["params"])
+        self.assertEqual(route["search_context"]["status"], "ambiguous")
+        self.assertTrue(route["search_context"]["needs_context"])
+
+    def test_resolved_nonexact_scope_fails_closed_before_meta_handler(self) -> None:
+        context = self._context()
+        context["selected_candidate"]["confidence"] = 0.9
+        context["selected_candidate"]["match_basis"] = [
+            "job_scope_boundary_sub_name"
+        ]
+        handler = Mock(return_value={"ok": True})
+        query = "NCSMCP로 접객 직무에 필요한 역량을 알려줘."
+
+        with patch.object(
+            self.server,
+            "resolve_ncs_search_context",
+            return_value=context,
+        ), patch.dict(
+            self.server.NCS_EXECUTABLE_TOOL_HANDLERS,
+            {"ncs_search": handler},
+        ):
+            route = self.server.ncs_discover_tools(query)["query_route"]
+            result = self.server.ncs_execute_tool(
+                "ncs_search",
+                {
+                    **route["params"],
+                    "_route_query": query,
+                    "_route_fingerprint": route["route_fingerprint"],
+                },
+            )
+
+        self.assertNotIn("classification_filter", route["params"])
+        self.assertEqual(route["search_context"]["status"], "resolved")
+        self.assertTrue(route["search_context"]["needs_context"])
+        self.assertEqual(
+            route["search_context"]["promotion_status"],
+            "rejected_not_exact_unique_high_confidence",
+        )
+        self.assertFalse(
+            route["route_contract"]["execution_policy"]["meta_executable"]
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "route_context_required")
+        handler.assert_not_called()
+
+    def test_meta_execution_uses_promoted_filter_and_bound_fingerprint(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        def resolve(*_args, classification_filter=None, **_kwargs):
+            return self._context(classification_filter=classification_filter)
+
+        def fake_search(
+            query="",
+            scope="all",
+            limit=20,
+            offset=0,
+            classification_filter=None,
+            context_text=None,
+            job_scope=None,
+        ):
+            calls.append(
+                {
+                    "query": query,
+                    "classification_filter": classification_filter,
+                    "job_scope": job_scope,
+                }
+            )
+            return {
+                "ok": True,
+                "results": [
+                    {
+                        "id": "0202020101_23v3",
+                        "path": {
+                            "major_code": "02",
+                            "middle_code": "02",
+                            "small_code": "02",
+                            "sub_code": "01",
+                        },
+                    }
+                ],
+                "search_context": resolve(
+                    classification_filter=classification_filter,
+                    job_scope=job_scope,
+                ),
+            }
+
+        query = "NCSMCP로 인사 직무에 필요한 역량을 알려줘."
+        with patch.object(
+            self.server, "resolve_ncs_search_context", side_effect=resolve
+        ), patch.dict(
+            self.server.NCS_EXECUTABLE_TOOL_HANDLERS,
+            {"ncs_search": fake_search},
+        ):
+            route = self.server.ncs_discover_tools(query)["query_route"]
+            result = self.server.ncs_execute_tool(
+                "ncs_search",
+                {
+                    **route["params"],
+                    "_route_query": query,
+                    "_route_fingerprint": route["route_fingerprint"],
+                },
+            )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["query"], "인사")
+        self.assertEqual(calls[0]["job_scope"], "인사")
+        self.assertEqual(
+            calls[0]["classification_filter"],
+            {
+                "major_code": "02",
+                "middle_code": "02",
+                "small_code": "02",
+                "sub_code": "01",
+            },
+        )
+        self.assertTrue(
+            result["meta_execution"]["search_context_binding_verified"]
+        )
+
+    def test_meta_execution_stops_ambiguous_query_derived_scope(self) -> None:
+        query = "NCSMCP로 중복기능 직무에 필요한 역량을 알려줘."
+        handler = Mock(return_value={"ok": True})
+        with patch.object(
+            self.server,
+            "resolve_ncs_search_context",
+            return_value=self._context(status="ambiguous"),
+        ), patch.dict(
+            self.server.NCS_EXECUTABLE_TOOL_HANDLERS,
+            {"ncs_search": handler},
+        ):
+            route = self.server.ncs_discover_tools(query)["query_route"]
+            result = self.server.ncs_execute_tool(
+                "ncs_search",
+                {
+                    **route["params"],
+                    "_route_query": query,
+                    "_route_fingerprint": route["route_fingerprint"],
+                },
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "route_context_required")
+        handler.assert_not_called()
+
+    def test_filtered_not_found_forbids_invented_ncs_bars_evidence(self) -> None:
+        classification_filter = {
+            "major_code": "02",
+            "middle_code": "02",
+            "small_code": "02",
+            "sub_code": "01",
+        }
+        with patch.object(
+            self.server,
+            "search_ncs",
+            return_value={"results": [], "search_context": {"status": "resolved"}},
+        ):
+            result = self.server.ncs_search(
+                query="인사하기",
+                classification_filter=classification_filter,
+                job_scope="인사",
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "NOT_FOUND")
+        self.assertIn("do not create", result["ncs_evidence_guidance"])
+        description = self.tool_registry.NCS_TOOL_PROFILES["ncs_search"]["description"]
+        self.assertIn("classification_filter returned by ncs_discover_tools", description)
+        self.assertIn("filtered NOT_FOUND", description)
+
+
+class ExplicitJobScopeRealDbRegressionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        canonical_db = ROOT / "data" / "processed" / "ncs.db"
+        self.env_patch = patch.dict(
+            os.environ,
+            {"NCS_DB_PATH": str(canonical_db)},
+            clear=False,
+        )
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
+
+    def test_job_marker_particle_variants_bind_the_same_exact_hr_filter(self) -> None:
+        from ncs_mcp import server
+
+        expected_filter = {
+            "major_code": "02",
+            "middle_code": "02",
+            "small_code": "02",
+            "sub_code": "01",
+        }
+        for query in (
+            "인사 직무의 필요역량",
+            "인사 직무에서 필요한 역량",
+        ):
+            with self.subTest(query=query):
+                route = server.ncs_discover_tools(query)["query_route"]
+                result = server.ncs_execute_tool(
+                    "ncs_search",
+                    {
+                        **route["params"],
+                        "_route_query": query,
+                        "_route_fingerprint": route["route_fingerprint"],
+                    },
+                )
+
+                self.assertEqual(route["params"]["query"], "인사")
+                self.assertEqual(route["params"]["job_scope"], "인사")
+                self.assertEqual(
+                    route["params"]["classification_filter"], expected_filter
+                )
+                self.assertTrue(result["ok"], result)
+                self.assertTrue(result.get("results"), result)
+                for row in result["results"]:
+                    path = row.get("path") or {}
+                    self.assertTrue(
+                        all(path.get(key) == value for key, value in expected_filter.items()),
+                        row,
+                    )
+
+    def test_nonexact_hospitality_scope_cannot_run_unfiltered_mixed_search(self) -> None:
+        from ncs_mcp import server
+
+        query = "접객 직무 필요역량"
+        route = server.ncs_discover_tools(query)["query_route"]
+        handler = Mock(return_value={"ok": True, "results": []})
+        with patch.dict(
+            server.NCS_EXECUTABLE_TOOL_HANDLERS,
+            {"ncs_search": handler},
+        ):
+            result = server.ncs_execute_tool(
+                "ncs_search",
+                {
+                    **route["params"],
+                    "_route_query": query,
+                    "_route_fingerprint": route["route_fingerprint"],
+                },
+            )
+
+        self.assertEqual(route["params"]["query"], "접객")
+        self.assertEqual(route["params"]["job_scope"], "접객")
+        self.assertNotIn("classification_filter", route["params"])
+        self.assertEqual(route["search_context"]["status"], "resolved")
+        self.assertTrue(route["search_context"]["needs_context"])
+        self.assertEqual(
+            route["search_context"]["promotion_status"],
+            "rejected_not_exact_unique_high_confidence",
+        )
+        self.assertFalse(
+            route["route_contract"]["execution_policy"]["meta_executable"]
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "route_context_required")
+        handler.assert_not_called()
 
 
 class PlannerMetaRouteLineageTests(unittest.TestCase):

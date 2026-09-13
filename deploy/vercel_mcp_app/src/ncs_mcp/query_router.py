@@ -41,6 +41,7 @@ NCS_SEARCH_CONTEXT_SCHEMA = "ncs_search_context_v1"
 NCS_SEARCH_CONTEXT_RESOLVER_VERSION = "ncs-classification-context-resolver-v1"
 NCS_SEARCH_CONTEXT_TEXT_MAX_LENGTH = 500
 NCS_SEARCH_JOB_SCOPE_MAX_LENGTH = 100
+EXPLICIT_JOB_SCOPE_EXTRACTION_SCHEMA = "ncs_explicit_job_scope_v1"
 ROUTE_META_SAVE_FORCED_TOOLS = {
     "recommend_training_for_task",
     "recommend_training_transition",
@@ -514,6 +515,7 @@ def route_ncs_query(
 ) -> dict[str, Any]:
     normalized = normalize_query(query)
     internal_role_request = _is_internal_role_request(normalized)
+    explicit_job_request = _extract_explicit_job_scope_request(query)
     scored: list[tuple[int, int, RoutePattern]] = []
     for pattern in ROUTE_PATTERNS:
         score = _score_pattern(pattern, normalized)
@@ -530,11 +532,21 @@ def route_ncs_query(
     if internal_role_request:
         pattern = _pattern_by_scenario(EVIDENCE_ANALYSIS)
         score = max(score, 1)
+    elif explicit_job_request and not _has_explicit_training_intent(normalized):
+        # A bounded ``X job/work + required competency`` request needs source
+        # hierarchy evidence before downstream prose generation.  This also
+        # prevents unrelated transition-like particles in a long prompt from
+        # moving the request onto a planner route.
+        pattern = _pattern_by_scenario(STRUCTURE_SEARCH)
+        score = max(score, pattern.priority + 60)
     if score <= 0:
         pattern = _pattern_by_scenario(STRUCTURE_SEARCH)
         score = 1
 
     params = _params_for_pattern(pattern, query)
+    explicit_job_request = explicit_job_request if pattern.tool == "ncs_search" else None
+    if explicit_job_request:
+        params["query"] = explicit_job_request["lexical_query"]
     normalized_classification_filter = _normalize_route_classification_filter(
         classification_filter
     )
@@ -542,16 +554,29 @@ def route_ncs_query(
         context_text=context_text,
         job_scope=job_scope,
     )
+    inferred_job_scope = (
+        explicit_job_request.get("job_scope")
+        if explicit_job_request and not normalized_job_scope
+        else None
+    )
+    effective_job_scope = normalized_job_scope or inferred_job_scope
+    job_scope_source = (
+        "caller_supplied_context"
+        if normalized_job_scope
+        else "explicit_query_job_scope"
+        if inferred_job_scope
+        else None
+    )
     context_requested = bool(
         pattern.tool == "ncs_search"
-        and (normalized_context_text or normalized_job_scope)
+        and (normalized_context_text or effective_job_scope)
     )
     if pattern.tool == "ncs_search" and normalized_classification_filter:
         params["classification_filter"] = normalized_classification_filter
-    if pattern.tool == "ncs_search" and normalized_job_scope:
-        # job_scope is a short, caller-supplied product field.  Free-form
-        # context_text is deliberately represented only by its digest below.
-        params["job_scope"] = normalized_job_scope
+    if pattern.tool == "ncs_search" and effective_job_scope:
+        # job_scope is either a short caller field or a bounded explicit-query
+        # extraction. Free-form context_text is represented only by its digest.
+        params["job_scope"] = effective_job_scope
     required_params = list(pattern.required_params)
     if (
         pattern.scenario == EVIDENCE_ANALYSIS
@@ -585,7 +610,9 @@ def route_ncs_query(
         pattern,
         normalized_classification_filter,
         context_text=normalized_context_text,
-        job_scope=normalized_job_scope,
+        job_scope=effective_job_scope,
+        source=job_scope_source,
+        extraction=explicit_job_request if inferred_job_scope else None,
     )
     fingerprint_version = (
         CONTEXT_ROUTE_FINGERPRINT_VERSION
@@ -1053,13 +1080,15 @@ def _classification_context_contract(
     *,
     context_text: str | None = None,
     job_scope: str | None = None,
+    source: str | None = None,
+    extraction: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Describe the explicit classification scope supported by structure search.
 
-    The router does not infer a major from ordinary words and never invents a
-    filter.  Callers may supply ``classification_filter`` when executing the
-    routed ``ncs_search`` tool; the search layer applies it as a hard,
-    parameter-bound scope constraint.
+    The router never invents a classification filter.  It may extract a short
+    job scope only from an explicit ``X job/work + required competency``
+    request.  The server must still resolve that scope against source NCS
+    hierarchy rows before any hard filter can be promoted.
     """
     supported = pattern.tool == "ncs_search"
     normalized_filter = classification_filter if supported else {}
@@ -1069,8 +1098,8 @@ def _classification_context_contract(
             "resolver_version": NCS_SEARCH_CONTEXT_RESOLVER_VERSION,
             "supported": True,
             "parameter": "classification_filter",
-            "mode": "soft_prior_shadow",
-            "source": "caller_supplied_context",
+            "mode": "source_resolution_pending" if extraction else "soft_prior_shadow",
+            "source": source or "caller_supplied_context",
             "fields": list(SEARCH_CLASSIFICATION_FILTER_FIELDS),
             "context_fields": ["context_text", "job_scope"],
             "provided": True,
@@ -1082,15 +1111,19 @@ def _classification_context_contract(
             ),
             "resolution": None,
             "policy": {
-                "query_inference_allowed": False,
-                "soft_prior_source": "caller_supplied_context",
+                "query_inference_allowed": bool(extraction),
+                "query_inference_boundary": (
+                    "explicit_job_need_competency_pattern" if extraction else None
+                ),
+                "soft_prior_source": source or "caller_supplied_context",
                 "hard_filter_source": (
                     "caller_supplied" if normalized_filter else None
                 ),
                 "lexical_tier_preserved": True,
-                "rollout_phase": "shadow",
+                "rollout_phase": "guarded_exact_scope" if extraction else "shadow",
             },
             "prior_applied": False,
+            "extraction": extraction,
         }
     return {
         "supported": supported,
@@ -1100,6 +1133,58 @@ def _classification_context_contract(
         "fields": list(SEARCH_CLASSIFICATION_FILTER_FIELDS) if supported else [],
         "provided": bool(normalized_filter),
         "filter": normalized_filter or None,
+    }
+
+
+_EXPLICIT_JOB_SCOPE_REQUEST_RE = re.compile(
+    r"(?:^|[\s,:])"
+    r"(?:@?(?:AI\s*비서|NCS\s*MCP)(?:로|에서|를|에게)?\s*){0,2}"
+    r"(?P<job>[가-힣A-Za-z0-9][가-힣A-Za-z0-9·&/+.-]*"
+    r"(?:\s+[가-힣A-Za-z0-9][가-힣A-Za-z0-9·&/+.-]*){0,3}?)"
+    r"\s*(?P<marker>직무|업무)\s*"
+    r"(?:(?:에서|에|의)\s*)?(?:필요(?:한)?|요구(?:되는)?)?\s*"
+    r"(?:역량|능력|KSA)",
+    flags=re.IGNORECASE,
+)
+
+_EXPLICIT_JOB_SCOPE_QUOTED_TARGET_RE = re.compile(
+    r"^\s*(?:의|중|에서)?\s*['\"“‘](?P<target>[^'\"”’\r\n]{1,50})['\"”’]"
+)
+
+
+def _extract_explicit_job_scope_request(query: Any) -> dict[str, Any] | None:
+    """Extract a bounded, explicit job scope without inferring HR semantics.
+
+    This recognizes the grammatical request shape, not a vocabulary list.  A
+    value such as ``인사`` is therefore never special-cased here, and a bare
+    task such as ``인사하기`` remains an unscoped lexical query.
+    """
+    text = unicodedata.normalize("NFKC", str(query or ""))
+    match = _EXPLICIT_JOB_SCOPE_REQUEST_RE.search(text)
+    if not match:
+        return None
+    job_scope = " ".join(match.group("job").strip().split())
+    if not (2 <= len(job_scope) <= 50):
+        return None
+    _, normalized_scope = normalize_search_context_inputs(job_scope=job_scope)
+    if not normalized_scope:
+        return None
+    tail = text[match.end() : match.end() + 80]
+    quoted_target = _EXPLICIT_JOB_SCOPE_QUOTED_TARGET_RE.match(tail)
+    lexical_query = (
+        " ".join(quoted_target.group("target").strip().split())
+        if quoted_target
+        else normalized_scope
+    )
+    if not lexical_query or len(lexical_query) > 50:
+        lexical_query = normalized_scope
+    return {
+        "schema": EXPLICIT_JOB_SCOPE_EXTRACTION_SCHEMA,
+        "pattern": "job_need_competency",
+        "job_scope": normalized_scope,
+        "lexical_query": lexical_query,
+        "job_marker": match.group("marker"),
+        "quoted_target": bool(quoted_target),
     }
 
 

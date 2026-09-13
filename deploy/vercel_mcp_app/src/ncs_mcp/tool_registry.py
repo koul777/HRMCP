@@ -18,8 +18,10 @@ NCS_TOOL_PROFILES: dict[str, dict[str, Any]] = {
     "ncs_search": {
         "description": (
             "Search NCS classifications, units, elements, criteria, and KSA records. "
-            "classification_filter is a hard constraint; context_text/job_scope produce "
-            "source-backed shadow ranks only and never infer scope from the query."
+            "For explicit job scope, use the classification_filter returned by "
+            "ncs_discover_tools. Treat that filter and every returned classification path "
+            "as hard meaning boundaries; do not reinterpret a record outside its path. "
+            "A filtered NOT_FOUND provides no NCS evidence for a competency definition or BARS."
         ),
         "aliases": ["search", "classification", "unit", "criteria", "KSA"],
     },

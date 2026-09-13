@@ -113,6 +113,20 @@ def _ncs_search_markdown(
     return "\n".join(lines)
 
 
+def _ncs_search_leaf_path(row: Any, *, include_element: bool = False) -> dict[str, Any]:
+    """Expose a leaf result's source classification without another query."""
+    path = _required_runtime_helper("unit_path", _UNIT_PATH)(row)
+    path.update({"unit_code": row["unit_code"], "unit_name": row["unit_name_raw"]})
+    if include_element:
+        path.update(
+            {
+                "element_id": row["element_id"],
+                "element_name": row["element_name_raw"],
+            }
+        )
+    return path
+
+
 _NCS_SEARCH_TYPES = ("unit", "element", "criteria", "ksa")
 _NCS_SEARCH_MATCH_MODES = {
     -1: "intent_alias",
@@ -1081,6 +1095,31 @@ def _validated_ncs_search_token_expansions(
     return expansions
 
 
+def _ncs_search_leaf_token_expansions(
+    fallback_tokens: list[str],
+    token_expansions: dict[str, list[str]],
+) -> dict[str, list[str]]:
+    """Keep job-scope compound reductions out of task/evidence leaf text.
+
+    Alias validation lets a query such as ``인사업무`` recover the scoped
+    subject ``인사`` for competency-unit names and classifications.  The same
+    short form is unsafe in element, criterion, and KSA text where homographs
+    can express an unrelated action (for example a greeting).  Code-reviewed
+    equivalents that are not produced by the low-information suffix rule stay
+    available to every scope.
+    """
+    job_scope_tokens = {
+        token
+        for token in fallback_tokens
+        if _candidate_ncs_search_expansion_bases(token)
+    }
+    return {
+        token: alternatives
+        for token, alternatives in token_expansions.items()
+        if token not in job_scope_tokens
+    }
+
+
 def _ncs_search_token_idf_weights(
     conn: Any,
     fallback_tokens: list[str],
@@ -1904,6 +1943,10 @@ def search_ncs(
             conn,
             fallback_tokens,
         )
+        leaf_token_expansions = _ncs_search_leaf_token_expansions(
+            fallback_tokens,
+            token_expansions,
+        )
         token_weights = _ncs_search_token_idf_weights(
             conn,
             fallback_tokens,
@@ -2088,7 +2131,7 @@ def search_ncs(
                 columns,
                 phrase,
                 fallback_tokens,
-                token_expansions,
+                leaf_token_expansions,
                 weighted_columns=(("ce.element_name_raw", 3.0),),
                 **tier_options,
             )
@@ -2101,7 +2144,10 @@ def search_ncs(
                 conn,
                 """
                 SELECT ce.element_id, ce.element_name_raw, ce.unit_code, cu.unit_name_raw,
-                       c.major_code, c.middle_code, c.small_code, c.sub_code,
+                       c.major_code, c.major_name,
+                       c.middle_code, c.middle_name,
+                       c.small_code, c.small_name,
+                       c.sub_code, c.sub_name, c.duty_order,
                        :match_tier AS match_tier
                 FROM competency_elements ce
                 JOIN competency_units cu ON cu.unit_code = ce.unit_code
@@ -2120,10 +2166,7 @@ def search_ncs(
                         "type": "element",
                         "id": row["element_id"],
                         "text": row["element_name_raw"],
-                        "path": {
-                            "unit_code": row["unit_code"],
-                            "unit_name": row["unit_name_raw"],
-                        },
+                        "path": _ncs_search_leaf_path(row),
                         "_match_tier": int(row["match_tier"]),
                         "_classification_codes": {
                             f"{level}_code": row[f"{level}_code"]
@@ -2139,7 +2182,7 @@ def search_ncs(
                 columns,
                 phrase,
                 fallback_tokens,
-                token_expansions,
+                leaf_token_expansions,
                 weighted_columns=(
                     ("pc.criteria_text_raw", 3.0),
                     ("pc.criteria_text_refined", 3.0),
@@ -2156,7 +2199,10 @@ def search_ncs(
                 """
                 SELECT pc.criteria_id, pc.criteria_text_raw, pc.criteria_text_refined,
                        ce.element_id, ce.element_name_raw, ce.unit_code, cu.unit_name_raw,
-                       c.major_code, c.middle_code, c.small_code, c.sub_code,
+                       c.major_code, c.major_name,
+                       c.middle_code, c.middle_name,
+                       c.small_code, c.small_name,
+                       c.sub_code, c.sub_name, c.duty_order,
                        :match_tier AS match_tier
                 FROM performance_criteria pc
                 JOIN competency_elements ce ON ce.element_id = pc.element_id
@@ -2175,12 +2221,7 @@ def search_ncs(
                         "type": "criteria",
                         "id": row["criteria_id"],
                         "text": row["criteria_text_raw"],
-                        "path": {
-                            "unit_code": row["unit_code"],
-                            "unit_name": row["unit_name_raw"],
-                            "element_id": row["element_id"],
-                            "element_name": row["element_name_raw"],
-                        },
+                        "path": _ncs_search_leaf_path(row, include_element=True),
                         "_match_tier": int(row["match_tier"]),
                         "_classification_codes": {
                             f"{level}_code": row[f"{level}_code"]
@@ -2199,7 +2240,7 @@ def search_ncs(
                 columns,
                 phrase,
                 fallback_tokens,
-                token_expansions,
+                leaf_token_expansions,
                 weighted_columns=(
                     ("ki.ksa_text_raw", 3.0),
                     ("ki.ksa_text_refined", 3.0),
@@ -2216,7 +2257,10 @@ def search_ncs(
                 """
                 SELECT ki.ksa_id, ki.ksa_type_name, ki.ksa_text_raw, ki.ksa_text_refined,
                        ce.element_id, ce.element_name_raw, ce.unit_code, cu.unit_name_raw,
-                       c.major_code, c.middle_code, c.small_code, c.sub_code,
+                       c.major_code, c.major_name,
+                       c.middle_code, c.middle_name,
+                       c.small_code, c.small_name,
+                       c.sub_code, c.sub_name, c.duty_order,
                        :match_tier AS match_tier
                 FROM ksa_items ki
                 JOIN competency_elements ce ON ce.element_id = ki.element_id
@@ -2236,12 +2280,7 @@ def search_ncs(
                         "id": row["ksa_id"],
                         "text": row["ksa_text_raw"],
                         "ksa_type": row["ksa_type_name"],
-                        "path": {
-                            "unit_code": row["unit_code"],
-                            "unit_name": row["unit_name_raw"],
-                            "element_id": row["element_id"],
-                            "element_name": row["element_name_raw"],
-                        },
+                        "path": _ncs_search_leaf_path(row, include_element=True),
                         "_match_tier": int(row["match_tier"]),
                         "_classification_codes": {
                             f"{level}_code": row[f"{level}_code"]
@@ -2340,12 +2379,17 @@ def search_ncs(
     for item in page:
         counts_by_type[item["type"]] += 1
         item.pop("_classification_codes", None)
+        item_token_expansions = (
+            token_expansions
+            if item["type"] == "unit"
+            else leaf_token_expansions
+        )
         _ncs_search_match_metadata(
             item,
             query_tokens=query_tokens,
             phrase=phrase,
             match_mode=_NCS_SEARCH_MATCH_MODES[item["_match_tier"]],
-            token_expansions=token_expansions,
+            token_expansions=item_token_expansions,
             intent_expansions=intent_expansions,
             normalized=normalized_search,
         )

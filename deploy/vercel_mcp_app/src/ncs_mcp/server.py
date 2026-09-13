@@ -1698,7 +1698,13 @@ def ncs_search(
     context_text: Annotated[str | None, Field(max_length=500)] = None,
     job_scope: Annotated[str | None, Field(max_length=100)] = None,
 ) -> dict[str, Any]:
-    """명시 문맥(Shadow)과 hard filter로 NCS 구조·KSA를 검색합니다. Search NCS evidence."""
+    """Search source-backed NCS evidence within hard classification boundaries.
+
+    For explicit job scope, execute the classification_filter returned by
+    ncs_discover_tools. Never reinterpret a result outside its returned classification
+    path. A filtered NOT_FOUND is not evidence for an NCS-backed competency definition
+    or BARS.
+    """
     normalized_scope = scope if scope in {"unit", "element", "criteria", "ksa", "all"} else "all"
     if not query:
         filter_kwargs = {
@@ -1761,6 +1767,11 @@ def ncs_search(
     if not rows:
         response = not_found_response(f"NCS 검색 결과가 없습니다: {query}")
         response["search_context"] = result.get("search_context")
+        if classification_filter:
+            response["ncs_evidence_guidance"] = (
+                "Filtered NOT_FOUND means no source-backed NCS match was returned; "
+                "do not create an NCS-backed competency definition or BARS from it."
+            )
         return response
     return tool_response(
         result,
@@ -2099,6 +2110,58 @@ def _search_context_fingerprint_payload(
     }
 
 
+def _source_backed_context_filter(
+    search_context: dict[str, Any],
+) -> dict[str, str] | None:
+    """Return exact, unique NCS hierarchy codes eligible for auto scoping."""
+    if (
+        search_context.get("status") != "resolved"
+        or search_context.get("needs_context")
+    ):
+        return None
+    selected = search_context.get("selected_candidate")
+    if not isinstance(selected, dict):
+        return None
+    confidence = float(selected.get("confidence") or 0.0)
+    match_basis = selected.get("match_basis") or []
+    if confidence < 0.95 or not any(
+        str(basis).startswith("job_scope_exact_")
+        and str(basis).endswith("_name")
+        for basis in match_basis
+    ):
+        return None
+    resolved = {
+        f"{level}_code": str(selected[f"{level}_code"]).strip()
+        for level in ("major", "middle", "small", "sub")
+        if selected.get(f"{level}_code") is not None
+        and str(selected[f"{level}_code"]).strip()
+    }
+    return resolved or None
+
+
+def _append_context_guard(
+    route: dict[str, Any],
+    search_context: dict[str, Any],
+) -> None:
+    """Make unresolved query-derived scope visible and non-executable."""
+    if not search_context.get("needs_context"):
+        return
+    guard_flags = list(route.get("guard_flags") or [])
+    if not any(flag.get("code") == "classification_context_needs_context" for flag in guard_flags):
+        guard_flags.append(
+            {
+                "code": "classification_context_needs_context",
+                "severity": "high",
+                "status": search_context.get("status"),
+                "message": (
+                    "The explicit job scope could not be safely bound to one exact "
+                    "NCS classification. Clarify the scope before execution."
+                ),
+            }
+        )
+    route["guard_flags"] = guard_flags
+
+
 def _route_with_execution_scope(
     query: str,
     *,
@@ -2116,31 +2179,78 @@ def _route_with_execution_scope(
         context_text=context_text,
         job_scope=job_scope,
     )
-    normalized_context, normalized_job_scope = normalize_search_context_inputs(
+    normalized_context, caller_job_scope = normalize_search_context_inputs(
         context_text=context_text,
         job_scope=job_scope,
     )
+    route_params = dict(route.get("params") or {})
+    _, routed_job_scope = normalize_search_context_inputs(
+        job_scope=route_params.get("job_scope"),
+    )
+    normalized_job_scope = caller_job_scope or routed_job_scope
     if route.get("tool") == "ncs_search" and (
         normalized_context or normalized_job_scope
     ):
+        classification_context = dict(route.get("classification_context") or {})
+        scope_source = classification_context.get("source")
+        caller_filter = route_params.get("classification_filter")
+        caller_filter = caller_filter if isinstance(caller_filter, dict) else {}
+        resolver_filter = (
+            classification_filter
+            if isinstance(classification_filter, dict)
+            else caller_filter
+        )
         with open_db() as conn:
             search_context = resolve_ncs_search_context(
                 conn,
                 context_text=normalized_context,
                 job_scope=normalized_job_scope,
-                classification_filter=classification_filter,
+                classification_filter=resolver_filter,
             )
+            promoted_filter = None
+            if scope_source == "explicit_query_job_scope" and not caller_filter:
+                promoted_filter = _source_backed_context_filter(search_context)
+                if promoted_filter:
+                    search_context = resolve_ncs_search_context(
+                        conn,
+                        context_text=normalized_context,
+                        job_scope=normalized_job_scope,
+                        classification_filter=promoted_filter,
+                    )
+                else:
+                    search_context = dict(search_context)
+                    search_context["needs_context"] = True
+                    search_context["promotion_status"] = (
+                        "rejected_not_exact_unique_high_confidence"
+                    )
+                    warnings = list(search_context.get("warnings") or [])
+                    if "explicit_job_scope_not_safely_promotable" not in warnings:
+                        warnings.append("explicit_job_scope_not_safely_promotable")
+                    search_context["warnings"] = warnings
+        effective_filter = caller_filter or promoted_filter or {}
+        if effective_filter:
+            route_params["classification_filter"] = effective_filter
+        route_params["job_scope"] = normalized_job_scope
         fingerprint = route_fingerprint_for_payload(
             _search_context_fingerprint_payload(route, search_context)
         )
         search_context_hash = _search_context_binding_hash(search_context)
-        classification_context = dict(route.get("classification_context") or {})
         selected_candidate = search_context.get("selected_candidate") or {}
         classification_context.update(
             schema=NCS_SEARCH_CONTEXT_SCHEMA,
             resolver_version=search_context.get("resolver_version"),
-            mode="soft_prior",
-            source="caller_supplied_context",
+            mode=(
+                "source_backed_hard_filter"
+                if promoted_filter
+                else "explicit_hard_filter_with_context"
+                if caller_filter
+                else "source_resolution_needs_context"
+                if search_context.get("needs_context")
+                else "soft_prior"
+            ),
+            source=scope_source or "caller_supplied_context",
+            provided=bool(effective_filter),
+            filter=effective_filter or None,
             requested=search_context.get("requested"),
         )
         classification_context["resolution"] = {
@@ -2150,22 +2260,49 @@ def _route_with_execution_scope(
                 for level in ("major", "middle", "small", "sub")
                 if selected_candidate.get(f"{level}_code") is not None
             ],
+            "selected_filter": promoted_filter,
             "resolution_margin": search_context.get("resolution_margin"),
+            "needs_context": bool(search_context.get("needs_context")),
         }
+        context_policy = dict(classification_context.get("policy") or {})
+        context_policy.update(
+            hard_filter_source=(
+                "caller_supplied"
+                if caller_filter
+                else "source_backed_exact_job_scope"
+                if promoted_filter
+                else None
+            ),
+            promotion_requires_exact_match=True,
+            promotion_requires_unique_resolution=True,
+        )
+        classification_context["policy"] = context_policy
         contract = dict(route.get("route_contract") or {})
+        execution_policy = dict(contract.get("execution_policy") or {})
+        execution_policy.update(
+            classification_context_required=(scope_source == "explicit_query_job_scope"),
+            classification_context_satisfied=not bool(search_context.get("needs_context")),
+        )
+        if scope_source == "explicit_query_job_scope" and search_context.get(
+            "needs_context"
+        ):
+            execution_policy["meta_executable"] = False
         contract.update(
             fingerprint_version=CONTEXT_ROUTE_FINGERPRINT_VERSION,
             classification_context=classification_context,
+            execution_policy=execution_policy,
             search_context_binding_schema="ncs_search_context_binding_v1",
             search_context_hash=search_context_hash,
             route_fingerprint=fingerprint,
         )
         route.update(
+            params=route_params,
             classification_context=classification_context,
             search_context=search_context,
             route_contract=contract,
             route_fingerprint=fingerprint,
         )
+        _append_context_guard(route, search_context)
         return route
     if route.get("tool") != "plan_ncs_education_path":
         return route
@@ -2391,18 +2528,79 @@ def ncs_execute_tool(tool_name: str, params: dict[str, Any] | None = None) -> di
                 "_route_fingerprint from ncs_discover_tools."
             ),
         )
-    query_route = (
-        _route_with_execution_scope(
-            str(route_query),
+    query_route = None
+    if route_query:
+        route_query_text = str(route_query)
+        base_query_route = route_ncs_query(
+            route_query_text,
             available_tool_names=tool_registry.NCS_EXECUTABLE_TOOL_NAMES,
-            classification_filter=tool_params.get("classification_filter"),
-            context_text=tool_params.get("context_text"),
-            job_scope=tool_params.get("job_scope"),
-            execution_params=tool_params,
         )
-        if route_query
-        else None
-    )
+        query_derived_scope = (
+            (base_query_route.get("classification_context") or {}).get("source")
+            == "explicit_query_job_scope"
+        )
+        route_inputs: list[tuple[Any, Any]] = [
+            (
+                tool_params.get("classification_filter"),
+                tool_params.get("job_scope"),
+            )
+        ]
+        if query_derived_scope:
+            # Discovered query-derived params look caller-supplied when echoed
+            # back to the meta executor.  Recompute all bounded provenance
+            # interpretations and accept only the one bound by the fingerprint.
+            route_inputs = [
+                (None, None),
+                (tool_params.get("classification_filter"), None),
+                (None, tool_params.get("job_scope")),
+                (
+                    tool_params.get("classification_filter"),
+                    tool_params.get("job_scope"),
+                ),
+            ]
+        route_options: list[dict[str, Any]] = []
+        seen_route_fingerprints: set[str] = set()
+        for candidate_filter, candidate_scope in route_inputs:
+            candidate_route = _route_with_execution_scope(
+                route_query_text,
+                available_tool_names=tool_registry.NCS_EXECUTABLE_TOOL_NAMES,
+                classification_filter=candidate_filter,
+                context_text=tool_params.get("context_text"),
+                job_scope=candidate_scope,
+                execution_params=tool_params,
+            )
+            candidate_fingerprint = str(
+                candidate_route.get("route_fingerprint") or ""
+            )
+            if candidate_fingerprint in seen_route_fingerprints:
+                continue
+            seen_route_fingerprints.add(candidate_fingerprint)
+            route_options.append(candidate_route)
+            if route_fingerprint and candidate_fingerprint == str(
+                route_fingerprint
+            ):
+                break
+        if route_fingerprint:
+            query_route = next(
+                (
+                    candidate
+                    for candidate in route_options
+                    if str(candidate.get("route_fingerprint"))
+                    == str(route_fingerprint)
+                ),
+                route_options[0] if route_options else None,
+            )
+        else:
+            query_route = route_options[0] if route_options else None
+        if query_derived_scope and not route_fingerprint:
+            return error_response(
+                "context_route_binding_required",
+                tool_name=tool_name,
+                message=(
+                    "Query-derived job scope requires _route_fingerprint from "
+                    "ncs_discover_tools."
+                ),
+            )
     if route_fingerprint and not query_route:
         return error_response(
             "route_query_required_for_fingerprint",
@@ -2420,6 +2618,36 @@ def ncs_execute_tool(tool_name: str, params: dict[str, Any] | None = None) -> di
                 received_route_fingerprint=route_fingerprint,
                 route_query=route_query,
             )
+        if tool_name == "ncs_search":
+            routed_params = (
+                query_route.get("params")
+                if isinstance(query_route.get("params"), dict)
+                else {}
+            )
+            supplied_filter = tool_params.get("classification_filter")
+            routed_filter = routed_params.get("classification_filter")
+            if supplied_filter is not None and supplied_filter != routed_filter:
+                return error_response(
+                    "route_fingerprint_mismatch",
+                    tool_name=tool_name,
+                    route_fingerprint=expected_fingerprint,
+                    message="classification_filter differs from the discovered route.",
+                )
+            supplied_scope = tool_params.get("job_scope")
+            if supplied_scope is not None:
+                _, supplied_scope = normalize_search_context_inputs(
+                    job_scope=supplied_scope
+                )
+                _, routed_scope = normalize_search_context_inputs(
+                    job_scope=routed_params.get("job_scope")
+                )
+                if supplied_scope != routed_scope:
+                    return error_response(
+                        "route_fingerprint_mismatch",
+                        tool_name=tool_name,
+                        route_fingerprint=expected_fingerprint,
+                        message="job_scope differs from the discovered route.",
+                    )
         allowed_tools = _route_allowed_tools(query_route)
         if tool_name not in allowed_tools:
             return error_response(
@@ -2437,6 +2665,25 @@ def ncs_execute_tool(tool_name: str, params: dict[str, Any] | None = None) -> di
                 routed_tool=query_route.get("tool"),
                 route_fingerprint=expected_fingerprint,
             )
+        if (
+            tool_name == "ncs_search"
+            and isinstance(query_route.get("search_context"), dict)
+            and query_route["search_context"].get("needs_context")
+        ):
+            return error_response(
+                "route_context_required",
+                tool_name=tool_name,
+                route_fingerprint=expected_fingerprint,
+                context_status=query_route["search_context"].get("status"),
+                alternatives=query_route["search_context"].get(
+                    "alternative_candidates"
+                )
+                or [],
+                message=(
+                    "The explicit job scope is unresolved, ambiguous, or conflicts "
+                    "with the caller filter. Clarify the scope and rediscover the route."
+                ),
+            )
         if tool_name == query_route.get("tool"):
             route_params = query_route.get("params") if isinstance(query_route.get("params"), dict) else {}
             for key, value in route_params.items():
@@ -2448,6 +2695,13 @@ def ncs_execute_tool(tool_name: str, params: dict[str, Any] | None = None) -> di
                     tool_params.setdefault(key, value)
             if tool_name == "plan_ncs_education_path":
                 tool_params.pop("classification_filter", None)
+            elif tool_name == "ncs_search":
+                normalized_context, normalized_job_scope = (
+                    normalize_search_context_inputs(
+                        context_text=tool_params.get("context_text"),
+                        job_scope=tool_params.get("job_scope"),
+                    )
+                )
         missing_required = _route_missing_required_params(query_route, tool_params)
         if missing_required:
             return error_response(
