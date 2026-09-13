@@ -21,7 +21,7 @@ NCS_TOOL_PROFILES: dict[str, dict[str, Any]] = {
             "For explicit job scope, use the classification_filter returned by "
             "ncs_discover_tools. Treat that filter and every returned classification path "
             "as hard meaning boundaries; do not reinterpret a record outside its path. "
-            "A filtered NOT_FOUND provides no NCS evidence for a competency definition or BARS."
+            "A filtered NOT_FOUND provides no evidence for a downstream NCS-backed claim."
         ),
         "aliases": ["search", "classification", "unit", "criteria", "KSA"],
     },

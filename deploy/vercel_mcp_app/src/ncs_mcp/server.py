@@ -1702,8 +1702,7 @@ def ncs_search(
 
     For explicit job scope, execute the classification_filter returned by
     ncs_discover_tools. Never reinterpret a result outside its returned classification
-    path. A filtered NOT_FOUND is not evidence for an NCS-backed competency definition
-    or BARS.
+    path. A filtered NOT_FOUND is not evidence for any downstream NCS-backed claim.
     """
     normalized_scope = scope if scope in {"unit", "element", "criteria", "ksa", "all"} else "all"
     if not query:
@@ -1770,7 +1769,7 @@ def ncs_search(
         if classification_filter:
             response["ncs_evidence_guidance"] = (
                 "Filtered NOT_FOUND means no source-backed NCS match was returned; "
-                "do not create an NCS-backed competency definition or BARS from it."
+                "do not use it as evidence for a downstream NCS-backed claim."
             )
         return response
     return tool_response(

@@ -274,7 +274,7 @@
       "categories": [
         "ncs_structure_search"
       ],
-      "description": "Search NCS classifications, units, elements, criteria, and KSA records. For explicit job scope, use the classification_filter returned by ncs_discover_tools. Treat that filter and every returned classification path as hard meaning boundaries; do not reinterpret a record outside its path. A filtered NOT_FOUND provides no NCS evidence for a competency definition or BARS.",
+      "description": "Search NCS classifications, units, elements, criteria, and KSA records. For explicit job scope, use the classification_filter returned by ncs_discover_tools. Treat that filter and every returned classification path as hard meaning boundaries; do not reinterpret a record outside its path. A filtered NOT_FOUND provides no evidence for a downstream NCS-backed claim.",
       "executable_via_meta": true,
       "meta_compact_default": false,
       "meta_save_forced_false": false,

@@ -1138,7 +1138,7 @@ def _classification_context_contract(
 
 _EXPLICIT_JOB_SCOPE_REQUEST_RE = re.compile(
     r"(?:^|[\s,:])"
-    r"(?:@?(?:AI\s*비서|NCS\s*MCP)(?:로|에서|를|에게)?\s*){0,2}"
+    r"(?:@?NCS\s*MCP(?:로|에서|를|에게)?\s*)?"
     r"(?P<job>[가-힣A-Za-z0-9][가-힣A-Za-z0-9·&/+.-]*"
     r"(?:\s+[가-힣A-Za-z0-9][가-힣A-Za-z0-9·&/+.-]*){0,3}?)"
     r"\s*(?P<marker>직무|업무)\s*"

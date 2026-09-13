@@ -302,18 +302,11 @@ class NcsQueryRouterTests(unittest.TestCase):
         )
         self.assertEqual(route["route_fingerprint"], repeated["route_fingerprint"])
 
-    def test_consecutive_assistant_and_mcp_prefixes_are_removed_from_job_scope(self) -> None:
+    def test_optional_mcp_prefix_is_removed_from_job_scope(self) -> None:
         cases = (
-            (
-                "@AI비서 NCSMCP로 인사 직무에 필요한 역량을 알려줘.",
-                "인사",
-            ),
-            (
-                "AI비서 NCS MCP로 사회복지 업무에 필요한 역량을 알려줘.",
-                "사회복지",
-            ),
             ("인사 직무에 필요한 역량을 알려줘.", "인사"),
             ("NCSMCP로 인사 직무에 필요한 역량을 알려줘.", "인사"),
+            ("NCS MCP로 사회복지 업무에 필요한 역량을 알려줘.", "사회복지"),
         )
 
         for query, expected_scope in cases:
@@ -342,11 +335,10 @@ class NcsQueryRouterTests(unittest.TestCase):
                     "explicit_query_job_scope",
                 )
 
-    def test_explicit_job_bars_request_scopes_quoted_leaf_without_inventing_bars(self) -> None:
+    def test_explicit_job_request_scopes_quoted_leaf(self) -> None:
         route = route_ncs_query(
-            "NCSMCP 인사직무 필요역량의 '인사하기'를 전사 성과관리 관점에서 "
-            "고성과자의 특성으로 정의하고 팀리더와 팀원의 기대역할에 근거하여 "
-            "5단계 BARS 형태로 정의해줘."
+            "NCSMCP 인사직무 필요역량의 '인사하기'에 해당하는 "
+            "NCS 원문 근거를 찾아줘."
         )
 
         self.assertEqual(route["scenario"], "structure_search")
@@ -873,7 +865,7 @@ class ExplicitJobScopeServerRoutingTests(unittest.TestCase):
         self.assertEqual(result["error"]["code"], "route_context_required")
         handler.assert_not_called()
 
-    def test_filtered_not_found_forbids_invented_ncs_bars_evidence(self) -> None:
+    def test_filtered_not_found_forbids_unsupported_downstream_claims(self) -> None:
         classification_filter = {
             "major_code": "02",
             "middle_code": "02",
@@ -893,7 +885,7 @@ class ExplicitJobScopeServerRoutingTests(unittest.TestCase):
 
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"]["code"], "NOT_FOUND")
-        self.assertIn("do not create", result["ncs_evidence_guidance"])
+        self.assertIn("do not use it as evidence", result["ncs_evidence_guidance"])
         description = self.tool_registry.NCS_TOOL_PROFILES["ncs_search"]["description"]
         self.assertIn("classification_filter returned by ncs_discover_tools", description)
         self.assertIn("filtered NOT_FOUND", description)
