@@ -980,6 +980,14 @@ def _candidate_ncs_search_expansion_bases(token: str) -> list[str]:
     return candidates
 
 
+def _ncs_search_morphology_compound_bases(stem: str) -> list[str]:
+    """Bound a stripped compound's recall to one non-generic subject noun."""
+    return [
+        base for base in _candidate_ncs_search_expansion_bases(stem)
+        if base.casefold() not in _NCS_SEARCH_GENERIC_TOKENS
+    ][:1]
+
+
 def _validated_ncs_search_token_expansions(
     conn: Any,
     fallback_tokens: list[str],
@@ -1365,7 +1373,7 @@ def _normalized_ncs_search_params(params: dict[str, Any]) -> dict[str, Any]:
     """Keep original code binds while normalizing text binds once per tier."""
     result = dict(params)
     for key, value in params.items():
-        if key == "phrase_term" or key.startswith(("token_", "expanded_", "intent_", "morphology_")):
+        if key == "phrase_term" or key.startswith(("token_", "expanded_", "intent_", "morphology_", "compound_base_")):
             result[f"{key}_raw"] = value
             result[key] = normalize_search_text(value)
     # phrase_pattern is the legacy unit-order tiebreak, not a text prefilter.
@@ -1466,15 +1474,52 @@ def _ncs_search_tier_predicates(
         morphology_groups = []
         morphology_tokens = []
         morphology_parameter_groups = []
+        compound_score_terms = []
+        field_weights = dict(weighted_columns or ())
         for index, token in enumerate(fallback_tokens):
             stem = morphology.get(token, [token])[0]
             parameter = f"morphology_{index}"
             morphology_params[parameter] = stem
             morphology_tokens.append(stem)
             morphology_parameter_groups.append([parameter])
-            morphology_groups.append(
-                _ncs_search_boundary_any(columns, parameter, normalized=normalized)
-            )
+            group = _ncs_search_boundary_any(columns, parameter, normalized=normalized)
+            # A redundant workflow suffix may hide an official unit subject.
+            # Expand only within the weakest unit tier, and only against the
+            # unit name or an exact alias belonging to that same unit. Never
+            # search the shorter base across definitions/classifications.
+            if token in morphology and "cu.unit_name_raw" in columns:
+                for base in _ncs_search_morphology_compound_bases(stem):
+                    base_parameter = f"compound_base_{index}"
+                    morphology_params[base_parameter] = base
+                    if not normalized:
+                        morphology_params[f"{base_parameter}_raw"] = base
+                    name_match = _ncs_search_boundary_any(
+                        ("cu.unit_name_raw",), base_parameter, normalized=normalized,
+                    )
+                    alias_match = f"""(aliases.alias_search_text IS NOT NULL AND EXISTS (
+                        SELECT 1 FROM ncs_query_aliases compound_alias
+                        WHERE compound_alias.unit_code = cu.unit_code AND (
+                            compound_alias.alias_text COLLATE NOCASE = :{base_parameter}_raw
+                            OR compound_alias.normalized_query COLLATE NOCASE = :{base_parameter}_raw
+                        )
+                    ))"""
+                    group = f"({group} OR {name_match} OR {alias_match})"
+                    for field, match, weight in (
+                        ("cu.unit_name_raw", name_match, "name"),
+                        ("aliases.alias_search_text", alias_match, "alias"),
+                    ):
+                        original_match = _ncs_search_boundary_any(
+                            (field,), parameter, normalized=normalized,
+                        )
+                        weight_parameter = f"rank_compound_{weight}_{index}"
+                        morphology_params[weight_parameter] = field_weights.get(field, 3.0)
+                        # Credit a field at most once per query token, even if
+                        # both the full stem and its compound base match it.
+                        compound_score_terms.append(
+                            f"CASE WHEN {match} AND NOT {original_match} "
+                            f"THEN :{weight_parameter} ELSE 0 END"
+                        )
+            morphology_groups.append(group)
         morphology_score, morphology_meaningful, morphology_weights = (
             _ncs_search_fallback_ranking(
                 weighted_columns or tuple((column, 1.0) for column in columns),
@@ -1483,6 +1528,8 @@ def _ncs_search_tier_predicates(
             )
         )
         morphology_params.update(morphology_weights)
+        if compound_score_terms:
+            morphology_score += " + " + " + ".join(compound_score_terms)
         if normalized:
             morphology_params = _normalized_ncs_search_params(morphology_params)
         morphology_params = {**params, **morphology_params}
@@ -1609,9 +1656,15 @@ def _ncs_search_match_metadata(
     )
     if match_mode == "morphology_fill":
         active_expansions = _ncs_search_morphology_expansions(query_tokens)
+        if item.get("type") == "unit":
+            active_expansions = {
+                token: [*stems, *_ncs_search_morphology_compound_bases(stems[0])]
+                for token, stems in active_expansions.items()
+            }
     matched_tokens: list[str] = []
     matched_expansions: list[dict[str, Any]] = []
     matched_terms: list[str] = []
+    matched_term_fields: dict[str, set[str]] = {}
     if match_mode == "intent_alias":
         for expansion in intent_expansions or []:
             normalized_expansion = expansion.casefold()
@@ -1624,6 +1677,7 @@ def _ncs_search_match_metadata(
             if not expansion_fields:
                 continue
             matched_terms.append(normalized_expansion)
+            matched_term_fields.setdefault(normalized_expansion, set()).update(expansion_fields)
             matched_expansions.append(
                 {
                     "query": phrase,
@@ -1641,19 +1695,27 @@ def _ncs_search_match_metadata(
         if direct_fields:
             matched_tokens.append(token)
             matched_terms.append(normalized_token)
+            matched_term_fields.setdefault(normalized_token, set()).update(direct_fields)
             continue
         for expansion in active_expansions.get(token, []):
             normalized_expansion = expansion.casefold()
+            compound_base = (
+                match_mode == "morphology_fill"
+                and item.get("type") == "unit"
+                and expansion != active_expansions[token][0]
+            )
             expansion_fields = [
                 field_name
                 for field_name, value in normalized_fields.items()
                 if normalized_expansion
+                and (not compound_base or field_name in {"unit_name", "alias"})
                 and matches(field_name, value, normalized_expansion)
             ]
             if not expansion_fields:
                 continue
             matched_tokens.append(token)
             matched_terms.append(normalized_expansion)
+            matched_term_fields.setdefault(normalized_expansion, set()).update(expansion_fields)
             matched_expansions.append(
                 {
                     "token": token,
@@ -1673,7 +1735,7 @@ def _ncs_search_match_metadata(
         match_fields = [
             field_name
             for field_name, value in normalized_fields.items()
-            if any(matches(field_name, value, term) for term in matched_terms)
+            if any(field_name in matched_term_fields.get(term, set()) for term in matched_terms)
         ]
     item.pop("_match_tier", None)
     item["match_mode"] = match_mode

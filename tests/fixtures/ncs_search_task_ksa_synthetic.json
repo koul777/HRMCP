@@ -1,0 +1,16 @@
+{
+  "schema": "ncs_search_task_ksa_synthetic_v1",
+  "provenance": "Independently authored synthetic HR requests; no holdout or relevance labels inspected.",
+  "non_holdout": true,
+  "cases": [
+    {"id": "synthetic_recruiting", "query": "채용 면접 평가 기준", "classification_filter": {"major_code": "02"}},
+    {"id": "synthetic_payroll", "query": "급여 지급 자료 검토", "classification_filter": {"major_code": "02"}},
+    {"id": "synthetic_training", "query": "교육 요구 조사 계획", "classification_filter": {"major_code": "02"}},
+    {"id": "synthetic_labor", "query": "노사 협의 안건 작성", "classification_filter": {"major_code": "02"}},
+    {"id": "synthetic_staffing", "query": "인력 수요 분석 계획", "classification_filter": null},
+    {"id": "synthetic_performance", "query": "성과 평가 결과 분석", "classification_filter": {"major_code": "02"}},
+    {"id": "synthetic_generic_control", "query": "자료 관리", "classification_filter": {"major_code": "02"}},
+    {"id": "synthetic_empty_control", "query": "존재하지않는합성인사질의987654", "classification_filter": {"major_code": "02"}},
+    {"id": "synthetic_scope_control", "query": "채용 면접 평가 기준", "classification_filter": {"major_code": "20"}}
+  ]
+}

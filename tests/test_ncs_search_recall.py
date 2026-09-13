@@ -1459,6 +1459,82 @@ class NcsSearchRecallTests(unittest.TestCase):
 
         self.assertIs(server.search_ncs, package_search_ncs)
 
+    def test_morphology_compound_uses_direct_name_and_preserves_full_definition_hit(self) -> None:
+        with self._open_db() as conn:
+            conn.executemany("INSERT INTO competency_units VALUES (?, ?, ?, '4', 1)", (
+                ("M_COMPOUND_NAME", "광학교정", "장치 검사"),
+                ("M_FULL_DEFINITION", "기타수행", "광학교정업무"),
+                ("M_BASE_DEFINITION", "기록보관", "광학교정"),
+                ("M_EMBEDDED_NAME", "초광학교정", "장치 검사"),
+            ))
+            conn.commit()
+        query = "광학교정업무를"
+        with patch.object(search_core, "_ncs_search_morphology_compound_bases", return_value=[]):
+            before = server.search_ncs(query, scope="unit", limit=10)
+        self.assertEqual([row["id"] for row in before["results"]], ["M_FULL_DEFINITION"])
+        result = server.search_ncs(query, scope="unit", limit=10)
+        self.assertEqual([row["id"] for row in result["results"]], ["M_COMPOUND_NAME", "M_FULL_DEFINITION"])
+        self.assertEqual(result["results"][1], before["results"][0])
+        self.assertEqual(result["results"][0]["matched_expansions"], [{
+            "token": query, "matched_as": "광학교정", "match_fields": ["unit_name"],
+        }])
+        self.assertEqual(result["query_tokens"], [query])
+        with self._open_db() as conn:
+            self._add_normalized_columns(conn)
+            conn.commit()
+        self.assertEqual(server.search_ncs(query, scope="unit", limit=10), result)
+        self.assertEqual(server.search_ncs(query, scope="unit", classification_filter={"major_code": "99"})["returned"], 0)
+
+    def test_morphology_compound_uses_only_existing_alias_on_its_own_unit(self) -> None:
+        with self._open_db() as conn:
+            conn.execute("INSERT INTO competency_units VALUES ('M_FOREIGN_ALIAS', '대상선발', '인력채용', '4', 1)")
+            conn.execute("UPDATE competency_units SET api_definition = '인력채용 절차' WHERE unit_code = 'U_HIRE_1'")
+            conn.commit()
+        query = "인력채용관리를"
+        result = server.search_ncs(query, scope="unit", limit=10)
+        self.assertEqual([row["id"] for row in result["results"]], ["U_HIRE_1"])
+        self.assertEqual(result["results"][0]["matched_expansions"], [{
+            "token": query, "matched_as": "인력채용", "match_fields": ["alias"],
+        }])
+        with self._open_db() as conn:
+            self._add_normalized_columns(conn)
+            conn.commit()
+        self.assertEqual(server.search_ncs(query, scope="unit", limit=10), result)
+
+    def test_morphology_compound_preserves_all_lexical_prefixes_and_sql_count(self) -> None:
+        with self._open_db() as conn:
+            conn.executemany("INSERT INTO competency_units VALUES (?, ?, ?, '4', 1)", (
+                ("M_COMPOUND_NAME", "광학교정", "장비"),
+                ("M_ORIGINAL", "광학교정업무를 검토", "검토"),
+            ))
+            conn.execute("INSERT INTO competency_elements VALUES (200, '광학교정업무를 검토', 'M_ORIGINAL')")
+            conn.execute("INSERT INTO performance_criteria VALUES (200, '광학교정업무를 검토', NULL, 200)")
+            conn.commit()
+        for query in ("광학교정업무를", "검토 광학교정업무를", "광학교정업무를 장비로"):
+            for scope in ("unit", "all"):
+                with self.subTest(query=query, scope=scope):
+                    self.sql_statements.clear()
+                    with patch.object(search_core, "_ncs_search_morphology_compound_bases", return_value=[]):
+                        before = server.search_ncs(query, scope=scope, limit=20)
+                    statement_count = len(self.sql_statements)
+                    self.sql_statements.clear()
+                    after = server.search_ncs(query, scope=scope, limit=20)
+                    self.assertEqual(len(self.sql_statements), statement_count)
+                    original = [row for row in before["results"] if row["match_mode"] != "morphology_fill"]
+                    self.assertEqual(after["results"][:len(original)], original)
+                    if before["match_mode"] in ("phrase", "token_and"):
+                        self.assertEqual(after, before)
+
+    def test_morphology_compound_rejects_generic_roots_and_keeps_all_query_terms(self) -> None:
+        self.assertEqual(search_core._ncs_search_morphology_compound_bases("관리업무"), [])
+        self.assertEqual(search_core._ncs_search_morphology_compound_bases("광학교정관리소"), [])
+        self.assertEqual(search_core._ncs_search_morphology_compound_bases("광학교정업무"), ["광학교정"])
+        with self._open_db() as conn:
+            conn.execute("INSERT INTO competency_units VALUES ('M_COMPOUND_NAME', '광학교정', '장비 검사', '4', 1)")
+            conn.commit()
+        self.assertEqual(server.search_ncs("광학교정업무를 희귀재료를", scope="unit")["returned"], 0)
+        self.assertEqual(server.search_ncs("광학교정업무를", scope="element")["returned"], 0)
+
 
 class NcsSearchHybridRecallTests(NcsSearchRecallTests):
     """Run the same ranking/Unicode/evidence contract against v2 storage."""
