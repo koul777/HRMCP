@@ -118,6 +118,7 @@ Builder/Publisher 스크립트와 Vercel CLI는 구현 구성요소이지 운영
 
 ### 변경 이력
 
+- **2026-09-13**: 검색 개선 코드 commit `3983983a34863e59d432626700883786bc5546d3`를 Builder 단일 경로로 `ncs-mcp-bridge-mini2` production에 배포했습니다. Builder 데이터 버전은 `20260912_231258_f2fee72e`, Vercel deployment는 `dpl_EjBHSH4T7yND4MQVKp3TQX5gbazp`, 서버 build ID는 `0813c0c8014f4c62870ead373597d8b1`입니다. canonical endpoint의 health·ready·MCP 초기화, 공개 도구 7/7개와 실제 호출 12건을 배포 후 재검증했습니다.
 - **2026-09-13**: 한국어 조사 때문에 기존 검색이 비어 버리는 경우를 보완하는 `morphology_fill` 단계를 추가했습니다. 기존 intent·문구·AND·확장 AND 결과와 토큰 OR 순서는 그대로 유지하고, OR 결과가 요청 한도보다 적을 때만 조사 제거 후보를 뒤에 추가합니다. 조사 제거는 최대 4토큰, 토큰당 1회, 최소 2음절, 받침 조건과 전체 검색어 일치를 요구하며 원 질의·DB·alias는 변경하지 않습니다.
 - **2026-09-13**: 24개 NCS 대분류에서 만든 비-holdout 조사 변형 48건으로 검증한 결과 Hit@1은 `0.5000→0.5417`, Hit@3는 `0.5833→0.6250`, MRR@20은 `0.5525→0.5941`, 빈 응답은 `10→8`로 개선됐습니다. 기존 결과 prefix와 행 메타데이터는 48/48건 모두 보존됐습니다. 고정 40개 개발셋은 Hit@1 `0.775`, Hit@3 `0.875`, MRR@20 `0.8244`로 회귀가 없었고, 51개 독립 holdout은 `0.549 / 0.6078 / 0.5903`으로 변동 없이 남았습니다. holdout 사례를 보고 alias를 추가하지 않았습니다.
 - **2026-09-13**: `context_text`·`job_scope` shadow 경로를 보조 SQL까지 포함해 계측했습니다. 공개 결과 순서와 분류 hard filter는 각각 100% 보존됐지만, compact DB 4개 비-holdout synthetic 질의×7회에서 p50/p95가 `450.491/797.842ms→561.086/895.279ms`로 늘고 보조 SQL이 `2→3회`가 되어 랭킹 승격은 계속 **HOLD**입니다.
@@ -184,9 +185,10 @@ holdout은 전후 비교에만 사용하며 결과를 보고 alias를 추가하�
 보조 SQL이 1회 늘어 승격 기준을 넘었으므로 public reranking은 HOLD 상태입니다.
 
 Vercel에는 전체 원본 DB가 아니라 검증된 compact SQLite snapshot을 배포합니다. 현재 snapshot은
-`446,017,536 bytes`, 압축 ZIP은 `125,839,523 bytes`이며, 빌드 하드 캡은 `480 MB`, 소프트 캡은
-`460 MB`입니다. FTS5 인덱스는 배포 시 `/tmp` 여유와 콜드스타트 안정성을 해칠 수 있어 현재 릴리스에는
-포함하지 않았습니다. 무결성 확인을 위한 SHA-256과 `fsync`는 유지합니다.
+`478,756,864 bytes`, 압축 ZIP은 `128,894,654 bytes`입니다. 빌드 하드 캡 `480 MB`까지 남은 여유는
+`1,243,136 bytes`뿐이고 소프트 캡 `460 MB`는 넘었으므로 다음 데이터 갱신 전 축소 기준을 재점검해야 합니다.
+FTS5 인덱스는 배포 시 `/tmp` 여유와 콜드스타트 안정성을 해칠 수 있어 현재 릴리스에는 포함하지 않았습니다.
+무결성 확인을 위한 SHA-256과 `fsync`는 유지합니다.
 
 readiness는 검증된 manifest의 물리·서비스 가능 행 수를 빠른 경로로 사용하고, override DB, manifest 불일치,
 최소 행 수 미달 시 실제 SQL `COUNT`로 되돌아갑니다. production alias는 preview 성능 게이트를 통과한
@@ -208,6 +210,26 @@ readiness는 검증된 manifest의 물리·서비스 가능 행 수를 빠른 �
 `human_reviewed`, `accepted`, `reviewed` 상태를 기록하지 않습니다. 코드와 데이터의 권리 경계는
 [코드 라이선스·데이터 출처·면책](#-코드-라이선스데이터-출처면책), [NOTICE](NOTICE),
 [데이터 출처·이용조건 고지](DATA_SOURCE_NOTICE.md)를 따릅니다.
+
+---
+
+## 🌱 학습 지향 역량 시스템으로의 제품 방향
+
+현재 구현된 제품은 조직의 직무를 NCS 과업·수행준거·KSA와 연결하고, 현재·목표 직무 사이에서 확인할
+학습 항목과 교육과정을 추천하는 기반 엔진입니다. 이때 직무 간 KSA 차이는 구성원의 실제 약점 판정이
+아니라 학습 설계를 위한 후보입니다. 구성원이 자신의 보유 역량과 지원이 필요한 영역을 안전하게 공개하고
+학습 결과까지 관리하는 개인화 사내 시스템은 아직 구현 완료 상태가 아닙니다.
+
+향후 제품은 `직무·과업 정의 → 본인만 보는 역량·학습 프로필 → 항목별 공유 동의와 수신자 미리보기 →
+동의된 근거에 한한 갭 분석·교육 추천 → 구성원의 수정·이의제기·철회 → 코치·교육담당자의 사람 검토 →
+소집단을 보호한 집계와 학습 효과 측정`을 하나의 흐름으로 개발합니다.
+
+개인 프로필은 기본 비공개이며 공용 NCS 데이터와 Vercel snapshot에서 분리합니다. 미응답·정보 없음은
+부족 역량으로 판정하지 않고, 현재 직무를 맡았다는 사실만으로 개인이 모든 관련 KSA를 보유했다고 자동
+간주하지 않습니다. 공유를 거절해도 일반 NCS 탐색과 교육 검색을 사용할 수 있어야 합니다. 성과평가·징계·
+보상·승진을 위한 약점 조회나 대량 추출은 제품 경계에서 제한하고, 자동 결과는 사람의 승인 상태로 승격하지
+않습니다. 학습 지향 문화가 실제로 확보됐다는 판단은 코드 존재가 아니라 비보복 운영, 구성원의 통제권과
+피드백, 사람 검토 증거로 확인합니다.
 
 ---
 
@@ -466,11 +488,11 @@ ChatGPT 연결은 주소 한 줄(`/api/mcp`)만 넣으면 됩니다. 전체 배�
 
 - 기준 입력은 운영자가 준비한 단일 canonical DB `data/processed/ncs.db`
   (12,680,593,408 bytes)입니다. Publisher가 이를 stage·verify한 뒤 compact SQLite
-  (446,017,536 bytes)와 `api/ncs_ontology_compact.zip`(125,839,523 bytes), manifest
+  (478,756,864 bytes)와 `api/ncs_ontology_compact.zip`(128,894,654 bytes), manifest
   쌍을 원자적으로 publish합니다. 실패하면 기존 쌍을 rollback합니다.
 - `deploy/vercel_mcp_app/vercel.json`은 함수 진입점(`api/index.py`)과 ZIP/manifest
-  포함 규칙을 정의합니다. 측정된 production function file mapping은 175,195,865 bytes,
-  1,836개 파일이며 500,000,000 bytes 상한 검사를 통과했습니다.
+  포함 규칙을 정의합니다. 측정된 production function file mapping은 178,567,716 bytes,
+  1,848개 파일이며 500,000,000 bytes 상한 검사를 통과했습니다.
 - `api/mcp.py`는 시작 시 ZIP과 manifest를 검증한 뒤 `/tmp/ncs_ontology_compact.db`에
   DB를 materialize하여 read-only로 엽니다. 요청 시 NCS API를 수집하거나 AI 모델을
   호출하지 않습니다. `NCS_DB_URL`은 표준 배포 의존성이 아닙니다.
@@ -656,9 +678,9 @@ Vercel에는 전체 운영 DB 대신 온톨로지와 교육 추천에 필요한 
 처리합니다.
 
 릴리스는 추적된 파일만 복사한 clean staging에서 조립하며, 실제 Vercel `filePathMap`에서 원본 DB가
-0건인지 확인합니다. 현재 검증된 함수 매핑 총량은 175,195,865 bytes이고, 런타임에 펼쳐지는
-SQLite는 446,017,536 bytes입니다. 압축 해제 공간의 여유가 크지 않으므로 DB가 증가하면 Builder의
-축소 기준과 `/tmp` 사용량을 다시 점검해야 합니다.
+0건인지 확인합니다. 현재 검증된 함수 매핑 총량은 178,567,716 bytes이고, 런타임에 펼쳐지는
+SQLite는 478,756,864 bytes입니다. Builder의 480 MB 하드 캡까지 여유가 1,243,136 bytes뿐이므로
+DB가 증가하기 전에 축소 기준과 `/tmp` 사용량을 다시 점검해야 합니다.
 
 - [경량 DB Builder·Refresh Builder·Vercel 배포 절차](docs/VERCEL_SNAPSHOT_BUILDER.md)
 - [Vercel 배포 구조·전체 포함 데이터·운영 범위](docs/README_VERCEL_HTTPS.md)
