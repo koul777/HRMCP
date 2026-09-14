@@ -23,6 +23,7 @@ from ncs_mcp.agent_queue import build_agent_queue_status_from_file
 from scripts.export_mcp_tool_contract import build_contract
 from scripts.release_readiness_report import (
     _command_option_value,
+    _aihr_demo_internal_names,
     _dashboard_verification_lineage_contract,
     _guarded_preflight_from_status_item,
     _preflight_for_action,
@@ -1675,6 +1676,15 @@ def required_quality_gates(*, human_review_status: str = "pass", qualification_v
 
 
 class ReleaseReadinessReportTests(unittest.TestCase):
+    def test_demo_internal_names_match_continuation_writer(self) -> None:
+        self.assertEqual(
+            _aihr_demo_internal_names("aihr_plan_demo_20260914_continuation"),
+            (
+                "aihr_plan_demo_20260914_continuation_internal.json",
+                "aihr_plan_demo_20260914_continuation_alias_internal.json",
+            ),
+        )
+
     def test_dashboard_surface_contract_validates_live_scenarios_and_queue_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "dashboard_verification.json"

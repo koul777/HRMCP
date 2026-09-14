@@ -959,9 +959,21 @@ def _aihr_demo_internal_names(base_name: str) -> tuple[str, str]:
     prefix = "aihr_plan_demo_"
     if base_name.startswith(prefix) and len(base_name) > len(prefix):
         suffix = base_name[len(prefix) :]
+        # Keep the historical date-only artifact names for compatibility,
+        # but mirror ncs_harness.aihr_internal_artifact_path for continuation
+        # stamps (for example ``20260914_continuation``).  The latter writes
+        # ``<base>_internal.json`` and ``<base>_alias_internal.json``.
+        date_parts = suffix.rsplit("_", 1)
+        date_only = len(suffix) == 8 and suffix.isdigit()
+        dated_stamp = len(date_parts) == 2 and len(date_parts[1]) == 8 and date_parts[1].isdigit()
+        if date_only or dated_stamp:
+            return (
+                f"aihr_plan_demo_internal_{suffix}.json",
+                f"aihr_plan_demo_alias_internal_{suffix}.json",
+            )
         return (
-            f"aihr_plan_demo_internal_{suffix}.json",
-            f"aihr_plan_demo_alias_internal_{suffix}.json",
+            f"{base_name}_internal.json",
+            f"{base_name}_alias_internal.json",
         )
     return f"{base_name}_internal.json", f"{base_name}_alias_internal.json"
 

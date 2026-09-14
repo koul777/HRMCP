@@ -61,6 +61,17 @@ GUARDED_MANUAL_MUTATION_POLICIES = {
 }
 AGENT_QUEUE_RUN_SCHEMA = "aihr_agent_queue_run_v1"
 AGENT_QUEUE_RUN_OUTPUT_TAIL_LIMIT = 2000
+# Delivery metadata is appended by the harness when the status snapshot is
+# written to disk.  It is not part of the queue state and must not make a
+# subsequent run appear unlinked to its status artifact.
+AGENT_QUEUE_STATUS_SNAPSHOT_HASH_EXCLUDED_FIELDS = (
+    "out_path",
+    "markdown_path",
+    "csv_path",
+    "html_path",
+    "audit_path",
+    "audit_markdown_path",
+)
 REVIEW_SEEDPACK_BLANK_DECISION_FIELDS = (
     "decision",
     "reviewer_id",
@@ -851,6 +862,23 @@ def _canonical_json_sha256(payload: Any) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _agent_queue_status_snapshot_sha256(payload: Any) -> str:
+    """Hash queue state while ignoring report-delivery metadata.
+
+    ``agent-queue-status`` adds output paths after building the state object,
+    whereas ``agent-queue-run-ready`` hashes the in-memory state before those
+    paths are attached.  Keeping the projection here aligned with the harness
+    makes the run/status lineage check stable without weakening any safety
+    flags or review gates.
+    """
+    if not isinstance(payload, dict):
+        return _canonical_json_sha256(payload)
+    projected = dict(payload)
+    for key in AGENT_QUEUE_STATUS_SNAPSHOT_HASH_EXCLUDED_FIELDS:
+        projected.pop(key, None)
+    return _canonical_json_sha256(projected)
 
 
 def _short_text(value: str, *, limit: int = AGENT_QUEUE_RUN_OUTPUT_TAIL_LIMIT) -> str:
@@ -1945,7 +1973,7 @@ def run_agent_queue_ready_from_file(
     resolved_queue_path = _resolve_workspace_file_path(queue_path, workspace)
     source_queue_sha256 = "sha256:" + hashlib.sha256(resolved_queue_path.read_bytes()).hexdigest()
     status = build_agent_queue_status_from_file(resolved_queue_path, workspace=workspace)
-    queue_status_snapshot_sha256 = _canonical_json_sha256(status)
+    queue_status_snapshot_sha256 = _agent_queue_status_snapshot_sha256(status)
     items_by_id = {str(item.get("id")): item for item in status.get("items") or []}
     execution_order = status.get("execution_order") if isinstance(status.get("execution_order"), list) else []
     if limit is not None:

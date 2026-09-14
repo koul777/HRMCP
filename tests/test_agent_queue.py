@@ -20,6 +20,7 @@ from ncs_mcp.agent_queue import (
     _verify_review_triage_machine_contract,
     _redact_sensitive_output,
     _split_agent_queue_command,
+    _agent_queue_status_snapshot_sha256,
     build_agent_queue_status,
     build_agent_queue_status_from_file,
     build_ncs006_guarded_api_gate,
@@ -889,6 +890,23 @@ class AgentQueueTests(unittest.TestCase):
         self.assertEqual(report["runs"][0]["args"][:3], ["python", "scripts\\ncs_harness.py", "review-priority"])
         self.assertEqual(report["runs"][0]["acceptance_check_results"][0]["check"], "dry_run_only")
         self.assertEqual(report["runs"][0]["declared_acceptance_checks"], ["Record commands run."])
+
+    def test_queue_status_snapshot_hash_ignores_delivery_metadata(self) -> None:
+        status = {
+            "schema": "aihr_agent_queue_status_v1",
+            "summary": {"item_count": 1},
+            "items": [],
+        }
+        delivered = {
+            **status,
+            "out_path": "reports/queue_status.json",
+            "markdown_path": "reports/queue_status.md",
+        }
+
+        self.assertEqual(
+            _agent_queue_status_snapshot_sha256(status),
+            _agent_queue_status_snapshot_sha256(delivered),
+        )
 
     def test_run_agent_queue_ready_resolves_relative_path_against_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
