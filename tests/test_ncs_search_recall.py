@@ -1013,6 +1013,66 @@ class NcsSearchRecallTests(unittest.TestCase):
                     "",
                 )
 
+    def test_joined_compound_subphrases_are_unit_only_and_particle_aware(self) -> None:
+        query_tokens = [
+            "\uacbd\uc601",
+            "\uc815\ubcf4",
+            "\ub300\uc2dc\ubcf4\ub4dc",
+            "\uc2dc\uac01\ud654",
+        ]
+        expansions = search_core._ncs_search_joined_compound_subphrases(query_tokens)
+
+        self.assertIn("\uacbd\uc601\uc815\ubcf4", expansions["\uacbd\uc601"])
+        self.assertIn("\uacbd\uc601\uc815\ubcf4", expansions["\uc815\ubcf4"])
+        self.assertIn("\uc815\ubcf4\ub300\uc2dc\ubcf4\ub4dc", expansions["\uc815\ubcf4"])
+
+        particle_tokens = ["\ucd9c\uc785", "\ud1b5\uc81c\uc640", "\ubcf4\uc548"]
+        particle_expansions = search_core._ncs_search_joined_compound_subphrases(
+            particle_tokens
+        )
+        self.assertIn("\ucd9c\uc785\ud1b5\uc81c", particle_expansions["\ucd9c\uc785"])
+
+    def test_joined_subphrase_recovers_official_name_but_rejects_internal_compound(self) -> None:
+        with self._open_db() as conn:
+            conn.executemany(
+                "INSERT INTO competency_units VALUES (?, ?, '', '4', 1)",
+                (
+                    ("C_SUBPHRASE", "\uacbd\uc601\uc815\ubcf4\uc2dc\uac01\ud654"),
+                    ("C_INTERNAL", "\uc218\ucd9c\uc785\uacc4\uc57d"),
+                    ("C_BOUNDARY", "\ucd9c\uc785\ud1b5\uc81c"),
+                ),
+            )
+            conn.commit()
+
+        recovered = server.search_ncs(
+            "\uacbd\uc601 \uc815\ubcf4 \ub300\uc2dc\ubcf4\ub4dc \uc2dc\uac01\ud654",
+            scope="unit",
+            limit=10,
+            classification_filter={"major_code": "02"},
+        )
+        recovered_ids = [row["id"] for row in recovered["results"]]
+        self.assertIn("C_SUBPHRASE", recovered_ids)
+        recovered_row = next(row for row in recovered["results"] if row["id"] == "C_SUBPHRASE")
+        self.assertIn("\uacbd\uc601\uc815\ubcf4", [
+            item["matched_as"] for item in recovered_row["matched_expansions"]
+        ])
+
+        internal = server.search_ncs(
+            "\ucd9c\uc785 \uacc4\uc57d \uc791\uc131",
+            scope="unit",
+            limit=10,
+            classification_filter={"major_code": "02"},
+        )
+        self.assertNotIn("C_INTERNAL", [row["id"] for row in internal["results"]])
+
+        boundary = server.search_ncs(
+            "\ucd9c\uc785 \ud1b5\uc81c \ubcf4\uc548",
+            scope="unit",
+            limit=10,
+            classification_filter={"major_code": "02"},
+        )
+        self.assertIn("C_BOUNDARY", [row["id"] for row in boundary["results"]])
+
     def test_joined_official_compound_recovers_space_variant_without_extra_sql(self) -> None:
         with self._open_db() as conn:
             conn.executemany(

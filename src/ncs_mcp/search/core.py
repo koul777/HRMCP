@@ -247,6 +247,46 @@ def _ncs_search_joined_compound_phrase(
     return joined if len(joined) <= 24 else ""
 
 
+def _ncs_search_joined_compound_subphrases(
+    fallback_tokens: list[str],
+) -> dict[str, list[str]]:
+    """Build bounded two-token compound candidates for unit-name recall.
+
+    Users often insert spaces inside an official NCS unit name (for example
+    ``경영 정보 대시보드 시각화`` for ``경영정보시각화``).  The full-query
+    join handled by :func:`_ncs_search_joined_compound_phrase` cannot recover
+    that case when an extra descriptive token is present.  This helper adds
+    only adjacent two-token joins, and only as unit-name candidates.  It is
+    deliberately not an alias and is never applied to element, criteria, or
+    KSA text where a short compound can be a homograph.
+
+    Existing particle stripping is reused solely to form the candidate term;
+    the original query token remains the group key and is still reported in
+    search metadata.  Lexical-boundary SQL checks reject an internal match,
+    so ``출입 계약`` cannot match the ``출입`` substring inside
+    ``수출입계약``.
+    """
+    if len(fallback_tokens) < 3:
+        return {}
+    if not all(re.fullmatch(r"[가-힣]{2,}", token) for token in fallback_tokens):
+        return {}
+    morphology = _ncs_search_morphology_expansions(fallback_tokens)
+    stems = [morphology.get(token, [token])[0] for token in fallback_tokens]
+    if not all(re.fullmatch(r"[가-힣]{2,}", token) for token in stems):
+        return {}
+
+    expansions: dict[str, list[str]] = {}
+    for index in range(len(stems) - 1):
+        joined = "".join(stems[index:index + 2])
+        if len(joined) > 24:
+            continue
+        for token in fallback_tokens[index:index + 2]:
+            values = expansions.setdefault(token, [])
+            if joined not in values and joined != token:
+                values.append(joined)
+    return expansions
+
+
 def _ncs_search_morphology_expansions(tokens: list[str]) -> dict[str, list[str]]:
     """Offer one conservative Korean particle removal per bounded query token.
 
@@ -1816,6 +1856,7 @@ def _ncs_search_tier_predicates(
     phrase: str,
     fallback_tokens: list[str],
     token_expansions: dict[str, list[str]] | None = None,
+    compound_subphrase_expansions: dict[str, list[str]] | None = None,
     weighted_columns: tuple[tuple[str, float], ...] | None = None,
     token_weights: dict[str, float] | None = None,
     *,
@@ -1867,6 +1908,27 @@ def _ncs_search_tier_predicates(
         ) + ")"
         for group in parameter_groups
     ]
+    compound_groups: list[str] = []
+    compound_terms: list[str] = []
+    if compound_subphrase_expansions and "cu.unit_name_raw" in columns:
+        # Compound recovery is restricted to the official unit name and its
+        # validated alias projection.  Classification labels and definitions
+        # are intentionally excluded so a short joined phrase cannot promote
+        # an unrelated hierarchy node.
+        for token in fallback_tokens:
+            for alternative in compound_subphrase_expansions.get(token, []):
+                if alternative in compound_terms:
+                    continue
+                parameter = f"compound_base_{len(compound_terms)}"
+                params[parameter] = alternative
+                compound_terms.append(alternative)
+                compound_groups.append(
+                    _ncs_search_boundary_any(
+                        ("cu.unit_name_raw", "aliases.alias_search_text"),
+                        parameter,
+                        normalized=normalized,
+                    )
+                )
     token_or = "(" + " OR ".join(search_groups) + ")"
     score_clause, meaningful_clause, rank_params = _ncs_search_fallback_ranking(
         weighted_columns or tuple((column, 1.0) for column in columns),
@@ -1877,6 +1939,22 @@ def _ncs_search_tier_predicates(
         normalized=normalized,
     )
     params.update(rank_params)
+    if compound_groups:
+        # A joined subphrase is a positive unit-name signal, but weaker than a
+        # complete phrase or token-AND tier.  Keep it in the same token-OR
+        # tier so pagination and match-mode contracts remain unchanged.
+        for index, clause in enumerate(compound_groups):
+            weight_parameter = f"compound_rank_weight_{index}"
+            params[weight_parameter] = 2.0
+            score_clause += (
+                f" + CASE WHEN {clause} THEN :{weight_parameter} ELSE 0 END"
+            )
+        compound_clause = "(" + " OR ".join(compound_groups) + ")"
+        meaningful_clause = (
+            compound_clause
+            if meaningful_clause == "0 = 1"
+            else f"({meaningful_clause} OR {compound_clause})"
+        )
     if normalized:
         params = _normalized_ncs_search_params(params)
     tiers = [
@@ -2311,6 +2389,24 @@ def search_ncs(
             conn,
             fallback_tokens,
         )
+        # Compound subphrase recovery is activated only inside an explicit
+        # source-backed classification scope.  Outside a hard scope, the same
+        # joined token can be a valid term in another NCS major and changing
+        # its rank would trade away precision for broad lexical recall.
+        unit_compound_expansions = (
+            _ncs_search_joined_compound_subphrases(fallback_tokens)
+            if normalized_classification_filter
+            else {}
+        )
+        unit_token_expansions = {
+            token: list(alternatives)
+            for token, alternatives in token_expansions.items()
+        }
+        for token, alternatives in unit_compound_expansions.items():
+            values = unit_token_expansions.setdefault(token, [])
+            for alternative in alternatives:
+                if alternative not in values:
+                    values.append(alternative)
         leaf_token_expansions = _ncs_search_leaf_token_expansions(
             fallback_tokens,
             token_expansions,
@@ -2345,7 +2441,8 @@ def search_ncs(
                 columns,
                 phrase,
                 fallback_tokens,
-                token_expansions,
+                unit_token_expansions,
+                compound_subphrase_expansions=unit_compound_expansions,
                 weighted_columns=weighted_columns,
                 token_weights=token_weights,
                 **tier_options,
@@ -2760,7 +2857,7 @@ def search_ncs(
         counts_by_type[item["type"]] += 1
         item.pop("_classification_codes", None)
         item_token_expansions = (
-            token_expansions
+            unit_token_expansions
             if item["type"] == "unit"
             else leaf_token_expansions
         )
