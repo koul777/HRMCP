@@ -10320,6 +10320,10 @@ DEFAULT_NON_HR_TRANSITION_SMOKE_CASES = [
         "target_query": "기본계획수립",
         "current_major_code": "14",
         "target_major_code": "14",
+        # ``기본구상`` is intentionally ambiguous across source-backed NCS
+        # paths.  A safe clarification is the expected outcome; treating it
+        # as a smoke failure would reward an unsafe arbitrary promotion.
+        "expected_outcome": "needs_clarification",
     },
     {
         "id": "major19_hydro_plan_to_purchase_spec",
@@ -10349,6 +10353,41 @@ def _non_hr_transition_scope_text(scope: Any) -> str:
     )
 
 
+def _non_hr_expected_outcome(case: dict[str, Any]) -> str | None:
+    value = case.get("expected_outcome")
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    return normalized or None
+
+
+def _non_hr_safe_clarification(case: dict[str, Any], result: Any) -> bool:
+    """Return whether a case's explicit expected outcome is fail-closed clarification.
+
+    This is a smoke-harness classification only.  It never changes the
+    recommendation result or promotes an ambiguous scope; it records that the
+    resolver stopped safely and requires the caller to choose a path.
+    """
+    if _non_hr_expected_outcome(case) != "needs_clarification":
+        return False
+    if not isinstance(result, dict):
+        return False
+    if result.get("ok") is True:
+        return False
+    error = result.get("error")
+    if not isinstance(error, dict):
+        return False
+    if str(error.get("code") or "").strip().lower() not in {
+        "needs_clarification",
+        "route_context_required",
+    }:
+        return False
+    recommendations = result.get("recommendations")
+    if isinstance(recommendations, list) and recommendations:
+        return False
+    return True
+
+
 def build_non_hr_transition_smoke_report(
     conn: sqlite3.Connection,
     *,
@@ -10373,6 +10412,7 @@ def build_non_hr_transition_smoke_report(
             "target_query": target_query,
             "current_major_code": _non_hr_smoke_text(case.get("current_major_code")),
             "target_major_code": _non_hr_smoke_text(case.get("target_major_code")),
+            "expected_outcome": _non_hr_expected_outcome(case),
             "ok": False,
             "recommend_ok": False,
             "status_update_allowed": False,
@@ -10447,11 +10487,21 @@ def build_non_hr_transition_smoke_report(
                 **legacy_flags,
             }
         )
+        safe_clarification = _non_hr_safe_clarification(case, result)
+        row["safe_clarification"] = safe_clarification
+        row["clarification_required"] = safe_clarification
         row["ok"] = (
-            row["recommend_ok"]
-            and len(recommendations) > 0
-            and not row["sqf_used"]
-            and not row["learning_modules_used"]
+            (
+                safe_clarification
+                and not row["sqf_used"]
+                and not row["learning_modules_used"]
+            )
+            or (
+                row["recommend_ok"]
+                and len(recommendations) > 0
+                and not row["sqf_used"]
+                and not row["learning_modules_used"]
+            )
         )
         if not row["ok"]:
             error = result.get("error") if isinstance(result, dict) and isinstance(result.get("error"), dict) else {}
@@ -10485,6 +10535,9 @@ def build_non_hr_transition_smoke_report(
         "case_count": len(rows),
         "ok_count": sum(1 for row in rows if row.get("ok")),
         "failed_count": sum(1 for row in rows if not row.get("ok")),
+        "safe_clarification_count": sum(
+            1 for row in rows if row.get("safe_clarification")
+        ),
         "major_codes": sorted(
             {
                 code
@@ -10547,8 +10600,8 @@ def write_non_hr_transition_smoke_markdown(report: dict[str, Any], out_path: Pat
         f"- approval_claim: {report.get('approval_claim')}",
         f"- source_payload_exposed: {report.get('source_payload_exposed')}",
         "",
-        "| case | majors | transition | recommend | courses | top courses | legacy sources |",
-        "|---|---|---|---|---:|---|---|",
+        "| case | majors | transition | outcome | recommend | courses | top courses | legacy sources |",
+        "|---|---|---|---|---:|---:|---|---|",
     ]
     for row in report.get("rows") or []:
         if not isinstance(row, dict):
@@ -10560,6 +10613,7 @@ def write_non_hr_transition_smoke_markdown(report: dict[str, Any], out_path: Pat
             f"{_non_hr_smoke_md_cell(row.get('id'))} | "
             f"{_non_hr_smoke_md_cell(majors)} | "
             f"{_non_hr_smoke_md_cell(transition)} | "
+            f"{_non_hr_smoke_md_cell(row.get('expected_outcome') or ('needs_clarification' if row.get('safe_clarification') else 'recommendation'))} | "
             f"{row.get('recommend_ok')} | "
             f"{row.get('recommended_course_count')} | "
             f"{_non_hr_smoke_md_cell(', '.join(str(item) for item in row.get('top_courses') or []))} | "
@@ -10664,6 +10718,7 @@ def build_non_hr_education_plan_smoke_report(
             "target_query": target_query,
             "current_major_code": _non_hr_smoke_text(case.get("current_major_code")),
             "target_major_code": _non_hr_smoke_text(case.get("target_major_code")),
+            "expected_outcome": _non_hr_expected_outcome(case),
             "ok": False,
             "recommend_ok": False,
             "plan_ok": False,
@@ -10795,17 +10850,27 @@ def build_non_hr_education_plan_smoke_report(
                 **legacy_flags,
             }
         )
+        safe_clarification = _non_hr_safe_clarification(case, result)
+        row["safe_clarification"] = safe_clarification
+        row["clarification_required"] = safe_clarification
         row["ok"] = (
-            row["recommend_ok"]
-            and row["plan_ok"]
-            and row["matrix_rows"] > 0
-            and row["recommended_path_stage_count"] > 0
-            and not row["missing_matrix_fields"]
-            and not row["missing_plan_fields"]
-            and not row["missing_guide_trace_fields"]
-            and not row["missing_query_route_fields"]
-            and not row["sqf_used"]
-            and not row["learning_modules_used"]
+            (
+                safe_clarification
+                and not row["sqf_used"]
+                and not row["learning_modules_used"]
+            )
+            or (
+                row["recommend_ok"]
+                and row["plan_ok"]
+                and row["matrix_rows"] > 0
+                and row["recommended_path_stage_count"] > 0
+                and not row["missing_matrix_fields"]
+                and not row["missing_plan_fields"]
+                and not row["missing_guide_trace_fields"]
+                and not row["missing_query_route_fields"]
+                and not row["sqf_used"]
+                and not row["learning_modules_used"]
+            )
         )
         if not row["ok"]:
             error = result.get("error") if isinstance(result, dict) and isinstance(result.get("error"), dict) else {}
@@ -10843,6 +10908,9 @@ def build_non_hr_education_plan_smoke_report(
         "case_count": len(rows),
         "ok_count": sum(1 for row in rows if row.get("ok")),
         "failed_count": sum(1 for row in rows if not row.get("ok")),
+        "safe_clarification_count": sum(
+            1 for row in rows if row.get("safe_clarification")
+        ),
         "major_codes": sorted(
             {
                 code
@@ -10909,8 +10977,8 @@ def write_non_hr_education_plan_smoke_markdown(report: dict[str, Any], out_path:
         f"- approval_claim: {report.get('approval_claim')}",
         f"- source_payload_exposed: {report.get('source_payload_exposed')}",
         "",
-        "| case | majors | transition | plan | rows | path | missing | route | top courses | legacy sources |",
-        "|---|---|---|---|---:|---:|---|---|---|---|",
+        "| case | majors | transition | outcome | plan | rows | path | missing | route | top courses | legacy sources |",
+        "|---|---|---|---|---:|---:|---:|---|---|---|---|",
     ]
     for row in report.get("rows") or []:
         if not isinstance(row, dict):
@@ -10929,6 +10997,7 @@ def write_non_hr_education_plan_smoke_markdown(report: dict[str, Any], out_path:
             f"{_non_hr_smoke_md_cell(row.get('id'))} | "
             f"{_non_hr_smoke_md_cell(majors)} | "
             f"{_non_hr_smoke_md_cell(transition)} | "
+            f"{_non_hr_smoke_md_cell(row.get('expected_outcome') or ('needs_clarification' if row.get('safe_clarification') else 'recommendation'))} | "
             f"{row.get('plan_ok')} | "
             f"{row.get('matrix_rows')} | "
             f"{row.get('recommended_path_stage_count')} | "

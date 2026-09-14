@@ -2706,6 +2706,86 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(report["blocker_count"], 1)
         self.assertIn("raw_payload", report["sensitive_markers"])
 
+    def test_non_hr_smoke_accepts_explicit_fail_closed_clarification(self) -> None:
+        clarification_payload = {
+            "ok": False,
+            "error": {
+                "code": "needs_clarification",
+                "message": "The NCS scope is ambiguous; choose one of the bounded candidates.",
+            },
+            "recommendations": [],
+            "audit": {
+                "sqf_used": False,
+                "learning_modules_used": False,
+            },
+        }
+        with patch(
+            "ncs_harness.recommend_training_transition",
+            return_value=clarification_payload,
+        ):
+            transition = build_non_hr_transition_smoke_report(
+                object(),
+                cases=[
+                    {
+                        "id": "ambiguous14",
+                        "current_query": "Basic Concept",
+                        "target_query": "Basic Plan",
+                        "current_major_code": "14",
+                        "target_major_code": "14",
+                        "expected_outcome": "needs_clarification",
+                    }
+                ],
+                recommendation_limit=1,
+            )
+
+        self.assertTrue(transition["ok"])
+        self.assertEqual(transition["failed_count"], 0)
+        self.assertEqual(transition["safe_clarification_count"], 1)
+        self.assertTrue(transition["rows"][0]["safe_clarification"])
+        self.assertTrue(transition["rows"][0]["clarification_required"])
+
+        plan_payload = {
+            **clarification_payload,
+            "needs_clarification": True,
+        }
+        with (
+            patch(
+                "ncs_harness.recommend_training_transition",
+                return_value=plan_payload,
+            ),
+            patch(
+                "ncs_harness.compact_ncs_education_plan_response",
+                return_value={"ok": False, "view": None},
+            ),
+            patch(
+                "ncs_harness._aihr_public_route_evidence",
+                return_value={"schema": "ncs_query_route_v1"},
+            ),
+            patch("ncs_harness._missing_aihr_matrix_fields", return_value=[]),
+            patch("ncs_harness._missing_aihr_plan_fields", return_value=[]),
+            patch("ncs_harness._missing_aihr_guide_trace_fields", return_value=[]),
+            patch("ncs_harness._missing_aihr_query_route_fields", return_value=[]),
+        ):
+            education = build_non_hr_education_plan_smoke_report(
+                object(),
+                cases=[
+                    {
+                        "id": "ambiguous14",
+                        "current_query": "Basic Concept",
+                        "target_query": "Basic Plan",
+                        "current_major_code": "14",
+                        "target_major_code": "14",
+                        "expected_outcome": "needs_clarification",
+                    }
+                ],
+                recommendation_limit=1,
+            )
+
+        self.assertTrue(education["ok"])
+        self.assertEqual(education["failed_count"], 0)
+        self.assertEqual(education["safe_clarification_count"], 1)
+        self.assertTrue(education["rows"][0]["safe_clarification"])
+
     def test_non_hr_transition_smoke_cli_writes_json_and_markdown(self) -> None:
         recommendation_payload = {
             "ok": True,

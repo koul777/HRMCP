@@ -219,6 +219,58 @@ class QualityGateTests(unittest.TestCase):
             self.assertIn("row_1:sqf_used:True", gate["details"]["issues"])
             self.assertEqual(gates["non_hr_surface:non_hr_query_smoke"]["status"], FAIL)
 
+    def test_non_hr_education_plan_accepts_safe_clarification_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "ncs.db"
+            self._init_db(db_path)
+            plan_path = tmp_path / "non_hr_education_plan_smoke.json"
+            self._write_non_hr_surface_report(
+                plan_path,
+                schema="ncs_non_hr_education_plan_smoke_v1",
+                education_plan=True,
+            )
+            payload = json.loads(plan_path.read_text(encoding="utf-8"))
+            payload["rows"][0].update(
+                {
+                    "ok": True,
+                    "recommend_ok": False,
+                    "plan_ok": False,
+                    "expected_outcome": "needs_clarification",
+                    "safe_clarification": True,
+                    "clarification_required": True,
+                    "error_code": "needs_clarification",
+                }
+            )
+            # The report is a safe stop, not a fabricated plan.  Plan-shape
+            # fields are deliberately absent and must be exempted only by the
+            # explicit clarification flags above.
+            payload["rows"][0].pop("guide_trace_schema", None)
+            payload["rows"][0].pop("guide_trace_check_codes", None)
+            payload["rows"][0].pop("guide_workflow_stage_codes", None)
+            payload["rows"][0].pop("query_route_contract_schema", None)
+            payload["rows"][0].pop("query_route_contract_primary_tool", None)
+            payload["rows"][0].pop("query_route_contract_fingerprint", None)
+            payload["rows"][0].pop("matrix_rows", None)
+            payload["rows"][0].pop("recommended_path_stage_count", None)
+            payload["rows"][0]["missing_plan_fields"] = ["recommended_path"]
+            payload["rows"][0]["missing_guide_trace_fields"] = [
+                "training_system_guide_trace"
+            ]
+            plan_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+            result = evaluate_quality_gates(
+                db_path,
+                non_hr_surface_artifact_paths={
+                    "non_hr_education_plan_smoke": plan_path,
+                },
+            )
+
+            gates = {gate["name"]: gate for gate in result["gates"]}
+            gate = gates["non_hr_surface:non_hr_education_plan_smoke"]
+            self.assertEqual(gate["status"], PASS)
+            self.assertEqual(gate["details"]["issues"], [])
+
     def test_non_hr_surface_smoke_artifacts_independently_scan_raw_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

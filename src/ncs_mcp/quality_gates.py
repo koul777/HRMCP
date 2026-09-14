@@ -287,7 +287,17 @@ def _non_hr_surface_smoke_issues(
             issues.append(f"row_{index}:sqf_used:{row.get('sqf_used')}")
         if row.get("learning_modules_used") is not False:
             issues.append(f"row_{index}:learning_modules_used:{row.get('learning_modules_used')}")
-        if contract["requires_education_plan_contract"]:
+        # A report may intentionally exercise a source-backed ambiguous
+        # scope.  In that case the correct outcome is fail-closed
+        # ``needs_clarification`` rather than a fabricated education plan, so
+        # plan-shape fields are not applicable.  The smoke builder must mark
+        # both flags explicitly; an ordinary failed row still fails the gate.
+        safe_clarification = (
+            row.get("safe_clarification") is True
+            and row.get("clarification_required") is True
+            and row.get("expected_outcome") == "needs_clarification"
+        )
+        if contract["requires_education_plan_contract"] and not safe_clarification:
             if row.get("plan_ok") is not True:
                 issues.append(f"row_{index}:plan_ok:{row.get('plan_ok')}")
             if row.get("guide_trace_schema") != "aihr_training_system_guide_trace_v1":
@@ -353,6 +363,11 @@ def _non_hr_surface_smoke_issues(
             ):
                 if row.get(field):
                     issues.append(f"row_{index}:{field}")
+        elif contract["requires_education_plan_contract"] and safe_clarification:
+            # Preserve the distinction in the artifact so an accidental
+            # omission cannot silently turn an unresolved query into a pass.
+            if row.get("recommend_ok") is True:
+                issues.append(f"row_{index}:safe_clarification_recommend_ok")
     return issues
 
 
