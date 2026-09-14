@@ -1319,6 +1319,18 @@ class ExplicitJobScopeRealDbRegressionTests(unittest.TestCase):
             "sub_code": "01",
         }
         self.assertEqual(result["classification_filter"], expected_filter)
+        self.assertEqual(
+            result["search_context"]["requested"]["job_scope"], "인사"
+        )
+        self.assertEqual(result["search_context"]["status"], "resolved")
+        self.assertEqual(
+            result["search_context"]["policy"]["hard_filter_source"],
+            "source_backed_exact_job_scope",
+        )
+        self.assertEqual(
+            result["search_context"]["policy"]["soft_prior_source"],
+            "explicit_query_job_scope",
+        )
         self.assertTrue(
             all(
                 all((row.get("path") or {}).get(key) == value for key, value in expected_filter.items())

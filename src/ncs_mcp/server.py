@@ -1889,6 +1889,7 @@ def ncs_search(
         context_text=context_text,
         job_scope=job_scope,
     )
+    inferred_query_job_scope = False
     if query and not normalized_job_scope:
         # Direct calls may omit discovery. Reuse only the bounded grammatical
         # extraction used by the router; bare lexical tasks remain unscoped.
@@ -1908,6 +1909,12 @@ def ncs_search(
             )
             if normalized_job_scope:
                 query = str(inferred_params.get("query") or query)
+                inferred_query_job_scope = True
+                # Preserve query-derived provenance when the direct facade
+                # re-enters search_ncs.  The promoted filter remains the hard
+                # boundary, while search_context can still report that the
+                # scope came from the explicit natural-language request.
+                job_scope = normalized_job_scope
     supplied_filter = _effective_ncs_scope_filter(classification_filter)
     if normalized_job_scope:
         # Direct calls do not carry a discovery fingerprint. Resolve the same
@@ -2007,6 +2014,22 @@ def ncs_search(
         context_text=context_text,
         job_scope=job_scope,
     )
+    if inferred_query_job_scope:
+        # The hard filter was resolved from the explicit query before this
+        # handler re-entered the lower-level search function.  Restore that
+        # provenance in the public context instead of presenting the promoted
+        # filter as if it had been supplied independently by the caller.
+        search_context = result.get("search_context")
+        if isinstance(search_context, dict):
+            policy = dict(search_context.get("policy") or {})
+            policy.update(
+                query_inference_allowed=True,
+                query_inference_boundary="explicit_job_need_competency_pattern",
+                soft_prior_source="explicit_query_job_scope",
+                hard_filter_source="source_backed_exact_job_scope",
+                rollout_phase="guarded_exact_scope",
+            )
+            search_context["policy"] = policy
     rows = result.get("results", [])
     invariant = result.get("classification_scope_invariant")
     if isinstance(invariant, dict) and invariant.get("ok") is False:
