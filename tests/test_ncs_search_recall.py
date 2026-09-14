@@ -1056,6 +1056,7 @@ class NcsSearchRecallTests(unittest.TestCase):
         )
         recovered_ids = [row["id"] for row in recovered["results"]]
         self.assertIn("C_SUBPHRASE", recovered_ids)
+        self.assertEqual("C_SUBPHRASE", recovered_ids[0])
         recovered_row = next(row for row in recovered["results"] if row["id"] == "C_SUBPHRASE")
         self.assertIn("\uacbd\uc601\uc815\ubcf4", [
             item["matched_as"] for item in recovered_row["matched_expansions"]

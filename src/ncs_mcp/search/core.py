@@ -1766,6 +1766,7 @@ def _ncs_search_unit_fallback_score(
     fallback_tokens: list[str],
     token_expansions: dict[str, list[str]] | None,
     token_weights: dict[str, float] | None,
+    compound_subphrase_expansions: dict[str, list[str]] | None = None,
     *,
     normalized: bool | str = False,
 ) -> float:
@@ -1800,6 +1801,29 @@ def _ncs_search_unit_fallback_score(
                 for term in terms
             ):
                 score += field_weight * token_factor
+    # Keep the scoped spaced-compound signal consistent with the SQL tier
+    # score.  Compound candidates are intentionally restricted to official
+    # unit names and validated aliases; they must never contribute through a
+    # classification label or definition during the Python re-rank pass.
+    if compound_subphrase_expansions:
+        seen_compound_terms: set[str] = set()
+        for alternatives in compound_subphrase_expansions.values():
+            for term in alternatives:
+                if term in seen_compound_terms:
+                    continue
+                seen_compound_terms.add(term)
+                if any(
+                    (
+                        _ncs_search_boundary_match_normalized(
+                            normalize_search_text(fields.get(field_name)),
+                            normalize_search_text(term),
+                        )
+                        if normalized
+                        else _ncs_search_boundary_match(fields.get(field_name), term)
+                    ) == 1
+                    for field_name in ("unit_name", "alias")
+                ):
+                    score += 2.0
     return score
 
 
@@ -1809,6 +1833,7 @@ def _rerank_ncs_unit_task_ksa_candidates(
     fallback_tokens: list[str],
     token_expansions: dict[str, list[str]] | None,
     token_weights: dict[str, float] | None,
+    compound_subphrase_expansions: dict[str, list[str]] | None = None,
     *,
     normalized: bool | str = False,
 ) -> list[dict[str, Any]]:
@@ -1823,6 +1848,7 @@ def _rerank_ncs_unit_task_ksa_candidates(
             fallback_tokens,
             token_expansions,
             token_weights,
+            compound_subphrase_expansions,
             normalized=normalized,
         )
         scored.append(
@@ -2831,6 +2857,7 @@ def search_ncs(
             fallback_tokens,
             token_expansions,
             token_weights,
+            compound_subphrase_expansions=unit_compound_expansions,
             normalized=normalized_search,
         ) + [item for item in candidates_by_type["unit"] if item["_match_tier"] == 4]
     if search_context.get("status") == "not_provided":
