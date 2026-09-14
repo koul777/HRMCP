@@ -5706,6 +5706,68 @@ class ReleaseReadinessReportTests(unittest.TestCase):
         self.assertIn("facility_constraint_fit", planner_details)
         self.assertIn("human_review", planner_details)
 
+    def test_build_aihr_demo_contract_accepts_safe_alias_clarification_only(self) -> None:
+        payload = {
+            "ok": False,
+            "needs_clarification": True,
+            "error": {
+                "code": "needs_clarification",
+                "message": "Choose one bounded NCS scope.",
+                "field": "current_query",
+                "suggestions": ["HR planning"],
+            },
+            "clarification": {
+                "reason": "candidate_alias_scope_requires_review",
+                "field": "current_query",
+                "candidates": [
+                    {
+                        "candidate_type": "unit",
+                        "match_level": "query_alias_unit",
+                        "matched_text": "HR planning",
+                        "unit_code": "0202020101_23v3",
+                    }
+                ],
+            },
+            "query_route": {
+                "schema": "ncs_query_route_v1",
+                "available": True,
+                "tool": "plan_ncs_education_path",
+                "params": {"current_query": "current", "target_query": "target"},
+                "required_params": ["current_query", "target_query"],
+                "missing_params": [],
+                "expected_tool_chain": [
+                    "plan_ncs_education_path",
+                    "recommend_training_transition",
+                ],
+                "route_fingerprint": "route-fingerprint-test",
+                "route_contract": {
+                    "schema": "ncs_query_route_v1",
+                    "route_first": True,
+                    "primary_tool": "plan_ncs_education_path",
+                    "required_params": ["current_query", "target_query"],
+                    "provided_params": ["current_query", "target_query"],
+                    "missing_params": [],
+                    "route_fingerprint": "route-fingerprint-test",
+                },
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            alias_path = root / "aihr_plan_demo_alias_20260914.json"
+            baseline_path = root / "aihr_plan_demo_20260914.json"
+            alias_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            baseline_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+            alias_contract = build_aihr_demo_contract([alias_path])
+            baseline_contract = build_aihr_demo_contract([baseline_path])
+
+        self.assertTrue(alias_contract["ok"], alias_contract["failures"])
+        self.assertFalse(baseline_contract["ok"])
+        self.assertIn(
+            "Clarification placement",
+            {failure["check"] for failure in baseline_contract["failures"]},
+        )
+
     def test_build_aihr_demo_contract_allows_empty_facilities_with_explicit_facility_status(self) -> None:
         for status in ("unknown", "not_requested"):
             with self.subTest(status=status), tempfile.TemporaryDirectory() as tmp:

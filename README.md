@@ -9,6 +9,7 @@
 - Added Builder safeguards for code-only releases: a missing deployed-version pointer is rejected, and the operation is journaled as `copy_current` with restart-safe version persistence. Superseded Builder versions are recoverably archived off the system drive; the active production pointer is unchanged.
 - Verified the canonical source and `deploy/vercel_mcp_app` mirror remain synchronized. Lint, smoke, scope/recommendation, public payload, Builder, and deployment-source tests pass.
 - Stabilized agent-queue lineage checks by hashing queue state independently of report-delivery paths; continuation demo artifacts now use the same internal-file naming contract as the generator. Read-only queue regeneration produced four successful report jobs with zero acceptance failures; one transition seedpack remains explicitly human-gated.
+- Treats candidate-alias and other unresolved scope responses as an explicit, bounded clarification in the AI-HR demo contract. The alias demo may therefore show a safe fail-closed choice request instead of fabricating a training plan; baseline plans still require the full matrix/guide contract.
 - Production deployment completed through the Windows Builder for project `ncs-mcp-bridge-mini2`: Builder version `20260913_230853_59362889`, build ID `173fa70c69ab455db6fd0be19d5a7727`, deployment `dpl_7rfof6Y7b6keyWj7WZrtzvXJvXLh`. Staged and production health, readiness, MCP transport, and build-identity checks all passed.
 
 > 운영 원칙(2026-09-11): production DB/API 갱신, 온톨로지 재구축, 경량

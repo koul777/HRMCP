@@ -23,6 +23,7 @@ try:  # Support both `python -m scripts...` and `python scripts\...`.
         _missing_scope_baseline_fields,
         _missing_training_course_inventory_template_fields,
         _missing_training_necessity_review_fields,
+        is_safe_clarification_payload,
     )
 except ImportError:  # pragma: no cover - exercised when run as a script.
     from render_aihr_plan_demo import (
@@ -36,6 +37,7 @@ except ImportError:  # pragma: no cover - exercised when run as a script.
         _missing_scope_baseline_fields,
         _missing_training_course_inventory_template_fields,
         _missing_training_necessity_review_fields,
+        is_safe_clarification_payload,
     )
 
 PUBLIC_DEMO_SCHEMA_VALUE_MARKERS = {"source_url_or_document"}
@@ -3548,7 +3550,21 @@ def build_aihr_demo_contract(
             {"name": label, "ok": bool(ok), "detail": detail}
             for label, ok, detail in _contract_checks(payload)
         ]
-        checks.extend(_public_json_contract_checks(payload))
+        if is_safe_clarification_payload(payload):
+            stem = path.stem
+            is_alias_artifact = stem.startswith("aihr_plan_demo_alias_") or (
+                stem.startswith("aihr_plan_demo_") and stem.endswith("_alias")
+            )
+            if not is_alias_artifact:
+                checks.append(
+                    {
+                        "name": "Clarification placement",
+                        "ok": False,
+                        "detail": "safe clarification is allowed only for the alias demo artifact",
+                    }
+                )
+        else:
+            checks.extend(_public_json_contract_checks(payload))
         checks.append(
             {
                 "name": "Public metadata redacted",

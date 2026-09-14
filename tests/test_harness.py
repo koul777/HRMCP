@@ -17038,6 +17038,39 @@ ChatGPT 프롬프트 예시: 노무관리 담당자가 인사기획으로 전환
         self.assertFalse(checks["Review context policy"][0])
         self.assertEqual(checks["Review context policy"][1], "missing")
 
+    def test_aihr_demo_contract_marks_candidate_alias_clarification_safe(self) -> None:
+        payload = public_demo_payload(
+            {
+                "ok": False,
+                "needs_clarification": True,
+                "error": {
+                    "code": "needs_clarification",
+                    "message": "Choose one bounded NCS scope.",
+                    "field": "current_query",
+                    "suggestions": ["HR planning"],
+                },
+                "clarification": {
+                    "reason": "candidate_alias_scope_requires_review",
+                    "field": "current_query",
+                    "candidates": [
+                        {
+                            "candidate_type": "unit",
+                            "match_level": "query_alias_unit",
+                            "matched_text": "HR planning",
+                            "unit_code": "0202020101_23v3",
+                        }
+                    ],
+                },
+                "query_route": sample_query_route(),
+            }
+        )
+
+        checks = {label: (ok, detail) for label, ok, detail in _contract_checks(payload)}
+
+        self.assertTrue(checks["Safe clarification"][0])
+        self.assertTrue(checks["Clarification candidates"][0])
+        self.assertTrue(checks["Query route"][0])
+
     def test_run_aihr_plan_demo_cli_generates_json_and_html(self) -> None:
         class DummyConn:
             def close(self) -> None:

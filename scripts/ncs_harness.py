@@ -33650,7 +33650,11 @@ def _dispatch_harness_command(args: argparse.Namespace) -> None:
             }
         )
     elif args.command == "run-aihr-plan-demo":
-        from render_aihr_plan_demo import public_demo_payload, render as render_aihr_plan_demo_html
+        from render_aihr_plan_demo import (
+            is_safe_clarification_payload,
+            public_demo_payload,
+            render as render_aihr_plan_demo_html,
+        )
 
         settings = load_settings()
         conn = _connect_readonly_sqlite(Path(settings.db_path))
@@ -33744,6 +33748,9 @@ def _dispatch_harness_command(args: argparse.Namespace) -> None:
                 public_plan["route_contract_schema"] = route_contract_schema
                 public_plan["route_fingerprint"] = route_evidence.get("route_fingerprint")
                 public_plan["route_guard_flags"] = route_guard_flags
+                safe_clarification = (
+                    item["name"] == "alias" and is_safe_clarification_payload(public_plan)
+                )
                 item["internal_path"].write_text(
                     json.dumps(plan, ensure_ascii=False, indent=2) + "\n",
                     encoding="utf-8",
@@ -33756,17 +33763,19 @@ def _dispatch_harness_command(args: argparse.Namespace) -> None:
                     {
                         "name": item["name"],
                         "path": str(item["path"]),
-                        "ok": bool(public_plan.get("ok")),
+                        "ok": bool(public_plan.get("ok")) or safe_clarification,
                         "view": public_plan.get("view"),
                         "schema": public_plan.get("public_demo_schema"),
+                        "safe_clarification": safe_clarification,
                     }
                 )
                 internal_generated.append(
                     {
                         "name": item["name"],
                         "path": str(item["internal_path"]),
-                        "ok": bool(plan.get("ok")),
+                        "ok": bool(plan.get("ok")) or safe_clarification,
                         "view": plan.get("view"),
+                        "safe_clarification": safe_clarification,
                     }
                 )
             html_path.write_text(

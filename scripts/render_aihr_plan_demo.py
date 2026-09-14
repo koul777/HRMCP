@@ -25,6 +25,12 @@ REQUIRED_RECOMMENDED_PATH_GUIDE_STAGES = {
     "supporting_or_adjacent_training": "C2-1",
     "delivery_fit_review": "C2-2",
 }
+SAFE_CLARIFICATION_REASONS = {
+    "candidate_alias_scope_requires_review",
+    "ambiguous_scope",
+    "cross_major_scope_collision",
+    "non_exact_scope_requires_clarification",
+}
 SENSITIVE_DEMO_MARKERS = (
     "source_payload",
     "source_rows",
@@ -1181,7 +1187,92 @@ def _review_context_policy_issues(payload: dict[str, Any]) -> list[str]:
     return issues
 
 
+def is_safe_clarification_payload(payload: dict[str, Any]) -> bool:
+    """Return whether a payload is an intentional, bounded fail-closed response.
+
+    Candidate aliases and ambiguous labels must not be turned into a fabricated
+    plan.  The demo contract treats this response as valid only when the
+    payload explicitly carries the clarification envelope and bounded choices.
+    """
+
+    if not isinstance(payload, dict):
+        return False
+    error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+    clarification = (
+        payload.get("clarification")
+        if isinstance(payload.get("clarification"), dict)
+        else {}
+    )
+    candidates = clarification.get("candidates")
+    return (
+        payload.get("ok") is False
+        and payload.get("needs_clarification") is True
+        and error.get("code") == "needs_clarification"
+        and error.get("field")
+        and clarification.get("reason") in SAFE_CLARIFICATION_REASONS
+        and clarification.get("field") == error.get("field")
+        and isinstance(candidates, list)
+        and bool(candidates)
+        and isinstance(payload.get("query_route"), dict)
+    )
+
+
+def _clarification_contract_checks(payload: dict[str, Any]) -> list[tuple[str, bool, str]]:
+    error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+    clarification = (
+        payload.get("clarification")
+        if isinstance(payload.get("clarification"), dict)
+        else {}
+    )
+    candidates = clarification.get("candidates")
+    sensitive_scan_payload = {
+        key: value
+        for key, value in payload.items()
+        if key != "review_context_policy"
+    }
+    text = json.dumps(sensitive_scan_payload, ensure_ascii=False)
+    leaked_markers = [
+        marker
+        for marker in SENSITIVE_DEMO_MARKERS
+        if marker.lower() in text.lower()
+    ]
+    missing_route_fields = _missing_query_route_fields(payload)
+    return [
+        (
+            "Safe clarification",
+            is_safe_clarification_payload(payload),
+            "bounded clarification response"
+            if is_safe_clarification_payload(payload)
+            else "missing fail-closed clarification envelope",
+        ),
+        (
+            "Clarification candidates",
+            isinstance(candidates, list) and bool(candidates),
+            f"{len(candidates) if isinstance(candidates, list) else 0} bounded candidates",
+        ),
+        (
+            "Clarification reason",
+            clarification.get("reason") in SAFE_CLARIFICATION_REASONS,
+            str(clarification.get("reason") or "missing"),
+        ),
+        (
+            "Query route",
+            not missing_route_fields,
+            "route evidence present"
+            if not missing_route_fields
+            else ", ".join(missing_route_fields[:10]),
+        ),
+        (
+            "Public metadata redacted",
+            not leaked_markers,
+            "hidden" if not leaked_markers else ", ".join(leaked_markers),
+        ),
+    ]
+
+
 def _contract_checks(payload: dict[str, Any]) -> list[tuple[str, bool, str]]:
+    if is_safe_clarification_payload(payload):
+        return _clarification_contract_checks(payload)
     sensitive_scan_payload = {
         key: value
         for key, value in payload.items()
@@ -2135,6 +2226,7 @@ def _render_plan(
     source: Path,
     review_contexts: list[tuple[Path, dict[str, Any]]] | None = None,
 ) -> str:
+    clarification_notice = _render_clarification_notice(payload)
     current = payload.get("current_scope") or {}
     target = payload.get("target_scope") or {}
     scenario = payload.get("scenario") or {}
@@ -2155,6 +2247,7 @@ def _render_plan(
           <strong>{_esc(payload.get('target_population'))}</strong>
         </div>
       </header>
+      {clarification_notice}
       <div class="summary-grid">
         <div>
           <h3>전환 진단</h3>
@@ -2196,6 +2289,34 @@ def _render_plan(
       </ul>
     </section>
     """
+
+
+def _render_clarification_notice(payload: dict[str, Any]) -> str:
+    if not is_safe_clarification_payload(payload):
+        return ""
+    error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+    clarification = (
+        payload.get("clarification")
+        if isinstance(payload.get("clarification"), dict)
+        else {}
+    )
+    candidates = clarification.get("candidates") if isinstance(clarification.get("candidates"), list) else []
+    labels: list[str] = []
+    for candidate in candidates[:8]:
+        if not isinstance(candidate, dict):
+            continue
+        label = candidate.get("matched_text") or candidate.get("unit_name") or candidate.get("element_name")
+        if label and str(label) not in labels:
+            labels.append(str(label))
+    candidate_html = "".join(f"<li>{_esc(label)}</li>" for label in labels) or "<li>bounded choice required</li>"
+    return (
+        '<div class="clarification-notice">'
+        "<h3>Scope clarification required</h3>"
+        f"<p>{_esc(error.get('message') or 'Choose one bounded NCS scope before planning.')}</p>"
+        f"<p class=\"muted\">reason: {_esc(clarification.get('reason'))}</p>"
+        f"<ul>{candidate_html}</ul>"
+        "</div>"
+    )
 
 
 def render(
