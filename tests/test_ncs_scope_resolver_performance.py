@@ -145,18 +145,45 @@ class NcsScopeResolverPerformanceTests(unittest.TestCase):
         self.assertEqual(result["alternative_candidates"], [])
         self.assertEqual(result["resolution_margin"], 1.0)
 
-    def test_non_classification_exact_scope_falls_back_to_legacy_unit_match(self) -> None:
+    def test_non_classification_exact_scope_resolves_official_unit_without_group_concat(self) -> None:
         sql: list[str] = []
         self.conn.set_trace_callback(sql.append)
 
         result = self._resolve(self.conn, job_scope="Unit Only")
 
-        self.assertEqual(result["status"], "unresolved")
-        self.assertEqual(
-            result["alternative_candidates"][0]["match_basis"],
-            ["job_scope_official_unit_name"],
+        self.assertEqual(result["status"], "resolved")
+        self.assertEqual(result["selected_candidate"]["path_label"], "Only Other > Other > Other > Different")
+        self.assertEqual(result["selected_candidate"]["match_basis"], ["job_scope_exact_unit_name"])
+        self.assertEqual(result["alternative_candidates"], [])
+        self.assertEqual(result["alternative_count"], 0)
+        self.assertEqual(result["resolution_margin"], 1.0)
+        self.assertFalse(any("GROUP_CONCAT" in statement for statement in sql))
+
+    def test_classification_prefix_does_not_promote_element_like_scope(self) -> None:
+        self.conn.execute(
+            "UPDATE classifications SET sub_name = '인사' WHERE classification_id = 1"
         )
-        self.assertTrue(any("GROUP_CONCAT" in statement for statement in sql))
+        self.conn.commit()
+        result = self._resolve(self.conn, job_scope="인사하기")
+
+        self.assertEqual(result["status"], "unresolved")
+        self.assertTrue(result["needs_context"])
+        self.assertIsNone(result["selected_candidate"])
+
+    def test_exact_unit_scope_wins_over_broad_classification_prefix(self) -> None:
+        self.conn.execute(
+            "UPDATE classifications SET middle_name = '사회복지', sub_name = '사회복지조직운영' WHERE classification_id = 4"
+        )
+        self.conn.execute(
+            "UPDATE competency_units SET unit_name_raw = '사회복지조직 인사관리' WHERE unit_code = 'UNIT_ONLY'"
+        )
+        self.conn.commit()
+        result = self._resolve(self.conn, job_scope="사회복지조직 인사관리")
+
+        self.assertEqual(result["status"], "resolved")
+        self.assertEqual(result["selected_candidate"]["match_basis"], ["job_scope_exact_unit_name"])
+        self.assertIn("사회복지 >", result["selected_candidate"]["path_label"])
+        self.assertTrue(result["selected_candidate"]["path_label"].endswith("사회복지조직운영"))
 
 
 if __name__ == "__main__":

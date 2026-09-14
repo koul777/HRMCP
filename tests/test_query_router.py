@@ -1398,7 +1398,7 @@ class ExplicitJobScopeRealDbRegressionTests(unittest.TestCase):
         self.assertEqual(route["params"]["query"], "접객")
         self.assertEqual(route["params"]["job_scope"], "접객")
         self.assertNotIn("classification_filter", route["params"])
-        self.assertEqual(route["search_context"]["status"], "resolved")
+        self.assertEqual(route["search_context"]["status"], "unresolved")
         self.assertTrue(route["search_context"]["needs_context"])
         self.assertEqual(
             route["search_context"]["promotion_status"],

@@ -746,6 +746,98 @@ def _ncs_resolve_exact_classification_scope(
     return base
 
 
+def _ncs_resolve_exact_unit_scope(
+    conn: Any,
+    *,
+    normalized_job_scope: str,
+    normalized_filter: dict[str, str],
+    base: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Resolve an exact official competency-unit name to its full path.
+
+    Classification labels are attempted first.  When the caller supplies a
+    unit title (for example ``사회복지조직 인사관리`` or ``수출입계약``), an
+    exact unit match is stronger than a prefix hit on a broad classification
+    label (``사회복지`` or ``인사``).  Element names are deliberately not
+    promoted here because an element can be shared by unrelated units and
+    must remain a lexical result unless its parent scope is explicit.
+    """
+    normalized = _normalized_search_storage(conn)
+    levels = ("major", "middle", "small", "sub")
+    query_value = normalize_search_text(normalized_job_scope)
+    if not query_value:
+        return None
+    unit_column = _ncs_search_column("cu.unit_name_raw", normalized)
+    where_sql = f"WHERE {unit_column} = ?" if normalized else ""
+    params = (query_value,) if normalized else ()
+    rows = conn.execute(
+        "SELECT cu.unit_code, cu.unit_name_raw, "
+        "c.classification_id, c.major_code, c.major_name, "
+        "c.middle_code, c.middle_name, c.small_code, c.small_name, "
+        "c.sub_code, c.sub_name "
+        "FROM competency_units cu "
+        "JOIN classifications c ON c.classification_id = cu.classification_id "
+        f"{where_sql} "
+        "ORDER BY c.major_code, c.middle_code, c.small_code, c.sub_code, "
+        "cu.unit_code",
+        params,
+    ).fetchall()
+    if not normalized:
+        rows = [row for row in rows if normalize_search_text(row["unit_name_raw"]) == query_value]
+    if not rows:
+        return None
+
+    candidates: dict[tuple[str | None, ...], dict[str, Any]] = {}
+    for row in rows:
+        codes = tuple(str(row[f"{level}_code"] or "") or None for level in levels)
+        names = tuple(str(row[f"{level}_name"] or "") or None for level in levels)
+        key = codes
+        candidate = candidates.setdefault(
+            key,
+            {
+                **{f"{level}_code": codes[index] for index, level in enumerate(levels)},
+                **{f"{level}_name": names[index] for index, level in enumerate(levels)},
+                "path_label": " > ".join(name for name in names if name),
+                "confidence": 1.0,
+                "match_basis": ["job_scope_exact_unit_name"],
+                "_depth": len(levels) - 1,
+                "_job_basis": 1.0,
+                "_job_match_name": query_value,
+                "_context_token_count": 0,
+                "_members": [],
+            },
+        )
+        candidate["_members"].append(dict(row))
+    compatible, pruned = _ncs_prune_exact_scope_candidates(
+        list(candidates.values()), normalized_filter
+    )
+    if not compatible:
+        top = pruned[0]
+        base["selected_candidate"] = _ncs_context_candidate_public(top)
+        base["alternative_candidates"] = [
+            _ncs_context_candidate_public(item) for item in pruned[1:4]
+        ]
+        base["alternative_count"] = max(0, len(pruned) - 1)
+        base["resolution_margin"] = 0.0
+        base.update(status="conflict", needs_context=True)
+        base["warnings"].append("context_conflicts_with_hard_filter")
+        return base
+    if len(compatible) != 1:
+        base["alternative_candidates"] = [
+            _ncs_context_candidate_public(item) for item in compatible[:3]
+        ]
+        base["alternative_count"] = len(compatible)
+        base["resolution_margin"] = 0.0
+        base.update(status="ambiguous", needs_context=True)
+        return base
+    base["selected_candidate"] = _ncs_context_candidate_public(compatible[0])
+    base["alternative_candidates"] = []
+    base["alternative_count"] = 0
+    base["resolution_margin"] = 1.0
+    base.update(status="resolved", needs_context=False)
+    return base
+
+
 def resolve_ncs_search_context(
     conn: Any,
     *,
@@ -823,6 +915,14 @@ def resolve_ncs_search_context(
         )
         if exact is not None:
             return exact
+        exact_unit = _ncs_resolve_exact_unit_scope(
+            conn,
+            normalized_job_scope=normalized_job_scope,
+            normalized_filter=normalized_filter,
+            base=base,
+        )
+        if exact_unit is not None:
+            return exact_unit
 
     rows = conn.execute(
         """
@@ -968,9 +1068,11 @@ def resolve_ncs_search_context(
                 if name == normalized_job:
                     exact_matches.append((depth, name))
                 elif (
-                    name.startswith(normalized_job)
-                    or normalized_job.startswith(name)
-                    or _ncs_search_boundary_match_normalized(name, normalized_job)
+                    # Scope promotion requires a complete lexical match.  A
+                    # one-sided prefix would incorrectly map an element such
+                    # as ``인사하기`` to the unrelated classification ``인사``.
+                    _ncs_search_boundary_match_normalized(name, normalized_job)
+                    and _ncs_search_boundary_match_normalized(normalized_job, name)
                 ):
                     boundary_matches.append((depth, name))
             if exact_matches:
