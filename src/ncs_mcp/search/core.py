@@ -2148,6 +2148,7 @@ def _ncs_search_match_metadata(
     phrase: str,
     match_mode: str,
     token_expansions: dict[str, list[str]] | None = None,
+    compound_subphrase_expansions: dict[str, list[str]] | None = None,
     intent_expansions: list[str] | None = None,
     normalized: bool | str = False,
 ) -> None:
@@ -2172,6 +2173,7 @@ def _ncs_search_match_metadata(
         if match_mode in {"expanded_token_and", "token_or"}
         else {}
     )
+    active_compound_expansions = compound_subphrase_expansions or {}
     if match_mode == "morphology_fill":
         active_expansions = _ncs_search_morphology_expansions(query_tokens)
         if item.get("type") == "unit":
@@ -2214,6 +2216,36 @@ def _ncs_search_match_metadata(
             matched_tokens.append(token)
             matched_terms.append(normalized_token)
             matched_term_fields.setdefault(normalized_token, set()).update(direct_fields)
+            # A direct definition/classification hit can coexist with a
+            # stronger official compound hit in the unit name. Keep the
+            # compound evidence visible instead of hiding it behind the
+            # direct-token fast path.
+            if item.get("type") == "unit":
+                for expansion in active_compound_expansions.get(token, []):
+                    normalized_expansion = expansion.casefold()
+                    expansion_fields = [
+                        field_name
+                        for field_name, value in normalized_fields.items()
+                        if field_name in {"unit_name", "alias"}
+                        and normalized_expansion
+                        and matches(field_name, value, normalized_expansion)
+                    ]
+                    if not expansion_fields or any(
+                        entry.get("matched_as") == expansion
+                        for entry in matched_expansions
+                    ):
+                        continue
+                    matched_terms.append(normalized_expansion)
+                    matched_term_fields.setdefault(normalized_expansion, set()).update(
+                        expansion_fields
+                    )
+                    matched_expansions.append(
+                        {
+                            "token": token,
+                            "matched_as": expansion,
+                            "match_fields": expansion_fields,
+                        }
+                    )
             continue
         for expansion in active_expansions.get(token, []):
             normalized_expansion = expansion.casefold()
@@ -2867,6 +2899,9 @@ def search_ncs(
             phrase=phrase,
             match_mode=_NCS_SEARCH_MATCH_MODES[item["_match_tier"]],
             token_expansions=item_token_expansions,
+            compound_subphrase_expansions=(
+                unit_compound_expansions if item["type"] == "unit" else None
+            ),
             intent_expansions=intent_expansions,
             normalized=normalized_search,
         )

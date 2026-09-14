@@ -1035,11 +1035,15 @@ class NcsSearchRecallTests(unittest.TestCase):
     def test_joined_subphrase_recovers_official_name_but_rejects_internal_compound(self) -> None:
         with self._open_db() as conn:
             conn.executemany(
-                "INSERT INTO competency_units VALUES (?, ?, '', '4', 1)",
+                "INSERT INTO competency_units VALUES (?, ?, ?, '4', 1)",
                 (
-                    ("C_SUBPHRASE", "\uacbd\uc601\uc815\ubcf4\uc2dc\uac01\ud654"),
-                    ("C_INTERNAL", "\uc218\ucd9c\uc785\uacc4\uc57d"),
-                    ("C_BOUNDARY", "\ucd9c\uc785\ud1b5\uc81c"),
+                    (
+                        "C_SUBPHRASE",
+                        "\uacbd\uc601\uc815\ubcf4\uc2dc\uac01\ud654",
+                        "\uc815\ubcf4\ub97c \ud65c\uc6a9\ud55c\ub2e4",
+                    ),
+                    ("C_INTERNAL", "\uc218\ucd9c\uc785\uacc4\uc57d", ""),
+                    ("C_BOUNDARY", "\ucd9c\uc785\ud1b5\uc81c", ""),
                 ),
             )
             conn.commit()
@@ -1056,6 +1060,13 @@ class NcsSearchRecallTests(unittest.TestCase):
         self.assertIn("\uacbd\uc601\uc815\ubcf4", [
             item["matched_as"] for item in recovered_row["matched_expansions"]
         ])
+        self.assertTrue(
+            any(
+                item["matched_as"] == "\uacbd\uc601\uc815\ubcf4"
+                and item["match_fields"] == ["unit_name"]
+                for item in recovered_row["matched_expansions"]
+            )
+        )
 
         internal = server.search_ncs(
             "\ucd9c\uc785 \uacc4\uc57d \uc791\uc131",
