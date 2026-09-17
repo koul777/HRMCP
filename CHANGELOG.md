@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Restored CI, which had failed on every push since 2026-09-12. Builder release
+  guards now accept a Windows 8.3 short spelling of the Builder root (GitHub
+  runners hand out `C:\Users\RUNNER~1\...`) while still resolving the full
+  path and checking every component below the root for reparse points, and
+  prebuilt-output evidence compares its recorded location canonically instead
+  of by string. Refresh baseline promotion now detects junctions on Python 3.11,
+  where `Path.is_junction()` does not exist. Tests that need the canonical
+  12 GB database skip when it is absent, and later CI steps (lint, smoke,
+  STDIO/HTTP) still run after a unit-test failure.
 - Carry an explicit classification filter through `ncs_discover_tools` as well
   as `ncs_execute_tool`, so agent routing and execution preserve the same NCS
   scope without inferring a major from query text.

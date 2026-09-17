@@ -79,9 +79,15 @@ class OntologyExportTests(unittest.TestCase):
             root = Path(tmp)
             db_path = root / "ncs.db"
             self._create_empty_database(db_path)
-            relative_alias = Path(os.path.relpath(db_path, start=Path.cwd()))
-
-            self._assert_collision_rejected_without_mutation(root, db_path, relative_alias)
+            # relpath cannot cross drives (CI checks out on D:, TEMP is on C:).
+            previous_cwd = Path.cwd()
+            os.chdir(root.parent)
+            try:
+                relative_alias = Path(os.path.relpath(db_path, start=Path.cwd()))
+                self.assertFalse(relative_alias.is_absolute())
+                self._assert_collision_rejected_without_mutation(root, db_path, relative_alias)
+            finally:
+                os.chdir(previous_cwd)
 
     @unittest.skipUnless(os.name == "nt", "case aliases require a case-insensitive path platform")
     def test_export_rejects_case_normalized_alias_without_mutation(self) -> None:

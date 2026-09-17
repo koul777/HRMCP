@@ -16,6 +16,7 @@ from ncs_mcp.builder_authorization import (
     _bind_operation_version,
     current_builder_context,
     require_builder_context,
+    root_spelling_ancestor,
 )
 from ncs_mcp.data_builder import BuilderError, DataBuilder
 
@@ -268,6 +269,54 @@ class BuilderAuthorizationTests(unittest.TestCase):
             self.assertFalse(self.lock.exists())
         finally:
             os.rmdir(junction)
+
+
+def short_path(path: Path) -> Path | None:
+    """Return the Windows 8.3 spelling of an existing path, if the volume has one."""
+    if os.name != "nt":
+        return None
+    import ctypes
+
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = ctypes.windll.kernel32.GetShortPathNameW(str(path), buffer, len(buffer))
+    if not length or length >= len(buffer):
+        return None
+    spelled = Path(buffer.value)
+    return None if str(spelled) == str(path) else spelled
+
+
+class RootSpellingAncestorTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name) / "builder_root_with_long_name"
+        (self.root / ".state/ncs-data-builder/versions/a1").mkdir(parents=True)
+
+    def test_root_itself_nested_paths_and_outside_paths(self):
+        nested = self.root / ".state/ncs-data-builder/versions/a1/release.json"
+        self.assertEqual(root_spelling_ancestor(self.root, self.root), self.root)
+        self.assertEqual(root_spelling_ancestor(nested, self.root), self.root)
+        self.assertIsNone(root_spelling_ancestor(self.root.parent / "other/x", self.root))
+
+    def test_short_name_spelling_maps_to_its_own_lexical_ancestor(self):
+        short_root = short_path(self.root)
+        if short_root is None:
+            self.skipTest("volume has no 8.3 short names")
+        nested = short_root / ".state/ncs-data-builder/versions/a1/release.json"
+        self.assertEqual(root_spelling_ancestor(nested, self.root.resolve()), short_root)
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction regression")
+    def test_junction_back_to_root_keeps_shallowest_ancestor(self):
+        loop = self.root / "loop"
+        subprocess.run(["powershell", "-NoProfile", "-Command",
+                        f"New-Item -ItemType Junction -Path '{loop}' -Target '{self.root}' | Out-Null"],
+                       check=True, capture_output=True)
+        try:
+            # The link component stays below the returned ancestor, so callers
+            # still inspect it instead of treating it as the root spelling.
+            self.assertEqual(root_spelling_ancestor(loop / ".state", self.root), self.root)
+        finally:
+            os.rmdir(loop)
 
 
 if __name__ == "__main__":

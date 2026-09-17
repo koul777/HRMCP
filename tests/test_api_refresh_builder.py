@@ -416,7 +416,7 @@ class ApiRefreshBuilderTests(unittest.TestCase):
             self.assertIsNone(kwargs["max_pages"])
         self.assertEqual(link_calls, [False])
         self.assertEqual(self.db_path.read_bytes(), source_before)
-        self.assertEqual(Path(report["prepared_output"]), prepared)
+        self.assertEqual(Path(report["prepared_output"]).resolve(), prepared.resolve())
         self.assertTrue(prepared.is_file())
         self.assertNotEqual(prepared.read_bytes(), source_before)
         prepared_conn = sqlite3.connect(prepared)

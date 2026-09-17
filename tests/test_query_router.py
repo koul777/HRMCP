@@ -1223,6 +1223,10 @@ class ExplicitJobScopeServerRoutingTests(unittest.TestCase):
         self.assertIn("filtered NOT_FOUND", description)
 
 
+@unittest.skipUnless(
+    (ROOT / "data" / "processed" / "ncs.db").is_file(),
+    "canonical NCS database is not available",
+)
 class ExplicitJobScopeRealDbRegressionTests(unittest.TestCase):
     def setUp(self) -> None:
         canonical_db = ROOT / "data" / "processed" / "ncs.db"

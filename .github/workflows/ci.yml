@@ -63,6 +63,7 @@ jobs:
           NCS_DB_PATH: ci-smoke\ncs.db
 
       - name: Run natural-language search Hit@3 gate
+        if: ${{ !cancelled() }}
         run: python scripts\audit_ncs_search_precision.py --nl-eval --compare-stage1-baseline --input tests\fixtures\ncs_search_eval_nl.json --db data\processed\ncs.db --limit 10 --hit3-threshold 0.7 --out ci-artifacts\ncs_search_eval_nl.json --markdown-out ci-artifacts\ncs_search_eval_nl.md
         env:
           # Initial rollout is warning-only. Set true when CI has the full SQLite DB
@@ -70,32 +71,37 @@ jobs:
           NCS_SEARCH_EVAL_ENFORCE: "false"
 
       - name: Run repository lint guard
+        if: ${{ !cancelled() }}
         run: python scripts\ncs_harness.py lint
 
       - name: Build deployment source manifest
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.enforce_source_boundary == 'true' }}
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.enforce_source_boundary == 'true' }}
         run: python scripts\build_deployment_source_manifest.py --json-out deployment_source_manifest_ci.json --markdown-out deployment_source_manifest_ci.md
 
       - name: Check deployment source boundary
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.enforce_source_boundary == 'true' && inputs.fail_on_lfs_history != 'true' }}
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.enforce_source_boundary == 'true' && inputs.fail_on_lfs_history != 'true' }}
         run: python scripts\check_deployment_source_boundary.py --check-lfs-history --json-out deployment_source_boundary_ci.json --markdown-out deployment_source_boundary_ci.md
 
       - name: Check first-publication source boundary
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.enforce_source_boundary == 'true' && inputs.fail_on_lfs_history == 'true' }}
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.enforce_source_boundary == 'true' && inputs.fail_on_lfs_history == 'true' }}
         run: python scripts\check_deployment_source_boundary.py --fail-on-lfs-history --json-out deployment_source_boundary_ci.json --markdown-out deployment_source_boundary_ci.md
 
       - name: Run harness smoke
+        if: ${{ !cancelled() }}
         run: python scripts\ncs_harness.py smoke
         env:
           NCS_DB_PATH: ci-smoke\ncs.db
 
       - name: Run protocol-level STDIO smoke
+        if: ${{ !cancelled() }}
         run: python scripts\mcp_stdio_smoke.py --timeout 20
 
       - name: Run HTTP health smoke
+        if: ${{ !cancelled() }}
         run: python scripts\mcp_http_health_smoke.py --timeout 20
 
       - name: Run institutional chat smoke
+        if: ${{ !cancelled() }}
         run: python scripts\institutional_chat_smoke.py --timeout-seconds 60
 
   docker:

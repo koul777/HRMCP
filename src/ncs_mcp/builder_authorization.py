@@ -129,6 +129,22 @@ def _canonical(path: str | Path) -> str:
     return os.path.normcase(str(Path(path).expanduser().resolve()))
 
 
+def root_spelling_ancestor(path: Path, root: str | Path) -> Path | None:
+    """Return the shallowest ancestor (or *path*) that canonically names *root*.
+
+    Windows can spell one directory several ways (8.3 short names, case). Only
+    the root prefix is matched by resolution; callers must still inspect every
+    component below the returned ancestor for redirection. Choosing the
+    shallowest match keeps a link that points back at the root inside that
+    inspected range.
+    """
+    wanted = _canonical(root)
+    for ancestor in (*reversed(path.parents), path):
+        if _canonical(ancestor) == wanted:
+            return ancestor
+    return None
+
+
 def validate_builder_paths(root: str | Path, state_dir: str | Path,
                            version_dir: str | Path | None = None) -> None:
     """Check lexical placement and resolved placement independently.

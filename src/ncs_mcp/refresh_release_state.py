@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -34,12 +35,21 @@ class RefreshReleaseStateError(RuntimeError):
     pass
 
 
+FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+
+
 def _is_reparse_path(path: Path) -> bool:
+    # Path.is_junction() only exists from Python 3.12; the reparse attribute
+    # covers junctions and symlinks on every supported interpreter.
     try:
-        is_junction = getattr(path, "is_junction", lambda: False)
-        return path.is_symlink() or bool(is_junction())
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
     except OSError:
         return True
+    return stat.S_ISLNK(info.st_mode) or bool(
+        getattr(info, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT
+    )
 
 
 def _sha256(path: Path) -> str:

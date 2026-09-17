@@ -17,7 +17,9 @@ from ncs_mcp.builder_release import (
     ReleaseError, _is_canonically_within, _parse_inspection, _verify, _verify_deployment,
     _write, build_release as direct_build_release, deploy_release as direct_deploy_release,
     project_configuration, ReleaseGuard, _capacity_record, snapshot_capacity_message,
+    _same_tree_evidence, _tree_evidence,
 )
+from test_builder_authorization import short_path
 from ncs_mcp.builder_authorization import BuilderAuthorizationError
 from ncs_mcp.data_builder import BuilderError, DataBuilder
 
@@ -224,8 +226,8 @@ class BuilderReleaseTests(unittest.TestCase):
             self.assertEqual(report['snapshot_capacity']['status'], 'hard_cap_exceeded')
             self.assertEqual(report['snapshot_capacity']['hard_headroom_bytes'], 0)
             self.assertEqual(report['snapshot_capacity']['error_code'], 'snapshot_hard_cap_exceeded')
-            self.assertEqual(Path(report['snapshot_capacity']['database_path']),
-                             self.version / 'release/compact.db')
+            self.assertEqual(Path(report['snapshot_capacity']['database_path']).resolve(),
+                             (self.version / 'release/compact.db').resolve())
             self.assertIn('hard 7', report['error'])
             self.commands.clear()
             with self.assertRaises(BuilderError):
@@ -328,7 +330,8 @@ class BuilderReleaseTests(unittest.TestCase):
         saved_operations = []
         def lose_lease_after_success(path, value, **kwargs):
             real_write(path, value, **kwargs)
-            if path == self.version / 'release.json' and value.get('status') == 'deployed':
+            if (path.resolve() == (self.version / 'release.json').resolve()
+                    and value.get('status') == 'deployed'):
                 saved_operations.append(kwargs['builder_context'].operation_id)
                 (engine.state / 'operation.lock').unlink()
         with patch.object(engine, 'candidate', return_value=self.version / 'ncs.db'), \
@@ -1435,6 +1438,35 @@ print(json.dumps({'report': report, 'calls': calls}))
         self.assertEqual(result['failed_phase'], 'preflight')
         self.assertIn('prebuilt output changed', result['error'])
         self.assertEqual(len(self.commands), count)
+
+    def test_short_path_package_deploys_under_canonical_spelling(self):
+        # GitHub Windows runners hand out TEMP as C:\Users\RUNNER~1\...
+        short_root = short_path(self.root)
+        if short_root is None:
+            self.skipTest('volume has no 8.3 short names')
+        self.root, self.version = short_root, short_root / '.state/ncs-data-builder/versions/a1'
+        self.template = short_root / 'deploy/vercel_mcp_app'
+        report = self.build()
+        self.assertTrue(report['ok'], report)
+        self.root, self.version = self.root.resolve(), self.version.resolve()
+        result = deploy_release(self.version,
+            production_mcp_url='https://selected-project.vercel.app/api/mcp',
+            runner=self.run_command, verifier=self.verified)
+        self.assertTrue(result['ok'], result)
+
+    def test_tree_evidence_matches_location_aliases_but_not_other_trees(self):
+        report = self.build()
+        recorded = report['prebuilt_output']
+        output = self.version / 'release/deploy/.vercel/output'
+        current = _tree_evidence(output)
+        self.assertTrue(_same_tree_evidence(current, recorded))
+        short_output = short_path(output)
+        if short_output is not None:
+            self.assertTrue(_same_tree_evidence(current, {**recorded, 'path': str(short_output)}))
+        self.assertFalse(_same_tree_evidence(current, {**recorded, 'path': str(self.root)}))
+        self.assertFalse(_same_tree_evidence(current, {**recorded, 'sha256': 'sha256:' + '0' * 64}))
+        self.assertFalse(_same_tree_evidence(current, {k: v for k, v in recorded.items() if k != 'bytes'}))
+        self.assertFalse(_same_tree_evidence(current, None))
 
     def test_errors_do_not_leak_runner_credentials(self):
         self.build()

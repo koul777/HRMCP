@@ -29,6 +29,7 @@ from typing import Callable
 
 from .builder_authorization import (
     BuilderAuthorizationError, BuilderOperationContext, require_builder_context,
+    root_spelling_ancestor,
 )
 from .vercel_snapshot import (
     COMPACT_ARCHIVE_NAME, COMPACT_MANIFEST_NAME, COMPACT_SNAPSHOT_NAME,
@@ -72,9 +73,13 @@ class ReleaseGuard:
             # Canonical root spelling is used for state pointers on Windows.
             try:
                 relative = path.relative_to(self.root)
-            except ValueError as exc:
-                raise BuilderAuthorizationError('Release path escapes Builder root.') from exc
-            lexical_root = self.root
+                lexical_root = self.root
+            except ValueError:
+                # An 8.3 short spelling (e.g. RUNNER~1) of the same root.
+                lexical_root = root_spelling_ancestor(path, self.root)
+                if lexical_root is None:
+                    raise BuilderAuthorizationError('Release path escapes Builder root.') from None
+                relative = path.relative_to(lexical_root)
         expected = self.root / relative
         if path.resolve() != expected:
             raise BuilderAuthorizationError('Release path redirects outside its authorized location.')
@@ -347,6 +352,18 @@ def _tree_evidence(root: Path) -> dict:
         raise ReleaseError('Fresh Vercel production build output is empty.')
     return {'path': str(root), 'bytes': total_bytes, 'file_count': file_count,
             'sha256': 'sha256:' + digest.hexdigest()}
+
+
+def _same_tree_evidence(current: dict, recorded: object) -> bool:
+    """Match tree content exactly and its location under any path spelling."""
+    if not isinstance(recorded, dict) or set(recorded) != set(current):
+        return False
+    if any(current[key] != recorded[key] for key in current if key != 'path'):
+        return False
+    if not isinstance(recorded['path'], str):
+        return False
+    return (os.path.normcase(str(Path(current['path']).resolve()))
+            == os.path.normcase(str(Path(recorded['path']).resolve())))
 
 
 def _module_source_relative(module: str) -> tuple[Path, Path] | None:
@@ -1070,7 +1087,7 @@ def _release_package_preflight(report: dict, version: Path, production_mcp_url: 
         if selected_project[key] != report['project'][key]:
             raise ReleaseError('Isolated stage no longer matches the explicitly selected Vercel project.')
     prebuilt_output = stage / '.vercel/output'
-    if _tree_evidence(prebuilt_output) != report.get('prebuilt_output'):
+    if not _same_tree_evidence(_tree_evidence(prebuilt_output), report.get('prebuilt_output')):
         raise ReleaseError('Verified Vercel prebuilt output changed after bundle verification.')
     bundle_report = version / 'release/function-bundle-verification.json'
     recorded_bundle_report = report.get('function_bundle_verification', {})
@@ -1319,7 +1336,7 @@ def deploy_release(version_dir: Path, *, production_mcp_url: str,
         stdout = run([
             executable, 'deploy', '--prebuilt', '--prod', '--skip-domain', '--yes'
         ], stage)
-        if _tree_evidence(prebuilt_output) != report['prebuilt_output']:
+        if not _same_tree_evidence(_tree_evidence(prebuilt_output), report['prebuilt_output']):
             raise ReleaseError('Vercel prebuilt output changed during upload.')
         urls = list(dict.fromkeys(re.findall(r'https://[A-Za-z0-9-]+\.vercel\.app', stdout)))
         if len(urls) != 1:
