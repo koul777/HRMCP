@@ -9,6 +9,9 @@ from collections import Counter
 from typing import Any
 
 from ncs_mcp.career_path import career_paths_for_units
+# Public training search must treat a user's % or _ as literal text, the same
+# way ncs_search does, instead of as LIKE wildcards.
+from ncs_mcp.search.core import _escape_ncs_search_like as _escape_like
 from ncs_mcp.compact_postings import (
     criteria_concept_ids,
     has_compact_criteria_postings,
@@ -3293,8 +3296,10 @@ def search_training_courses(
     clauses: list[str] = []
     params: list[Any] = []
     if query:
-        clauses.append("(tc.compe_unit_name LIKE ? OR tc.train_goal LIKE ?)")
-        like = f"%{query}%"
+        clauses.append(
+            "(tc.compe_unit_name LIKE ? ESCAPE '\\' OR tc.train_goal LIKE ? ESCAPE '\\')"
+        )
+        like = f"%{_escape_like(query)}%"
         params.extend([like, like])
     if major_code:
         clauses.append("tc.ncs_lclas_cd = ?")
@@ -3310,11 +3315,11 @@ def search_training_courses(
                 FROM ncs_training_course_concept_links l
                 JOIN ontology_concepts oc ON oc.concept_id = l.concept_id
                 WHERE l.training_course_id = tc.training_course_id
-                  AND oc.concept_name LIKE ?
+                  AND oc.concept_name LIKE ? ESCAPE '\\'
             )
             """
         )
-        params.append(f"%{concept_query}%")
+        params.append(f"%{_escape_like(concept_query)}%")
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     if compact:
         course_columns = ", ".join(f"tc.{field}" for field in SUMMARY_TRAINING_COURSE_FIELDS)

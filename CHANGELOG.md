@@ -11,6 +11,12 @@
   where `Path.is_junction()` does not exist. Tests that need the canonical
   12 GB database skip when it is absent, and later CI steps (lint, smoke,
   STDIO/HTTP) still run after a unit-test failure.
+- Escaped LIKE wildcards in the public `ncs_training` search path. A user's `%`
+  or `_` is now matched literally, as `ncs_search` already did, so a query such
+  as `100%` finds the course whose name contains it instead of matching every
+  row. An AST audit of all 803 f-string SQL sites found no injection path: user
+  values are always bound and every SQL fragment comes from fixed server-side
+  text (`reports/sql_injection_audit_20260918.md`).
 - Split CI unit tests into three parallel shards (`scripts/run_test_shard.py`).
   Each test module lands in exactly one shard by CRC32 of its name, and a
   module that fails to import always stays in shard 0. The serial step took

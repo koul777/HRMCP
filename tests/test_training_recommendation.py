@@ -9930,6 +9930,36 @@ class TrainingRecommendationTests(unittest.TestCase):
         self.assertEqual(resolution["candidates"][1]["unit_code"], "0202020199_23v1")
         self.assertEqual(resolution["candidates"][1]["match_level"], "query_alias_unit")
 
+    def test_public_training_search_treats_like_wildcards_as_literal_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "ncs.db")
+            initialize_database(conn)
+            seed_task_ontology(conn)
+            upsert_training_courses(conn, [
+                {
+                    "ncs_lclas_cd": "02", "ncs_mclas_cd": "02", "ncs_sclas_cd": "02",
+                    "ncs_subd_cd": "01", "ncs_cl_cd": "0202020101_23v3",
+                    "compe_unit_name": "100% inspection practice",
+                    "compe_unit_level": "5", "train_goal": "Reach 100% pass rate.",
+                    "train_time": "16", "fac_name": "HR center", "meth_name": "Practice",
+                },
+                {
+                    "ncs_lclas_cd": "02", "ncs_mclas_cd": "02", "ncs_sclas_cd": "02",
+                    "ncs_subd_cd": "01", "ncs_cl_cd": "0202020101_23v3",
+                    "compe_unit_name": "Workforce planning",
+                    "compe_unit_level": "5", "train_goal": "Plan headcount.",
+                    "train_time": "16", "fac_name": "HR center", "meth_name": "Practice",
+                },
+            ])
+
+            # A bare wildcard must not behave as "match everything".
+            self.assertEqual(len(search_training_courses(conn, query="%", limit=10)), 1)
+            self.assertEqual(len(search_training_courses(conn, query="100%", limit=10)), 1)
+            # '_' is a single-character wildcard in LIKE; only literal matches count.
+            self.assertEqual(search_training_courses(conn, query="_", limit=10), [])
+            self.assertEqual(len(search_training_courses(conn, query="planning", limit=10)), 1)
+            conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()
