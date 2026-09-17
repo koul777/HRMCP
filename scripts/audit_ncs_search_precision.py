@@ -31,6 +31,10 @@ DEFAULT_OUT = ROOT / "reports" / "ncs_search_precision_risk_20260830.json"
 DEFAULT_MARKDOWN_OUT = ROOT / "reports" / "ncs_search_precision_risk_20260830.md"
 RESULT_TYPES = ("unit", "element", "criteria", "ksa")
 NL_CATEGORIES = ("인사", "노무", "교육", "총무", "회계")
+# A development fixture may add cross-domain control cases so a change that
+# favours the HR majors cannot quietly break search outside them. The five
+# categories above stay required; this one is optional.
+NL_OPTIONAL_CATEGORIES = ("비HR",)
 MIN_NL_CASES = 30
 NEAR_DUPLICATE_THRESHOLD = 0.92
 
@@ -255,6 +259,14 @@ def load_stage1_baseline_search(db_path: Path) -> SearchFunction:
     return baseline_search
 
 
+
+def evaluation_categories(records: list[dict[str, Any]]) -> tuple[str, ...]:
+    """Required categories first, then any optional category the fixture used."""
+    present = {record["category"] for record in records}
+    return NL_CATEGORIES + tuple(
+        category for category in NL_OPTIONAL_CATEGORIES if category in present
+    )
+
 def load_nl_evaluation_cases(input_path: Path) -> list[dict[str, Any]]:
     payload = json.loads(input_path.read_text(encoding="utf-8"))
     if not isinstance(payload, list):
@@ -277,7 +289,7 @@ def load_nl_evaluation_cases(input_path: Path) -> list[dict[str, Any]]:
         expected_raw = raw_case["expected_unit_codes"]
         if not query or query in seen_queries:
             raise ValueError(f"case {index} has a blank or duplicate query")
-        if category not in NL_CATEGORIES:
+        if category not in NL_CATEGORIES + NL_OPTIONAL_CATEGORIES:
             raise ValueError(f"case {index} has unsupported category: {category}")
         if not isinstance(expected_raw, list) or not expected_raw:
             raise ValueError(f"case {index} requires expected_unit_codes")
@@ -458,7 +470,7 @@ def evaluate_nl_cases(
         category: _nl_metric_summary(
             [record for record in records if record["category"] == category]
         )
-        for category in NL_CATEGORIES
+        for category in evaluation_categories(records)
     }
     return {
         "overall": _nl_metric_summary(records),
@@ -516,9 +528,9 @@ def build_nl_evaluation_report(
     category_deltas = {
         category: _nl_metric_delta(
             current["by_category"][category],
-            baseline["by_category"][category] if baseline else None,
+            (baseline["by_category"].get(category) if baseline else None),
         )
-        for category in NL_CATEGORIES
+        for category in current["by_category"]
     }
     return {
         "schema": NL_SCHEMA,
@@ -1286,10 +1298,10 @@ def render_nl_markdown(report: dict[str, Any]) -> str:
             "| --- | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
-    for category in NL_CATEGORIES:
+    for category in current["by_category"]:
         category_now = current["by_category"][category]
         category_before = (
-            baseline["by_category"][category] if isinstance(baseline, dict) else {}
+            baseline["by_category"].get(category, {}) if isinstance(baseline, dict) else {}
         )
         lines.append(
             f"| {category} | {category_now['case_count']} | "

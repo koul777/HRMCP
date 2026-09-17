@@ -11,6 +11,13 @@
   where `Path.is_junction()` does not exist. Tests that need the canonical
   12 GB database skip when it is absent, and later CI steps (lint, smoke,
   STDIO/HTTP) still run after a unit-test failure.
+- Added a 30-query development set (`ncs_search_eval_nl_dev.json`) for tuning
+  search, so holdout v2 stays untouched. Half of it is HR phrasing and half is
+  cross-domain control queries in an optional `비HR` category, which the audit
+  script now accepts alongside the five required categories. Baseline: overall
+  Hit@3 0.733, HR 0.533, cross-domain 0.867 — HR wording is the ambiguous half,
+  since non-HR queries carry domain-specific vocabulary. The 40-query
+  regression set is unchanged at 0.875.
 - Escaped LIKE wildcards in the public `ncs_training` search path. A user's `%`
   or `_` is now matched literally, as `ncs_search` already did, so a query such
   as `100%` finds the course whose name contains it instead of matching every

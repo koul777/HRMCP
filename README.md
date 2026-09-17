@@ -1,5 +1,23 @@
 # HRMCP — NCS 기반 HR 실무용 MCP
 
+## 📅 업데이트 내역
+
+| 날짜 | 내용 |
+| --- | --- |
+| 2026-09-18 | 검색 튜닝용 개발 세트 30문항 추가(HR 15 + 비HR 통제 15), 기준 Hit@3 `0.733`이며 HR 질의가 더 모호함을 확인 |
+| 2026-09-18 | 공개 검색 `ncs_training`의 LIKE 와일드카드를 리터럴로 처리하고, SQL 조립 803곳을 전수 점검해 인젝션 경로가 없음을 확인 |
+| 2026-09-18 | 31회 연속 실패하던 CI 복구(8.3 단축 경로·Python 3.11 junction 탐지·드라이브 간 경로), 테스트 3분할로 41분 → 19.7분 단축 |
+| 2026-09-17 | 오염되지 않은 40문항 holdout v2를 고정 후 1회 측정, Hit@3 `0.500`으로 기존 지표의 과대평가 확인 |
+| 2026-09-14 | 직무 범위를 원천 분류체계로만 확정하는 안전장치 추가, 모호한 범위는 추측 대신 명확화 요청 |
+| 2026-09-13 | 띄어쓰기·조사 변형 복합어 검색 보강, 경량 DB 용량 절감(478MB → 457MB)과 용량 가드 추가 |
+| 2026-09-11 | Gold LPG·Neo4j 적재와 시맨틱 임베딩 경로 연결, `ncs_analysis`에 사내 직무·의미 검색 모드 추가 |
+| 2026-09-09 | Windows NCS DB 업데이트 빌더 추가(원본 변경분 → API 갱신 → 경량 DB → Vercel 반영) |
+| 2026-08-30 | 공개 MCP 기준 URL을 `ncs-mcp-bridge-mini2`로 일원화 |
+
+자세한 내용은 아래 [변경 이력](#변경-이력)에 있습니다.
+
+---
+
 ## 2026-09-14 scope-safety and release update
 
 - Added a source-backed hierarchy gate for every explicit job scope. Exact and unique NCS paths are promoted to a hard containment filter; unresolved, fuzzy, cross-major, cross-type, and Unicode-equivalent collisions fail closed with bounded clarification candidates.
