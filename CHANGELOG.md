@@ -11,6 +11,13 @@
   where `Path.is_junction()` does not exist. Tests that need the canonical
   12 GB database skip when it is absent, and later CI steps (lint, smoke,
   STDIO/HTTP) still run after a unit-test failure.
+- Added an unexposed 40-query search holdout (`ncs_search_eval_nl_holdout_v2.json`),
+  committed before its single measurement. It shares no query text with the
+  40-query regression set or the 51-query holdout, which was re-measured across
+  tuning stages and no longer generalizes. First measurement: Hit@1 0.450,
+  Hit@3 0.500, MRR 0.483. Cases on units no earlier set expects hit 4 of 14,
+  against 16 of 26 on previously used units, so the in-sample 0.875 and the old
+  holdout's 0.608 overstate generalization. Do not tune against this set.
 - Carry an explicit classification filter through `ncs_discover_tools` as well
   as `ncs_execute_tool`, so agent routing and execution preserve the same NCS
   scope without inferring a major from query text.
