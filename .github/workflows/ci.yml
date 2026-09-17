@@ -24,6 +24,40 @@ on:
           - "true"
 
 jobs:
+  unit-tests:
+    # The suite takes ~38 min serially on a hosted Windows runner; three
+    # module-level shards (scripts/run_test_shard.py) cover it without overlap.
+    name: Unit tests (shard ${{ matrix.shard }}/3)
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -e ".[dev]"
+
+      - name: Prepare CI smoke DB
+        run: |
+          New-Item -ItemType Directory -Force ci-smoke | Out-Null
+          python -m ncs_mcp.smoke_data --out ci-smoke\ncs.db
+
+      - name: Run unit test shard
+        run: python scripts\run_test_shard.py --index ${{ matrix.shard }} --count 3
+        env:
+          NCS_DB_PATH: ci-smoke\ncs.db
+
   test:
     name: Tests and MCP smoke
     runs-on: windows-latest
@@ -56,11 +90,6 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force ci-smoke | Out-Null
           python -m ncs_mcp.smoke_data --out ci-smoke\ncs.db
-
-      - name: Run full unit tests
-        run: python -m unittest discover -s tests -v
-        env:
-          NCS_DB_PATH: ci-smoke\ncs.db
 
       - name: Run natural-language search Hit@3 gate
         if: ${{ !cancelled() }}

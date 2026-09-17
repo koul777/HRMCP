@@ -11,6 +11,11 @@
   where `Path.is_junction()` does not exist. Tests that need the canonical
   12 GB database skip when it is absent, and later CI steps (lint, smoke,
   STDIO/HTTP) still run after a unit-test failure.
+- Split CI unit tests into three parallel shards (`scripts/run_test_shard.py`).
+  Each test module lands in exactly one shard by CRC32 of its name, and a
+  module that fails to import always stays in shard 0. The serial step took
+  about 38 minutes on a hosted Windows runner; by the measured per-module time
+  the largest shard is about 16 minutes.
 - Added an unexposed 40-query search holdout (`ncs_search_eval_nl_holdout_v2.json`),
   committed before its single measurement. It shares no query text with the
   40-query regression set or the 51-query holdout, which was re-measured across
