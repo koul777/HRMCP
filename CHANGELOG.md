@@ -11,6 +11,18 @@
   where `Path.is_junction()` does not exist. Tests that need the canonical
   12 GB database skip when it is absent, and later CI steps (lint, smoke,
   STDIO/HTTP) still run after a unit-test failure.
+- Measured whether the semantic rescue rerank can actually be served. It can:
+  an int8 ONNX export of the 384-dimension Korean model is 112.8 MB, the
+  tokenizer 16.3 MB, onnxruntime plus tokenizers about 16.8 MB, and unit
+  vectors 9.8 MB at fp16 against 44.2 MB of snapshot headroom — roughly 156 MB
+  of package growth and no torch dependency. A query embeds in 4 ms on CPU
+  against 80-150 ms of search, the model loads in 1.1 s, and all 13,435 unit
+  vectors build in 66 s. int8 needs margin 0.01 where fp32 needed 0.02.
+  The same run also showed the dev set is too small to tune on: computing
+  similarity at query time scored 0.833 and precomputed vectors 0.800 with
+  identical inputs, a one-case numerical difference worth 3.3pp. Details and
+  the remaining checks are in
+  `reports/semantic_rescue_serving_feasibility_20260918.md`.
 - Measured where search actually fails and what would fix it. Of 8 dev-set
   misses, 5 are retrieved at rank 4-9 and lose for one structural reason: the
   wrong unit carries the query words in its name while the right one carries
