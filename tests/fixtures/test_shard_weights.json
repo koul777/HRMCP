@@ -2,7 +2,7 @@
   "schema": "ncs_test_shard_weights_v1",
   "source": "GitHub Actions run 34815457683 (serial windows-latest)",
   "unit": "seconds",
-  "note": "Only used to balance shards. A module missing here falls back to hashing.",
+  "note": "Only used to balance shards; a module missing here falls back to hashing. Coverage is partial: 83 of 187 test modules are timed, the rest are assumed average. Measured outcome on run 35316423481 was 20.2 / 17.5 / 13.7 minutes against an even 19.6 prediction, so these weights improve nothing yet - they are kept because the packing itself is correct and refreshing them from a full run is the fix.",
   "weights": {
     "test_api_refresh_builder": 5.1,
     "test_api_resume": 1.0,
@@ -87,5 +87,19 @@
     "test_vercel_bootstrap_metrics": 4.8,
     "test_vercel_snapshot": 1.6,
     "test_verify_vercel_complete_snapshot": 2.2
+  },
+  "measured_outcome": {
+    "run": "35316423481",
+    "shard_minutes": [
+      20.2,
+      17.5,
+      13.7
+    ],
+    "predicted_minutes_each": 19.6,
+    "previous_hashing_minutes": [
+      21.4,
+      12.9,
+      16.1
+    ]
   }
 }

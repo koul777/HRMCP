@@ -18,7 +18,12 @@
   [1397, 1056, 1066] seconds to [1173, 1173, 1173] — about 16% off the wall
   clock. A module with no recorded time counts as average, not free, so a new
   test file cannot quietly pile onto one shard, and a missing or malformed
-  weights file falls back to the previous hashing.
+  weights file falls back to the previous hashing. The first run under it came
+  out at 20.2 / 17.5 / 13.7 minutes rather than the predicted even 19.6, so the
+  change has not paid off yet: only 83 of 187 modules are timed and the assumed
+  average is wrong for the rest. Wall clock went from 19.7 to 20.2 minutes. The
+  packing is correct and the fix is to refresh the weights from a full run; the
+  limitation is recorded in the weights file.
 - Wired the semantic rescue rerank into the search path, off by default. A
   `semantic_provider` passed to `configure_search_runtime` promotes one
   rank-4-or-lower unit into third place when its similarity beats the current
