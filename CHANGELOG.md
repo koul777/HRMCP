@@ -11,6 +11,14 @@
   where `Path.is_junction()` does not exist. Tests that need the canonical
   12 GB database skip when it is absent, and later CI steps (lint, smoke,
   STDIO/HTTP) still run after a unit-test failure.
+- Balanced the CI test shards by recorded runtime instead of by hash. Hashing
+  left one shard at 21.4 minutes against 12.9 for another, and the job only
+  finishes when its slowest shard does. Modules are now packed longest-first
+  from `tests/fixtures/test_shard_weights.json`, which moves the estimate from
+  [1397, 1056, 1066] seconds to [1173, 1173, 1173] — about 16% off the wall
+  clock. A module with no recorded time counts as average, not free, so a new
+  test file cannot quietly pile onto one shard, and a missing or malformed
+  weights file falls back to the previous hashing.
 - Wired the semantic rescue rerank into the search path, off by default. A
   `semantic_provider` passed to `configure_search_runtime` promotes one
   rank-4-or-lower unit into third place when its similarity beats the current

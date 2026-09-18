@@ -41,5 +41,53 @@ class RunTestShardTests(unittest.TestCase):
             run_test_shard.main(["--index", "3", "--count", "3"])
 
 
+class ShardBalanceTests(unittest.TestCase):
+    def test_recorded_weights_drive_the_split(self) -> None:
+        modules = ["slow", "medium", "fast_a", "fast_b"]
+        weights = {"slow": 100.0, "medium": 40.0, "fast_a": 5.0, "fast_b": 5.0}
+        assignment = run_test_shard.assign_modules(modules, 2, weights)
+        loads = [0.0, 0.0]
+        for name in modules:
+            loads[assignment[name]] += weights[name]
+        # Longest-first packing keeps the slowest module alone rather than
+        # stacking it with the next heaviest.
+        self.assertEqual(sorted(loads), [50.0, 100.0])
+
+    def test_unknown_modules_are_not_treated_as_free(self) -> None:
+        modules = ["known", "new_one", "new_two"]
+        assignment = run_test_shard.assign_modules(modules, 2, {"known": 1.0})
+        self.assertNotEqual(assignment["new_one"], assignment["new_two"])
+
+    def test_assignment_is_deterministic_and_covers_every_module(self) -> None:
+        modules = [f"test_module_{index}" for index in range(12)]
+        weights = {name: float(index) for index, name in enumerate(modules)}
+        first = run_test_shard.assign_modules(modules, 3, weights)
+        second = run_test_shard.assign_modules(list(reversed(modules)), 3, weights)
+        self.assertEqual(first, second)
+        self.assertEqual(set(first), set(modules))
+        self.assertTrue(all(0 <= shard < 3 for shard in first.values()))
+
+    def test_missing_or_broken_weight_file_falls_back_quietly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp, "absent.json")
+            self.assertEqual(run_test_shard.load_weights(missing), {})
+            broken = Path(tmp, "broken.json")
+            broken.write_text("not json", encoding="utf-8")
+            self.assertEqual(run_test_shard.load_weights(broken), {})
+            wrong_shape = Path(tmp, "wrong.json")
+            wrong_shape.write_text('{"weights": []}', encoding="utf-8")
+            self.assertEqual(run_test_shard.load_weights(wrong_shape), {})
+
+    def test_committed_weights_cover_the_slowest_modules(self) -> None:
+        weights = run_test_shard.load_weights()
+        self.assertGreater(len(weights), 50)
+        self.assertTrue(all(value > 0 for value in weights.values()))
+        heaviest = max(weights, key=weights.get)
+        self.assertTrue(
+            (ROOT / "tests" / f"{heaviest}.py").is_file(),
+            f"recorded weight for a module that no longer exists: {heaviest}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
