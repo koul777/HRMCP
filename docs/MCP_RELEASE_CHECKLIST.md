@@ -131,6 +131,29 @@ python scripts\benchmark_chatbot_readiness.py --db <prepared-ncs.db> --out repor
 python scripts\ncs_harness.py smoke
 ```
 
+When search ranking, aliases, normalization, or the query router change, run
+the search quality gate against the canonical database. It compares the current
+metrics with the recorded baselines and exits non-zero on any drop:
+
+```powershell
+python scripts\audit_ncs_search_precision.py --nl-eval --input tests\fixtures\ncs_search_eval_nl.json --db data\processed\ncs.db --limit 10 --baseline tests\fixtures\search_baselines\regression_40.json --fail-on-regression --out reports\ncs_search_regression_40_<DATE>.json --markdown-out reports\ncs_search_regression_40_<DATE>.md
+python scripts\audit_ncs_search_precision.py --nl-eval --input tests\fixtures\ncs_search_eval_nl_dev.json --db data\processed\ncs.db --limit 10 --baseline tests\fixtures\search_baselines\dev.json --fail-on-regression --out reports\ncs_search_dev_<DATE>.json --markdown-out reports\ncs_search_dev_<DATE>.md
+```
+
+The development set carries cross-domain control cases in a `비HR` category,
+so a change that helps the HR majors but hurts search elsewhere fails here
+rather than reaching users. Raise a recorded baseline only with a reviewed
+improvement, and record both the old and new numbers in the same change.
+
+`tests/fixtures/ncs_search_eval_nl_holdout_v2.json` is not part of this gate.
+Measure it at most once per release decision, never tune against it, and treat
+its Hit@3 as the generalization estimate. The earlier 51-query holdout was
+re-measured across tuning stages and no longer serves that purpose.
+
+CI cannot run these gates: the hosted runner has no canonical database, so its
+`Run natural-language search Hit@3 gate` step only records a `warn`. Treat the
+Builder-side run above as the real gate.
+
 When ontology or recommendation evidence changes, also run:
 
 ```powershell

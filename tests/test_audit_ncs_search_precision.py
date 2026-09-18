@@ -151,5 +151,88 @@ class PrecisionRiskAuditTest(unittest.TestCase):
         self.assertIn("No automated status or approval field was written", markdown)
 
 
+class RecordedBaselineComparisonTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.recorded = {
+            "overall": {"hit_at_1": 0.5, "hit_at_3": 0.75, "mrr": 0.6},
+            "by_category": {"A": {"hit_at_1": 0.4, "hit_at_3": 0.8, "mrr": 0.5}},
+        }
+
+    def test_identical_metrics_pass(self) -> None:
+        result = audit.compare_recorded_baseline(self.recorded, self.recorded, tolerance=0.0)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["regressions"], [])
+
+    def test_drop_in_overall_or_category_is_reported(self) -> None:
+        current = {
+            "overall": {"hit_at_1": 0.5, "hit_at_3": 0.70, "mrr": 0.6},
+            "by_category": {"A": {"hit_at_1": 0.3, "hit_at_3": 0.8, "mrr": 0.5}},
+        }
+        result = audit.compare_recorded_baseline(current, self.recorded, tolerance=0.0)
+        self.assertFalse(result["ok"])
+        self.assertEqual(
+            {(item["scope"], item["metric"]) for item in result["regressions"]},
+            {("overall", "hit_at_3"), ("A", "hit_at_1")},
+        )
+
+    def test_tolerance_absorbs_small_drops_and_gains_never_fail(self) -> None:
+        current = {
+            "overall": {"hit_at_1": 0.49, "hit_at_3": 0.95, "mrr": 0.6},
+            "by_category": {"A": {"hit_at_1": 0.4, "hit_at_3": 0.8, "mrr": 0.5}},
+        }
+        self.assertTrue(
+            audit.compare_recorded_baseline(current, self.recorded, tolerance=0.02)["ok"]
+        )
+        self.assertFalse(
+            audit.compare_recorded_baseline(current, self.recorded, tolerance=0.0)["ok"]
+        )
+
+    def test_new_category_is_not_a_regression(self) -> None:
+        current = {
+            "overall": self.recorded["overall"],
+            "by_category": {
+                "A": self.recorded["by_category"]["A"],
+                "B": {"hit_at_1": 0.1, "hit_at_3": 0.1, "mrr": 0.1},
+            },
+        }
+        result = audit.compare_recorded_baseline(current, self.recorded, tolerance=0.0)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["new_categories"], ["B"])
+
+    def test_loads_a_full_report_or_a_trimmed_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            full = Path(tmp) / "full.json"
+            full.write_text(json.dumps({"current": self.recorded}), encoding="utf-8")
+            trimmed = Path(tmp) / "trimmed.json"
+            trimmed.write_text(json.dumps(self.recorded), encoding="utf-8")
+            self.assertEqual(audit.load_recorded_baseline(full), self.recorded)
+            self.assertEqual(audit.load_recorded_baseline(trimmed), self.recorded)
+            invalid = Path(tmp) / "invalid.json"
+            invalid.write_text(json.dumps({"by_category": {}}), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                audit.load_recorded_baseline(invalid)
+
+    def test_committed_baselines_match_their_fixtures(self) -> None:
+        for name, fixture in (
+            ("dev.json", "ncs_search_eval_nl_dev.json"),
+            ("regression_40.json", "ncs_search_eval_nl.json"),
+        ):
+            with self.subTest(baseline=name):
+                recorded = json.loads(
+                    (ROOT / "tests" / "fixtures" / "search_baselines" / name).read_text(
+                        encoding="utf-8"
+                    )
+                )
+                cases = json.loads(
+                    (ROOT / "tests" / "fixtures" / fixture).read_text(encoding="utf-8")
+                )
+                self.assertEqual(recorded["case_count"], len(cases))
+                self.assertEqual(recorded["fixture"], f"tests/fixtures/{fixture}")
+                self.assertEqual(
+                    set(recorded["by_category"]),
+                    {case["category"] for case in cases},
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

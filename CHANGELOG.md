@@ -11,6 +11,15 @@
   where `Path.is_junction()` does not exist. Tests that need the canonical
   12 GB database skip when it is absent, and later CI steps (lint, smoke,
   STDIO/HTTP) still run after a unit-test failure.
+- Added a recorded-baseline check to the search evaluation script
+  (`--baseline`, `--regression-tolerance`, `--fail-on-regression`). It compares
+  overall and per-category Hit@1/Hit@3/MRR against a committed baseline and
+  exits non-zero on any drop, so a ranking change that lowers quality fails
+  before release instead of silently shipping. Baselines for the 40-query
+  regression set and the development set live in
+  `tests/fixtures/search_baselines/`, and the release checklist documents the
+  two commands. A category the baseline does not contain counts as new, not as
+  a regression, so adding fixture cases cannot fail the gate by itself.
 - Added a 30-query development set (`ncs_search_eval_nl_dev.json`) for tuning
   search, so holdout v2 stays untouched. Half of it is HR phrasing and half is
   cross-domain control queries in an optional `비HR` category, which the audit

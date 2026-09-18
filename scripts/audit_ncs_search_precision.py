@@ -494,6 +494,62 @@ def _nl_metric_delta(
     }
 
 
+
+def load_recorded_baseline(path: Path) -> dict[str, Any]:
+    """Read a previous run's metrics, from a full report or a trimmed record."""
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("recorded baseline must be a JSON object")
+    metrics = payload.get("current", payload)
+    if not isinstance(metrics, dict) or "overall" not in metrics:
+        raise ValueError("recorded baseline is missing overall metrics")
+    return metrics
+
+
+def compare_recorded_baseline(
+    current: dict[str, Any], recorded: dict[str, Any], *, tolerance: float
+) -> dict[str, Any]:
+    """Report every metric that fell below the recorded run beyond *tolerance*.
+
+    A category the recorded run does not contain is reported as new, not as a
+    regression, so adding fixture cases cannot fail the gate on its own.
+    """
+    drops: list[dict[str, Any]] = []
+    new_categories: list[str] = []
+    scopes = [("overall", current["overall"], recorded.get("overall"))]
+    for category, metrics in current.get("by_category", {}).items():
+        previous = (recorded.get("by_category") or {}).get(category)
+        if previous is None:
+            new_categories.append(category)
+            continue
+        scopes.append((category, metrics, previous))
+    for scope, now, before in scopes:
+        if not isinstance(before, dict):
+            continue
+        for metric in ("hit_at_1", "hit_at_3", "mrr"):
+            observed, baseline_value = now.get(metric), before.get(metric)
+            if observed is None or baseline_value is None:
+                continue
+            delta = round(float(observed) - float(baseline_value), 6)
+            if delta < -abs(tolerance):
+                drops.append(
+                    {
+                        "scope": scope,
+                        "metric": metric,
+                        "recorded": baseline_value,
+                        "observed": observed,
+                        "delta": delta,
+                    }
+                )
+    return {
+        "compared": True,
+        "tolerance": tolerance,
+        "ok": not drops,
+        "regressions": drops,
+        "new_categories": sorted(new_categories),
+    }
+
+
 def build_nl_evaluation_report(
     *,
     input_path: Path,
@@ -502,6 +558,9 @@ def build_nl_evaluation_report(
     hit3_threshold: float,
     enforce_hit3: bool,
     compare_stage1_baseline: bool,
+    recorded_baseline: dict[str, Any] | None = None,
+    regression_tolerance: float = 0.0,
+    fail_on_regression: bool = False,
     search_fn: SearchFunction | None = None,
     baseline_search_fn: SearchFunction | None = None,
     expected_unit_lookup: dict[str, dict[str, Any]] | None = None,
@@ -525,6 +584,13 @@ def build_nl_evaluation_report(
     hit3 = current["overall"]["hit_at_3"]
     threshold_met = hit3 is not None and float(hit3) >= hit3_threshold
     gate_status = "pass" if threshold_met else ("fail" if enforce_hit3 else "warn")
+    regression = (
+        compare_recorded_baseline(current, recorded_baseline, tolerance=regression_tolerance)
+        if recorded_baseline is not None
+        else {"compared": False, "ok": True, "regressions": [], "new_categories": []}
+    )
+    if fail_on_regression and not regression["ok"]:
+        gate_status = "fail"
     category_deltas = {
         category: _nl_metric_delta(
             current["by_category"][category],
@@ -576,6 +642,7 @@ def build_nl_evaluation_report(
             "enforced": enforce_hit3,
             "status": gate_status,
         },
+        "recorded_baseline_check": regression,
         "safety": {
             "database_open_mode": "read_only",
             "database_writes": False,
@@ -1372,6 +1439,22 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--hit3-threshold", type=float, default=0.7)
     parser.add_argument(
+        "--baseline",
+        type=Path,
+        help="Recorded metrics to compare against; a previous report or a trimmed record.",
+    )
+    parser.add_argument(
+        "--regression-tolerance",
+        type=float,
+        default=0.0,
+        help="Allowed drop per metric before it counts as a regression.",
+    )
+    parser.add_argument(
+        "--fail-on-regression",
+        action="store_true",
+        help="Exit non-zero when a metric falls below the recorded baseline.",
+    )
+    parser.add_argument(
         "--enforce-hit3",
         action=argparse.BooleanOptionalAction,
         default=_environment_flag("NCS_SEARCH_EVAL_ENFORCE", default=False),
@@ -1398,6 +1481,13 @@ def main() -> int:
                 hit3_threshold=args.hit3_threshold,
                 enforce_hit3=args.enforce_hit3,
                 compare_stage1_baseline=args.compare_stage1_baseline,
+                recorded_baseline=(
+                    load_recorded_baseline(args.baseline.resolve())
+                    if args.baseline
+                    else None
+                ),
+                regression_tolerance=args.regression_tolerance,
+                fail_on_regression=args.fail_on_regression,
             )
         except EvaluationDatabaseUnavailable:
             report = build_unavailable_nl_report(
@@ -1430,6 +1520,9 @@ def main() -> int:
                     "hit_at_3": report["gate"]["observed"],
                     "threshold": report["gate"]["threshold"],
                     "gate_status": report["gate"]["status"],
+                    "recorded_baseline_ok": report.get(
+                        "recorded_baseline_check", {}
+                    ).get("ok"),
                     "out": str(args.out),
                     "markdown_out": str(args.markdown_out),
                 },
