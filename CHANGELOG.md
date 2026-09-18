@@ -11,6 +11,14 @@
   where `Path.is_junction()` does not exist. Tests that need the canonical
   12 GB database skip when it is absent, and later CI steps (lint, smoke,
   STDIO/HTTP) still run after a unit-test failure.
+- Grew the development set from 30 to 90 queries (9 per HR category, 45
+  cross-domain controls drawn from 22 other NCS majors) because a one-case
+  numerical difference was worth 3.3pp at the old size. Baseline: Hit@1 0.667,
+  Hit@3 0.800, with 인사 0.556 the weakest category and cross-domain 0.889.
+  The semantic rescue rerank holds at the larger size: margin 0.01 lifts Hit@3
+  0.800 -> 0.844 with 4 cases fixed and none broken, and the 40-query set stays
+  at 0.875. Margin 0.0 costs that set a case, so 0.01 is the lower bound.
+  The recorded dev baseline was refreshed to the 90-case numbers.
 - Measured whether the semantic rescue rerank can actually be served. It can:
   an int8 ONNX export of the 384-dimension Korean model is 112.8 MB, the
   tokenizer 16.3 MB, onnxruntime plus tokenizers about 16.8 MB, and unit

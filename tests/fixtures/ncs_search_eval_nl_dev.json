@@ -1,32 +1,637 @@
 [
-  {"query": "채용 공고 게시와 지원자 모집", "expected_unit_codes": ["0202020103_23v4"], "category": "인사"},
-  {"query": "임금피크제 도입 검토", "expected_unit_codes": ["0202020108_23v4"], "category": "인사"},
-  {"query": "인사 데이터로 조직문화 진단", "expected_unit_codes": ["0202020111_23v3"], "category": "인사"},
-  {"query": "노사 분쟁 조정 절차 준비", "expected_unit_codes": ["0202020206_19v2", "0202020209_23v3"], "category": "노무"},
-  {"query": "단체교섭 전 환경 분석", "expected_unit_codes": ["0202020203_23v3"], "category": "노무"},
-  {"query": "노사관계 개선 목표 설정", "expected_unit_codes": ["0202020201_19v2", "0202020210_19v2"], "category": "노무"},
-  {"query": "신입 교육 커리큘럼 설계", "expected_unit_codes": ["0403010209_22v3", "0202020107_23v4"], "category": "교육"},
-  {"query": "교육 참여율과 만족도 집계", "expected_unit_codes": ["0403010206_22v3"], "category": "교육"},
-  {"query": "사내 교육 강사 섭외와 관리", "expected_unit_codes": ["0403010212_22v3"], "category": "교육"},
-  {"query": "사무실 이전과 공간 배치", "expected_unit_codes": ["0202010107_25v3"], "category": "총무"},
-  {"query": "연간 행사 일정 수립", "expected_unit_codes": ["0202010102_25v3"], "category": "총무"},
-  {"query": "법인 차량 보험과 정비 관리", "expected_unit_codes": ["0202010105_25v3"], "category": "총무"},
-  {"query": "월별 자금 수지 계획", "expected_unit_codes": ["0203020102_20v4"], "category": "회계"},
-  {"query": "부가세 신고 자료 정리", "expected_unit_codes": ["0203020205_23v6", "0203020201_23v6"], "category": "회계"},
-  {"query": "결산 재무제표 주석 작성", "expected_unit_codes": ["0203020112_23v5"], "category": "회계"},
-  {"query": "경비 인력 배치와 순찰 계획", "expected_unit_codes": ["1101010101_14v1", "0904020405_14v1"], "category": "비HR"},
-  {"query": "공항 보호구역 출입 통제", "expected_unit_codes": ["0904020405_14v1"], "category": "비HR"},
-  {"query": "경비원 고객 응대와 불만 처리", "expected_unit_codes": ["1101010103_16v2"], "category": "비HR"},
-  {"query": "자동차 사고 현장 조사와 보고", "expected_unit_codes": ["0302030210_16v2"], "category": "비HR"},
-  {"query": "전자문서 생성과 이관 보존", "expected_unit_codes": ["0801010420_16v1"], "category": "비HR"},
-  {"query": "대학 창업교육 프로그램 운영", "expected_unit_codes": ["0101010316_16v2"], "category": "비HR"},
-  {"query": "고객 포트폴리오 자산배분 설계", "expected_unit_codes": ["0301010304_14v1"], "category": "비HR"},
-  {"query": "병원 직원 급여와 4대보험 자격관리", "expected_unit_codes": ["0601020114_16v2"], "category": "비HR"},
-  {"query": "의료기기 구매 규격 검토", "expected_unit_codes": ["0601010102_13v1"], "category": "비HR"},
-  {"query": "방송 콘텐츠 구매 계약", "expected_unit_codes": ["0803030105_15v1"], "category": "비HR"},
-  {"query": "신규 사업 타당성과 기업가치 평가", "expected_unit_codes": ["0301030207_14v1"], "category": "비HR"},
-  {"query": "항공 보안 불법행위 대응", "expected_unit_codes": ["0904010309_16v2"], "category": "비HR"},
-  {"query": "여행 행사지시서 일정 확인", "expected_unit_codes": ["1203010301_22v3"], "category": "비HR"},
-  {"query": "취업박람회 행사 운영", "expected_unit_codes": ["0702010172_23v2"], "category": "비HR"},
-  {"query": "특허 침해 손해배상액 산정", "expected_unit_codes": ["0501020106_14v1"], "category": "비HR"}
+  {
+    "query": "채용 공고 게시와 지원자 모집",
+    "expected_unit_codes": [
+      "0202020103_23v4"
+    ],
+    "category": "인사"
+  },
+  {
+    "query": "임금피크제 도입 검토",
+    "expected_unit_codes": [
+      "0202020108_23v4"
+    ],
+    "category": "인사"
+  },
+  {
+    "query": "인사 데이터로 조직문화 진단",
+    "expected_unit_codes": [
+      "0202020111_23v3"
+    ],
+    "category": "인사"
+  },
+  {
+    "query": "노사 분쟁 조정 절차 준비",
+    "expected_unit_codes": [
+      "0202020206_19v2",
+      "0202020209_23v3"
+    ],
+    "category": "노무"
+  },
+  {
+    "query": "단체교섭 전 환경 분석",
+    "expected_unit_codes": [
+      "0202020203_23v3"
+    ],
+    "category": "노무"
+  },
+  {
+    "query": "노사관계 개선 목표 설정",
+    "expected_unit_codes": [
+      "0202020201_19v2",
+      "0202020210_19v2"
+    ],
+    "category": "노무"
+  },
+  {
+    "query": "신입 교육 커리큘럼 설계",
+    "expected_unit_codes": [
+      "0403010209_22v3",
+      "0202020107_23v4"
+    ],
+    "category": "교육"
+  },
+  {
+    "query": "교육 참여율과 만족도 집계",
+    "expected_unit_codes": [
+      "0403010206_22v3"
+    ],
+    "category": "교육"
+  },
+  {
+    "query": "사내 교육 강사 섭외와 관리",
+    "expected_unit_codes": [
+      "0403010212_22v3"
+    ],
+    "category": "교육"
+  },
+  {
+    "query": "사무실 이전과 공간 배치",
+    "expected_unit_codes": [
+      "0202010107_25v3"
+    ],
+    "category": "총무"
+  },
+  {
+    "query": "연간 행사 일정 수립",
+    "expected_unit_codes": [
+      "0202010102_25v3"
+    ],
+    "category": "총무"
+  },
+  {
+    "query": "법인 차량 보험과 정비 관리",
+    "expected_unit_codes": [
+      "0202010105_25v3"
+    ],
+    "category": "총무"
+  },
+  {
+    "query": "월별 자금 수지 계획",
+    "expected_unit_codes": [
+      "0203020102_20v4"
+    ],
+    "category": "회계"
+  },
+  {
+    "query": "부가세 신고 자료 정리",
+    "expected_unit_codes": [
+      "0203020205_23v6",
+      "0203020201_23v6"
+    ],
+    "category": "회계"
+  },
+  {
+    "query": "결산 재무제표 주석 작성",
+    "expected_unit_codes": [
+      "0203020112_23v5"
+    ],
+    "category": "회계"
+  },
+  {
+    "query": "경비 인력 배치와 순찰 계획",
+    "expected_unit_codes": [
+      "1101010101_14v1",
+      "0904020405_14v1"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "공항 보호구역 출입 통제",
+    "expected_unit_codes": [
+      "0904020405_14v1"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "경비원 고객 응대와 불만 처리",
+    "expected_unit_codes": [
+      "1101010103_16v2"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "자동차 사고 현장 조사와 보고",
+    "expected_unit_codes": [
+      "0302030210_16v2"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "전자문서 생성과 이관 보존",
+    "expected_unit_codes": [
+      "0801010420_16v1"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "대학 창업교육 프로그램 운영",
+    "expected_unit_codes": [
+      "0101010316_16v2"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "고객 포트폴리오 자산배분 설계",
+    "expected_unit_codes": [
+      "0301010304_14v1"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "병원 직원 급여와 4대보험 자격관리",
+    "expected_unit_codes": [
+      "0601020114_16v2"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "의료기기 구매 규격 검토",
+    "expected_unit_codes": [
+      "0601010102_13v1"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "방송 콘텐츠 구매 계약",
+    "expected_unit_codes": [
+      "0803030105_15v1"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "신규 사업 타당성과 기업가치 평가",
+    "expected_unit_codes": [
+      "0301030207_14v1"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "항공 보안 불법행위 대응",
+    "expected_unit_codes": [
+      "0904010309_16v2"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "여행 행사지시서 일정 확인",
+    "expected_unit_codes": [
+      "1203010301_22v3"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "취업박람회 행사 운영",
+    "expected_unit_codes": [
+      "0702010172_23v2"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "특허 침해 손해배상액 산정",
+    "expected_unit_codes": [
+      "0501020106_14v1"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "인사전략과 인력 운영 방향 수립",
+    "expected_unit_codes": [
+      "0202020101_23v3"
+    ],
+    "category": "인사"
+  },
+  {
+    "query": "직무 평가로 직무 등급 산정",
+    "expected_unit_codes": [
+      "0202020102_23v3"
+    ],
+    "category": "인사"
+  },
+  {
+    "query": "배치전환 소요 인원 파악",
+    "expected_unit_codes": [
+      "0202020104_23v4"
+    ],
+    "category": "인사"
+  },
+  {
+    "query": "핵심인재 선발 기준 수립",
+    "expected_unit_codes": [
+      "0202020106_23v3"
+    ],
+    "category": "인사"
+  },
+  {
+    "query": "퇴직 예정자 확인과 절차 안내",
+    "expected_unit_codes": [
+      "0202020114_23v5"
+    ],
+    "category": "인사"
+  },
+  {
+    "query": "인사 업무 위탁 업체 평가",
+    "expected_unit_codes": [
+      "0202020113_23v3"
+    ],
+    "category": "인사"
+  },
+  {
+    "query": "노사관계 실행계획 수립",
+    "expected_unit_codes": [
+      "0202020201_19v2"
+    ],
+    "category": "노무"
+  },
+  {
+    "query": "협약 체결과 교섭 마무리",
+    "expected_unit_codes": [
+      "0202020204_19v2"
+    ],
+    "category": "노무"
+  },
+  {
+    "query": "취업규칙 변경 신고",
+    "expected_unit_codes": [
+      "0202020205_19v2"
+    ],
+    "category": "노무"
+  },
+  {
+    "query": "쟁의 대책 수립과 관계 개선",
+    "expected_unit_codes": [
+      "0202020206_19v2"
+    ],
+    "category": "노무"
+  },
+  {
+    "query": "노사관계 평가 후 개선방안 마련",
+    "expected_unit_codes": [
+      "0202020210_19v2"
+    ],
+    "category": "노무"
+  },
+  {
+    "query": "노사 교육훈련 운영과 평가",
+    "expected_unit_codes": [
+      "0202020202_19v2"
+    ],
+    "category": "노무"
+  },
+  {
+    "query": "교육과정 진행과 결과 보고",
+    "expected_unit_codes": [
+      "0403010204_16v2"
+    ],
+    "category": "교육"
+  },
+  {
+    "query": "현업 적용 지원과 교육 사후관리",
+    "expected_unit_codes": [
+      "0403010207_16v2"
+    ],
+    "category": "교육"
+  },
+  {
+    "query": "교육과정 설계 계획 수립",
+    "expected_unit_codes": [
+      "0403010209_22v3"
+    ],
+    "category": "교육"
+  },
+  {
+    "query": "역량모델 개발 추진",
+    "expected_unit_codes": [
+      "0403010215_22v2"
+    ],
+    "category": "교육"
+  },
+  {
+    "query": "훈련과정 인정 신청과 환급 처리",
+    "expected_unit_codes": [
+      "0403010214_22v2"
+    ],
+    "category": "교육"
+  },
+  {
+    "query": "교육 방침과 중장기 체계 수립",
+    "expected_unit_codes": [
+      "0403010202_22v2"
+    ],
+    "category": "교육"
+  },
+  {
+    "query": "사업계획 환경 분석과 전략과제 도출",
+    "expected_unit_codes": [
+      "0202010101_25v3"
+    ],
+    "category": "총무"
+  },
+  {
+    "query": "취득 자산과 임차 부동산 관리",
+    "expected_unit_codes": [
+      "0202010103_25v3"
+    ],
+    "category": "총무"
+  },
+  {
+    "query": "비품 구매와 유지 관리",
+    "expected_unit_codes": [
+      "0202010104_25v3"
+    ],
+    "category": "총무"
+  },
+  {
+    "query": "인쇄물과 우편물 수발신 관리",
+    "expected_unit_codes": [
+      "0202010108_25v3"
+    ],
+    "category": "총무"
+  },
+  {
+    "query": "후생시설 운영과 복리후생 실행",
+    "expected_unit_codes": [
+      "0202010109_25v3"
+    ],
+    "category": "총무"
+  },
+  {
+    "query": "사내 자료 보안 관리와 활용",
+    "expected_unit_codes": [
+      "0202030203_22v4"
+    ],
+    "category": "총무"
+  },
+  {
+    "query": "전표 작성과 증빙서류 관리",
+    "expected_unit_codes": [
+      "0203020101_20v4"
+    ],
+    "category": "회계"
+  },
+  {
+    "query": "원가 배부와 원가요소 분류",
+    "expected_unit_codes": [
+      "0203020103_20v4"
+    ],
+    "category": "회계"
+  },
+  {
+    "query": "결산 분개와 장부 마감",
+    "expected_unit_codes": [
+      "0203020104_23v5"
+    ],
+    "category": "회계"
+  },
+  {
+    "query": "근로소득 원천징수 처리",
+    "expected_unit_codes": [
+      "0203020204_23v6"
+    ],
+    "category": "회계"
+  },
+  {
+    "query": "세무조사 사전 준비",
+    "expected_unit_codes": [
+      "0203020210_23v5"
+    ],
+    "category": "회계"
+  },
+  {
+    "query": "법인세 부속서류 작성",
+    "expected_unit_codes": [
+      "0203020214_23v6"
+    ],
+    "category": "회계"
+  },
+  {
+    "query": "해외법인 설립 위험도 측정",
+    "expected_unit_codes": [
+      "0101020109_15v1"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "해외취업 희망 구직자 모집과 선발",
+    "expected_unit_codes": [
+      "0101020204_15v1"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "대체투자 법제 분석과 투자구조 설계",
+    "expected_unit_codes": [
+      "0301040402_14v1"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "보험 책임준비금 산출",
+    "expected_unit_codes": [
+      "0302010303_14v1"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "스마트 기술 기반 재난관리 환류",
+    "expected_unit_codes": [
+      "0502030208_17v1"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "침해 경고장 분석과 분쟁 방어 서류",
+    "expected_unit_codes": [
+      "0501020107_14v1"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "유해곤충 방역과 소독",
+    "expected_unit_codes": [
+      "0601020508_20v2"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "청각산업 창업과 마케팅 자문",
+    "expected_unit_codes": [
+      "0601011015_17v2"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "전직대상자 진로자본 분석",
+    "expected_unit_codes": [
+      "0702010330_20v1"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "진로체험활동 운영과 평가",
+    "expected_unit_codes": [
+      "0702020306_24v3"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "극장 영사 장비 원격 관제",
+    "expected_unit_codes": [
+      "0803021004_14v2"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "사진 인공광과 혼합광 운용",
+    "expected_unit_codes": [
+      "0801020222_19v3"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "철도 차륜 전삭반 유지보수",
+    "expected_unit_codes": [
+      "0902020213_16v2"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "항공 위해인물 관리와 위협 평가",
+    "expected_unit_codes": [
+      "0904020410_14v1"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "상권 분석과 부동산 입지 검토",
+    "expected_unit_codes": [
+      "1002020312_16v2"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "해외 고객 클레임 협상",
+    "expected_unit_codes": [
+      "1001010209_14v1"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "생활공간 정리수납 상담",
+    "expected_unit_codes": [
+      "1102010210_16v1"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "청소 방법 선정과 투입 자원 계획",
+    "expected_unit_codes": [
+      "1102010102_15v1"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "피부 표현과 얼굴 윤곽 메이크업",
+    "expected_unit_codes": [
+      "1201010316_19v5"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "여행상품 출시 전 모니터링 투어",
+    "expected_unit_codes": [
+      "1203010105_22v3"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "영업장 마감과 일일 재고 점검",
+    "expected_unit_codes": [
+      "1301020107_22v3"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "곁들임 채소 요리 조리",
+    "expected_unit_codes": [
+      "1301010218_21v4"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "플랜트 공사 실행계획서 작성",
+    "expected_unit_codes": [
+      "1404030112_15v1"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "지능형교통체계 프로젝트 공정 관리",
+    "expected_unit_codes": [
+      "1406040215_19v1"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "프레스금형 구조 결정과 재료 선정",
+    "expected_unit_codes": [
+      "1510020116_22v5"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "선박 소화장치 시운전 점검",
+    "expected_unit_codes": [
+      "1508060204_14v2"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "선재 클로징 작업 관리와 제품 검사",
+    "expected_unit_codes": [
+      "1601030430_16v1"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "용접 결함부 보수 기준 확인",
+    "expected_unit_codes": [
+      "1601050508_21v3"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "화장품 충전과 2차 포장 작업",
+    "expected_unit_codes": [
+      "1703070112_21v1"
+    ],
+    "category": "비HR"
+  },
+  {
+    "query": "고무제품 품질 성능평가",
+    "expected_unit_codes": [
+      "1704020212_22v1"
+    ],
+    "category": "비HR"
+  }
 ]
