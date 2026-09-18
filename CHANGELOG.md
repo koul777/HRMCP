@@ -11,6 +11,19 @@
   where `Path.is_junction()` does not exist. Tests that need the canonical
   12 GB database skip when it is absent, and later CI steps (lint, smoke,
   STDIO/HTTP) still run after a unit-test failure.
+- Measured where search actually fails and what would fix it. Of 8 dev-set
+  misses, 5 are retrieved at rank 4-9 and lose for one structural reason: the
+  wrong unit carries the query words in its name while the right one carries
+  them in its definition, and field weight outweighs matched-token count. An
+  offline experiment (`scripts/experiment_semantic_rescue_rerank.py`) keeps the
+  lexical top two untouched and lets one rank-4+ candidate take third place
+  when its embedding similarity beats the top three by 0.02. Dev Hit@3
+  0.733 -> 0.833 with 3 cases fixed and none broken, cross-domain control
+  0.867 -> 0.933, and the alias-tuned 40-query set unchanged at 0.875. Full
+  reranking or blending would have cost that set 0.05. Serving cost and the
+  remaining risks are written up in
+  `reports/semantic_rescue_rerank_design_20260918.md`; nothing in the serving
+  path changed.
 - Added a recorded-baseline check to the search evaluation script
   (`--baseline`, `--regression-tolerance`, `--fail-on-regression`). It compares
   overall and per-category Hit@1/Hit@3/MRR against a committed baseline and
