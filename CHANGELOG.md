@@ -11,6 +11,20 @@
   where `Path.is_junction()` does not exist. Tests that need the canonical
   12 GB database skip when it is absent, and later CI steps (lint, smoke,
   STDIO/HTTP) still run after a unit-test failure.
+- Wired the semantic rescue rerank into the search path, off by default. A
+  `semantic_provider` passed to `configure_search_runtime` promotes one
+  rank-4-or-lower unit into third place when its similarity beats the current
+  top three by `semantic_margin`; the lexical top two never move, so an
+  alias-driven answer cannot be displaced. Without a provider the response
+  carries no `semantic_rescue` key and all 90 development queries return
+  byte-identical results, so no deployment gains a semantic step by accident.
+  A provider that raises, returns nothing, or answers with a mismatched length
+  leaves the order untouched. With precomputed unit vectors the development set
+  goes 0.800 -> 0.833 and the 40-query regression set stays at 0.875. Margin
+  0.01 and 0.02 give the same result, so the default is 0.02, which promotes on
+  7 of 130 queries instead of 10. The offline experiment's 0.844 came from
+  embedding candidates at query time; 0.833 is the number for the shipping
+  shape.
 - Compared four embedding models for the rescue rerank on the 90-query dev set
   and measured a torch-free cold start. The Korean-tuned 384-dimension model
   (`dragonkue/multilingual-e5-small-ko-v2`) reaches dev Hit@3 0.844 with the

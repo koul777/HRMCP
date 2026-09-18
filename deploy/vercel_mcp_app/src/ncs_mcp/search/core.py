@@ -13,6 +13,11 @@ from ncs_mcp.query_router import (
     search_context_request_contract,
 )
 
+from .semantic_rescue import (
+    DEFAULT_RESCUE_MARGIN,
+    SemanticSimilarityProvider,
+    rescue_order,
+)
 from .normalization import (
     SEARCH_NORMALIZATION_FIELDS,
     SEARCH_NORMALIZATION_REQUIRED_MANIFEST,
@@ -30,6 +35,8 @@ _UNIT_PATH: Any = None
 _TIER_PREDICATES: Any = None
 _TIER_EXECUTOR: Any = None
 _TOKEN_EXPANDER: Any = None
+_SEMANTIC_PROVIDER: SemanticSimilarityProvider | None = None
+_SEMANTIC_MARGIN: float = DEFAULT_RESCUE_MARGIN
 
 _NCS_CLASSIFICATION_FILTER_FIELDS = (
     "major_code",
@@ -53,16 +60,26 @@ def configure_search_runtime(
     tier_predicates: Any = None,
     tier_executor: Any = None,
     token_expander: Any = None,
+    semantic_provider: SemanticSimilarityProvider | None = None,
+    semantic_margin: float = DEFAULT_RESCUE_MARGIN,
 ) -> None:
-    """Inject server-owned runtime helpers without importing the server module."""
+    """Inject server-owned runtime helpers without importing the server module.
+
+    ``semantic_provider`` is optional. Without one the unit ranking is byte
+    identical to the lexical result, so no deployment gains a semantic step
+    until a provider is configured on purpose.
+    """
     global _OPEN_DB_FACTORY, _CLAMP_LIMIT, _UNIT_PATH
     global _TIER_PREDICATES, _TIER_EXECUTOR, _TOKEN_EXPANDER
+    global _SEMANTIC_PROVIDER, _SEMANTIC_MARGIN
     _OPEN_DB_FACTORY = open_db_factory
     _CLAMP_LIMIT = clamp_limit
     _UNIT_PATH = unit_path
     _TIER_PREDICATES = tier_predicates
     _TIER_EXECUTOR = tier_executor
     _TOKEN_EXPANDER = token_expander
+    _SEMANTIC_PROVIDER = semantic_provider
+    _SEMANTIC_MARGIN = semantic_margin
 
 
 def _required_runtime_helper(name: str, helper: Any) -> Any:
@@ -2892,6 +2909,23 @@ def search_ncs(
         )
     page_end = applied_offset + max_rows
     page = merged[applied_offset:page_end]
+    # The rescue reorders what the caller actually sees, so "rank 4+" means the
+    # same thing here as in the evaluation. Only unit rows move; every other
+    # row keeps its position.
+    semantic_rescue_evidence: dict[str, Any] | None = None
+    if _SEMANTIC_PROVIDER is not None:
+        unit_positions = [
+            position for position, item in enumerate(page) if item["type"] == "unit"
+        ]
+        if len(unit_positions) > 3:
+            reordered, semantic_rescue_evidence = rescue_order(
+                [page[position] for position in unit_positions],
+                query=phrase or query,
+                provider=_SEMANTIC_PROVIDER,
+                margin=_SEMANTIC_MARGIN,
+            )
+            for position, item in zip(unit_positions, reordered):
+                page[position] = item
     consumed_by_type = {item_type: 0 for item_type in requested_types}
     for item in merged[:page_end]:
         consumed_by_type[item["type"]] += 1
@@ -2955,6 +2989,10 @@ def search_ncs(
         "offset": applied_offset,
         "next_offset": next_offset,
         "search_context": search_context,
+        **(
+            {"semantic_rescue": semantic_rescue_evidence}
+            if semantic_rescue_evidence else {}
+        ),
         "results": page,
     }
     result["markdown_summary"] = _ncs_search_markdown(
