@@ -11,6 +11,17 @@
   where `Path.is_junction()` does not exist. Tests that need the canonical
   12 GB database skip when it is absent, and later CI steps (lint, smoke,
   STDIO/HTTP) still run after a unit-test failure.
+- Compared four embedding models for the rescue rerank on the 90-query dev set
+  and measured a torch-free cold start. The Korean-tuned 384-dimension model
+  (`dragonkue/multilingual-e5-small-ko-v2`) reaches dev Hit@3 0.844 with the
+  40-query set unchanged, matching Qwen3-Embedding-0.6B while being 112.8 MB
+  against 1.2 GB and 4 ms against 183 ms per query, so it is the choice. The
+  untuned `intfloat/multilingual-e5-small` of the same size reaches only 0.822,
+  and KR-SBERT 0.833. Margin 0.0 costs the regression set one case on every
+  model, so 0.01 is the floor. A cold process using only onnxruntime and
+  tokenizers takes 1.50-1.68 s (import 0.7 s, model load 0.8 s, first query
+  17 ms) and 3.5-3.7 ms per query afterwards, which would put cold start near
+  7.2 s on top of the current 5.6 s bootstrap.
 - Grew the development set from 30 to 90 queries (9 per HR category, 45
   cross-domain controls drawn from 22 other NCS majors) because a one-case
   numerical difference was worth 3.3pp at the old size. Baseline: Hit@1 0.667,
