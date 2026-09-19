@@ -2906,6 +2906,10 @@ class TrainingRecommendationTests(unittest.TestCase):
         self.assertEqual(course["coverage_breakdown"]["reviewed_goal_links"], 1)
         self.assertEqual(course["training_system_fit"]["rubric_role"], "framework_reference_not_scoring_source")
         self.assertEqual(course["training_system_fit"]["need_classification"]["code"], "required")
+        self.assertEqual(
+            course["training_system_fit"]["need_classification"]["label"],
+            "필수 검토 후보",
+        )
         self.assertEqual(course["training_system_fit"]["evidence_directness"]["code"], "training_goal_direct")
         self.assertIn("training_goal_ksa", course["training_system_fit"]["task_ksa_basis"]["basis_types"])
         self.assertEqual(course["training_system_fit"]["task_ksa_basis"]["training_goal_ksa"], ["HR strategy"])
@@ -5170,6 +5174,14 @@ class TrainingRecommendationTests(unittest.TestCase):
             1,
         )
         self.assertEqual(plan["training_system_matrix"][0]["need_classification"]["code"], "required")
+        self.assertEqual(
+            plan["training_system_matrix"][0]["need_classification"]["label"],
+            "필수 검토 후보",
+        )
+        self.assertEqual(
+            plan["training_system_matrix"][0]["decision_state"]["status"],
+            "pending_human_decision",
+        )
         self.assertEqual(plan["training_system_matrix"][0]["job_scope"]["target"], "인사기획")
         self.assertEqual(plan["training_system_matrix"][0]["target_level_band"]["code"], "level_5_6")
         self.assertEqual(plan["training_system_matrix"][0]["education_type"]["code"], "classroom_or_lecture")

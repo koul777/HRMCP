@@ -5104,7 +5104,7 @@ def _training_need_classification(
     else:
         code = "adjacent_reference"
     labels = {
-        "required": "필수 검토",
+        "required": "필수 검토 후보",
         "supporting": "보완 추천",
         "optional": "선택 후보",
         "adjacent_reference": "인접 참고",
@@ -5910,7 +5910,7 @@ def _fallback_training_system_fit(card: dict[str, Any]) -> dict[str, Any]:
     if need_code == "required" and not has_task_ksa_or_goal_evidence:
         need_code = "supporting"
     need_label = {
-        "required": "필수 검토",
+        "required": "필수 검토 후보",
         "supporting": "보완 추천",
         "optional": "선택 후보",
         "adjacent_reference": "인접 참고",

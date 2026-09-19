@@ -19,9 +19,11 @@ from ncs_mcp.quality_gates import (
     PASS,
     TRUSTED_LABEL_REVIEW_STATUSES,
     WARN,
+    _add_ontology_gates,
     _add_qualification_gates,
     _add_transition_evaluation_gates,
     _transition_recommendation_signal_summary,
+    _validate_ontology_readiness_readonly,
     evaluate_quality_gates,
     write_quality_gate_markdown,
 )
@@ -34,6 +36,126 @@ class QualityGateTests(unittest.TestCase):
             initialize_database(conn)
         finally:
             conn.close()
+
+    def test_boilerplate_definitions_are_reported_as_review_debt(self) -> None:
+        suffixes = {
+            "knowledge": "업무 판단과 문제 해결에 필요한 관련 원리, 기준, 절차, 사례에 대한 지식.",
+            "skill": "업무 상황에서 관련 절차나 도구를 활용해 과업을 수행하는 능력.",
+            "attitude": "업무 수행 과정에서 품질, 협업, 책임성을 유지하기 위한 태도.",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "ncs.db")
+            try:
+                initialize_database(conn)
+                for index, (concept_type, suffix) in enumerate(suffixes.items(), start=1):
+                    name = f"boilerplate concept {index}"
+                    conn.execute(
+                        """
+                        INSERT INTO ontology_concepts(
+                            concept_name, normalized_key, concept_type, definition,
+                            definition_status, relation_status, review_status,
+                            created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, 'candidate', 'none', 'candidate', ?, ?)
+                        """,
+                        (
+                            name,
+                            name.replace(" ", ""),
+                            concept_type,
+                            f"{name}: {suffix}",
+                            "2026-09-20T00:00:00+00:00",
+                            "2026-09-20T00:00:00+00:00",
+                        ),
+                    )
+                conn.execute(
+                    """
+                    INSERT INTO ontology_concepts(
+                        concept_name, normalized_key, concept_type, definition,
+                        definition_source, definition_status, relation_status, review_status,
+                        created_at, updated_at
+                    ) VALUES (?, ?, 'attitude', ?, NULL, 'candidate', 'none', 'candidate', ?, ?)
+                    """,
+                    (
+                        "alternate attitude boilerplate",
+                        "alternateattitudeboilerplate",
+                        (
+                            "alternate attitude boilerplate: 업무 수행 과정에서 "
+                            "해당 행동 기준을 일관되게 실천하려는 의지."
+                        ),
+                        "2026-09-20T00:00:00+00:00",
+                        "2026-09-20T00:00:00+00:00",
+                    ),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO ontology_concepts(
+                        concept_name, normalized_key, concept_type, definition,
+                        definition_source, definition_status, relation_status, review_status,
+                        created_at, updated_at
+                    ) VALUES (
+                        ?, ?, 'knowledge', ?, 'ksa_meaning_candidate_promotion',
+                        'candidate', 'none', 'candidate', ?, ?
+                    )
+                    """,
+                    (
+                        "promoted substantive definition",
+                        "promotedsubstantivedefinition",
+                        "업무 범위와 판단 기준을 구체적으로 설명한 승격 후보 정의.",
+                        "2026-09-20T00:00:00+00:00",
+                        "2026-09-20T00:00:00+00:00",
+                    ),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO ontology_concepts(
+                        concept_name, normalized_key, concept_type, definition,
+                        definition_source, definition_status, relation_status, review_status,
+                        created_at, updated_at
+                    ) VALUES (
+                        ?, ?, 'knowledge', ?, 'term_definition_template',
+                        'candidate', 'none', 'candidate', ?, ?
+                    )
+                    """,
+                    (
+                        "template sourced definition",
+                        "templatesourceddefinition",
+                        "Template-generated definition text.",
+                        "2026-09-20T00:00:00+00:00",
+                        "2026-09-20T00:00:00+00:00",
+                    ),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO ontology_concepts(
+                        concept_name, normalized_key, concept_type, definition,
+                        definition_status, relation_status, review_status,
+                        created_at, updated_at
+                    ) VALUES (?, ?, 'knowledge', ?, 'candidate', 'none', 'candidate', ?, ?)
+                    """,
+                    (
+                        "substantive concept",
+                        "substantiveconcept",
+                        "업무 범위와 판단 기준을 구체적으로 설명한 별도 검토 후보 정의.",
+                        "2026-09-20T00:00:00+00:00",
+                        "2026-09-20T00:00:00+00:00",
+                    ),
+                )
+                conn.commit()
+                validation = _validate_ontology_readiness_readonly(conn)
+            finally:
+                conn.close()
+
+        self.assertEqual(validation["metrics"]["definition_rows"], 7)
+        self.assertEqual(validation["metrics"]["boilerplate_definition_rows"], 5)
+        self.assertEqual(validation["metrics"]["non_boilerplate_definition_rows"], 2)
+
+        gates: list[dict] = []
+        _add_ontology_gates(gates, validation)
+        gate = next(
+            row for row in gates if row["name"] == "review_debt:boilerplate_definition_ratio"
+        )
+        self.assertEqual(gate["status"], WARN)
+        self.assertEqual(gate["value"], 0.7143)
+        self.assertFalse(gate["details"]["trusted_definition_claim"])
 
     def _write_non_hr_surface_report(
         self,

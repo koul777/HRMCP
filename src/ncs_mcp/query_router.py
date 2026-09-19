@@ -465,6 +465,8 @@ OPERATOR_REVIEW_TARGET_SIGNALS = (
     "concept link",
     "ksa link",
     "link quality",
+    "quality gate",
+    "release readiness",
     "review target",
     "human review target",
     "human review 대상",
@@ -486,6 +488,9 @@ OPERATOR_REVIEW_TARGET_SIGNALS = (
     "개념 링크",
     "ksa 링크",
     "링크",
+    "품질 게이트",
+    "릴리스 준비도",
+    "출시 준비도",
 )
 
 OPERATOR_REVIEW_SURFACE_SIGNALS = (
@@ -495,13 +500,37 @@ OPERATOR_REVIEW_SURFACE_SIGNALS = (
     "review queue",
     "review target",
     "quality issue",
+    "quality gate",
+    "release readiness",
     "readiness",
     "검토 대상",
     "리뷰 대상",
     "운영자",
     "운영자 검토",
     "품질 이슈",
+    "품질 게이트",
+    "릴리스 준비도",
+    "출시 준비도",
     "준비도",
+)
+
+EXPLICIT_EDUCATION_SYSTEM_DESIGN_SIGNALS = (
+    "education system",
+    "training system",
+    "curriculum",
+    "교육체계",
+    "교육훈련체계",
+    "훈련체계",
+)
+EXPLICIT_EDUCATION_SYSTEM_DESIGN_ACTIONS = (
+    "design",
+    "build",
+    "create",
+    "plan",
+    "설계",
+    "수립",
+    "만들",
+    "작성",
 )
 
 
@@ -919,8 +948,9 @@ def _score_pattern(pattern: RoutePattern, normalized: str) -> int:
             score = 0
     operator_review_intent = _has_operator_review_intent(normalized)
     strong_operator_review_intent = _has_operator_review_surface_intent(normalized)
+    explicit_education_system_design = _has_explicit_education_system_design_intent(normalized)
     if pattern.scenario == OPERATOR_REVIEW and strong_operator_review_intent:
-        score += 90
+        score += 25 if explicit_education_system_design else 90
     elif pattern.scenario == OPERATOR_REVIEW and operator_review_intent:
         score += 35
     elif strong_operator_review_intent and pattern.scenario in {
@@ -928,7 +958,7 @@ def _score_pattern(pattern: RoutePattern, normalized: str) -> int:
         TRAINING_TRANSITION,
         TASK_TRAINING,
         TASK_TRANSITION,
-    }:
+    } and not (pattern.scenario == EDUCATION_SYSTEM and explicit_education_system_design):
         score -= 35
     if pattern.scenario == STRUCTURE_SEARCH and prefer_structure_search:
         score += 60
@@ -1015,6 +1045,12 @@ def _has_structure_entity_intent(normalized: str) -> bool:
 
 def _has_explicit_training_intent(normalized: str) -> bool:
     return any(signal in normalized for signal in EXPLICIT_TRAINING_INTENT_SIGNALS)
+
+
+def _has_explicit_education_system_design_intent(normalized: str) -> bool:
+    return any(
+        signal in normalized for signal in EXPLICIT_EDUCATION_SYSTEM_DESIGN_SIGNALS
+    ) and any(action in normalized for action in EXPLICIT_EDUCATION_SYSTEM_DESIGN_ACTIONS)
 
 
 def _has_operator_review_intent(normalized: str) -> bool:
@@ -1440,6 +1476,7 @@ def _strip_route_noise(query: str) -> str:
         "training system",
         "curriculum",
         "roadmap",
+        "release readiness",
         "\ud6c8\ub828\uacfc\uc815 \ucd94\ucc9c",
         "\uad50\uc721\uacfc\uc815 \ucd94\ucc9c",
         "\uacfc\uc815 \ucd94\ucc9c",
@@ -1452,6 +1489,9 @@ def _strip_route_noise(query: str) -> str:
         "\uad50\uc721",
         "\uad50\uc721\uccb4\uacc4",
         "\ud6c8\ub828\uccb4\uacc4",
+        "릴리스 준비도",
+        "출시 준비도",
+        "검증용으로",
         "\uc804\ud658",
         "\uc774\ub3d9",
         "\ub9cc\ub4e4\uc5b4\uc918",

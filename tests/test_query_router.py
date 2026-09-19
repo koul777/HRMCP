@@ -449,6 +449,44 @@ class NcsQueryRouterTests(unittest.TestCase):
         self.assertIn("operator_review_route", guard_codes)
         self.assertNotIn("missing_required_params", guard_codes)
 
+    def test_routes_recommendation_system_quality_gate_readiness_to_operator_review(self) -> None:
+        route = route_ncs_query(
+            "현재 NCS 교육 추천 시스템의 품질 게이트와 릴리스 준비도를 보완해줘",
+            available_tool_names={
+                "ncs_search",
+                "ncs_analysis",
+                "recommend_training_for_task",
+                "get_quality_issues",
+            },
+        )
+
+        self.assertEqual(route["scenario"], "operator_review")
+        self.assertEqual(route["tool"], "get_quality_issues")
+        self.assertTrue(route["available"])
+        self.assertEqual(route["missing_params"], [])
+        guard_codes = {flag["code"] for flag in route["guard_flags"]}
+        self.assertIn("operator_review_route", guard_codes)
+
+    def test_explicit_education_system_design_outweighs_release_readiness_context(self) -> None:
+        route = route_ncs_query(
+            "릴리스 준비도 검증용으로 노무관리에서 인사기획으로 전환하는 교육체계를 설계해줘",
+            available_tool_names={
+                "ncs_search",
+                "ncs_analysis",
+                "recommend_training_for_task",
+                "recommend_training_transition",
+                "plan_ncs_education_path",
+                "get_quality_issues",
+            },
+        )
+
+        self.assertEqual(route["scenario"], "education_system_design")
+        self.assertEqual(route["tool"], "plan_ncs_education_path")
+        self.assertEqual(route["params"]["current_query"], "노무관리")
+        self.assertEqual(route["params"]["target_query"], "인사기획")
+        guard_codes = {flag["code"] for flag in route["guard_flags"]}
+        self.assertNotIn("operator_review_route", guard_codes)
+
     def test_routes_ksa_definition_human_review_target_to_operator_review(self) -> None:
         route = route_ncs_query(
             "KSA \uc815\uc758 \uac80\ud1a0\uc640 human review "

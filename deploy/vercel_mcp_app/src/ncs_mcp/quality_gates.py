@@ -12,6 +12,7 @@ from ncs_mcp.api_quality import (
     API_ELEMENT_UNMATCHED_ISSUE_TYPE,
     normalize_api_element_issue_type,
 )
+from ncs_mcp.db import KSA_DEFINITION_BOILERPLATE_PREFIXES
 from ncs_mcp.job_base_api import job_base_summary
 from ncs_mcp.qualification_api import qualification_retry_hygiene_report, qualification_summary
 from ncs_mcp.refinement import refinement_stats
@@ -31,6 +32,20 @@ from ncs_mcp.training_recommendation import (
 PASS = "pass"
 WARN = "warn"
 FAIL = "fail"
+ONTOLOGY_DEFINITION_BOILERPLATE_SOURCES = (
+    "term_definition_template",
+    "term_definition_candidate_template",
+    "ksa_definition_template",
+    "ksa_definition_placeholder",
+    "ksa_meaning_candidates.term_definition_template",
+)
+ONTOLOGY_DEFINITION_BOILERPLATE_PATTERNS_BY_TYPE = {
+    concept_type: (prefix,)
+    for concept_type, prefix in KSA_DEFINITION_BOILERPLATE_PREFIXES.items()
+}
+ONTOLOGY_DEFINITION_BOILERPLATE_PATTERNS_BY_TYPE["attitude"] += (
+    "업무 수행 과정에서 해당 행동 기준을 일관되게 실천하려는 의지.",
+)
 HUMAN_TRUSTED_LABEL_REVIEW_STATUSES = ("human_reviewed", "accepted", "reviewed")
 TRUSTED_LABEL_REVIEW_STATUSES = HUMAN_TRUSTED_LABEL_REVIEW_STATUSES
 AUTOMATED_REVIEWER_IDS = ("dashboard", "mcp", "automation", "automated_eval_gate", "system")
@@ -655,6 +670,41 @@ def _validate_ontology_readiness_readonly(conn: sqlite3.Connection) -> dict[str,
             """
         ).fetchone()[0]
     )
+    definition_rows = int(
+        conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM ontology_concepts
+            WHERE TRIM(COALESCE(definition, '')) <> ''
+            """
+        ).fetchone()[0]
+    )
+    source_placeholders = ",".join("?" for _ in ONTOLOGY_DEFINITION_BOILERPLATE_SOURCES)
+    text_clauses: list[str] = []
+    boilerplate_params: list[str] = list(ONTOLOGY_DEFINITION_BOILERPLATE_SOURCES)
+    for concept_type, patterns in ONTOLOGY_DEFINITION_BOILERPLATE_PATTERNS_BY_TYPE.items():
+        for pattern in patterns:
+            text_clauses.append(
+                "(LOWER(TRIM(COALESCE(concept_type, ''))) = ? "
+                "AND COALESCE(definition, '') LIKE '%' || ? || '%')"
+            )
+            boilerplate_params.extend((concept_type, pattern))
+    boilerplate_where = (
+        f"COALESCE(definition_source, '') IN ({source_placeholders}) "
+        f"OR {' OR '.join(text_clauses)}"
+    )
+    boilerplate_definition_rows = int(
+        conn.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM ontology_concepts
+            WHERE TRIM(COALESCE(definition, '')) <> ''
+              AND ({boilerplate_where})
+            """,
+            tuple(boilerplate_params),
+        ).fetchone()[0]
+    )
+    non_boilerplate_definition_rows = max(0, definition_rows - boilerplate_definition_rows)
     concepts_with_label_candidates = int(
         conn.execute(
             """
@@ -876,6 +926,9 @@ def _validate_ontology_readiness_readonly(conn: sqlite3.Connection) -> dict[str,
             "needs_review_meaning_candidate_statuses": needs_review_meaning_candidate_statuses,
             "candidate_meaning_candidate_statuses": candidate_meaning_candidate_statuses,
             "candidate_definitions": candidate_definitions,
+            "definition_rows": definition_rows,
+            "boilerplate_definition_rows": boilerplate_definition_rows,
+            "non_boilerplate_definition_rows": non_boilerplate_definition_rows,
             "concepts_with_label_candidates": concepts_with_label_candidates,
             "shortened_label_candidates": shortened_label_candidates,
             "label_candidates_missing_provenance": label_candidates_missing_provenance,
@@ -1127,6 +1180,31 @@ def _add_ontology_gates(
         value=candidate_ratio,
         threshold="<= 0.99",
         details={"candidate_definitions": candidate_definitions, "ontology_concepts": concept_count},
+    )
+
+    definition_rows = int(metrics.get("definition_rows") or 0)
+    boilerplate_definition_rows = int(metrics.get("boilerplate_definition_rows") or 0)
+    non_boilerplate_definition_rows = int(metrics.get("non_boilerplate_definition_rows") or 0)
+    boilerplate_definition_ratio = (
+        round(boilerplate_definition_rows / definition_rows, 4) if definition_rows else 0.0
+    )
+    _add_gate(
+        gates,
+        name="review_debt:boilerplate_definition_ratio",
+        status=WARN if boilerplate_definition_rows else PASS,
+        message=(
+            "Ontology definition text is boilerplate review context, not a trusted substantive definition."
+            if boilerplate_definition_rows
+            else "No boilerplate ontology definition text was detected."
+        ),
+        value=boilerplate_definition_ratio,
+        threshold="== 0 boilerplate definitions",
+        details={
+            "definition_rows": definition_rows,
+            "boilerplate_definition_rows": boilerplate_definition_rows,
+            "non_boilerplate_definition_rows": non_boilerplate_definition_rows,
+            "trusted_definition_claim": False,
+        },
     )
 
     saved_training_recommendations = int(metrics.get("saved_training_recommendations") or 0)
