@@ -150,6 +150,13 @@ Measure it at most once per release decision, never tune against it, and treat
 its Hit@3 as the generalization estimate. The earlier 51-query holdout was
 re-measured across tuning stages and no longer serves that purpose.
 
+As of 2026-09-20, holdout v2 is **diagnostic-contaminated**: individual miss
+queries and top-3 lists appear in dated reports under `reports/`. Keep using it
+only for mechanism taxonomy and release-time generalization checks. Do not add
+aliases or intents that quote those queries. A frozen holdout v3 (aggregate
+metrics only in public reports) should replace it for the next release gate;
+see `tests/fixtures/ncs_search_eval_nl_holdout_v3.README.md` when present.
+
 CI cannot run these gates: the hosted runner has no canonical database, so its
 `Run natural-language search Hit@3 gate` step only records a `warn`. Treat the
 Builder-side run above as the real gate.

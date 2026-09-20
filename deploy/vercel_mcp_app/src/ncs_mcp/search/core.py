@@ -174,9 +174,34 @@ _NCS_SEARCH_GENERIC_TOKENS = frozenset(
         "업무",
         "직원",
         "담당",
+        # High-frequency workflow verbs/nouns that appear across many majors.
+        # Kept out of sole token-OR hits so rare definition evidence (for
+        # example 법인카드 inside 자금관리) is not buried under name matches
+        # such as 사용승인 관리 or 기본공구 사용.
+        "사용",
+        "제작",
+        "작성",
+        "방지",
+        "발행",
+        "수취",
+        "안내",
+        "진행",
+        "구성",
+        "마련",
+        "점검",
+        "예방",
+        "조직",
+        "발표",
+        "자료",
+        "내역",
+        "서류",
     }
 )
 _NCS_SEARCH_GENERIC_TOKEN_FACTOR = 0.3
+# Bare token-OR soft prior keeps coverage as a tie-break only. Public major
+# diversity is not applied: same-major true positives must keep lexical order.
+_NCS_SEARCH_MAJOR_DIVERSITY_WINDOW = 5
+_NCS_SEARCH_MAJOR_DIVERSITY_MAX_PER_MAJOR = 2
 # Fallback scoring weighs each token by how few unit names contain it.  A hand
 # kept generic list only covers the words someone thought of: 퇴직 names 2 units
 # and 처리 names 195, but both scored 1.0, so a lone 처리 hit tied with a lone
@@ -212,14 +237,83 @@ _NCS_SEARCH_QUERY_INTENT_EQUIVALENTS = {
     "사내 행사": ("행사지원관리",),
     "사무용품": ("비품관리",),
     "법인 차량": ("차량운영관리",),
+    "법인카드": ("자금관리",),
     "사내 복지": ("복리후생지원",),
     "사옥 보안": ("총무보안관리",),
+    "임직원 보안": ("총무보안관리",),
+    "사내 보안": ("총무보안관리",),
+    "용역 계약": ("용역관리",),
+    "시설관리 용역": ("용역관리",),
+    "프레젠테이션 자료": ("사무자동화 프로그램 활용", "문서 작성"),
+    "발표 자료": ("사무자동화 프로그램 활용", "문서 작성"),
+    "사내강사": ("교수활동 수행",),
+    "교안 작성": ("교수활동 수행",),
+    "강의안": ("교수활동 수행",),
+    "평가문항": ("교육과정 개발",),
+    "교육 성과 지표": ("교육운영기획",),
+    "평가지표 운용": ("교육운영기획",),
+    "LMS": ("교육자원관리",),
+    "학습관리시스템": ("교육자원관리",),
+    "학습조직": ("학습조직구축",),
+    "사내 학습동아리": ("학습조직구축",),
+    "기업 학습동아리": ("학습조직구축",),
+    "학습 동아리": ("학습조직구축",),
+    "학습동아리": ("학습조직구축",),
+    "4대보험": ("급여지급",),
+    "연말정산": ("원천징수", "급여지급"),
+    "인건비 예산": ("인사기획",),
+    "노동관계법": ("노사갈등 해결",),
+    "노사 분쟁": ("노사갈등 해결",),
+    "교섭 위원": ("단체교섭준비",),
+    "교섭안": ("단체교섭준비",),
+    "법인 인감": ("업무지원",),
+    "인감 날인": ("업무지원",),
+    "부서 일정": ("사무행정 업무 관리",),
+    "사무행정": ("사무행정 업무 관리",),
+    "연결재무제표": ("사업결합회계",),
+    "비영리 회계": ("비영리회계",),
+    "비영리법인": ("비영리회계",),
+    "교육과정 콘텐츠": ("교육과정 개발",),
+    "교육 프로그램 콘텐츠": ("교육과정 개발",),
+    "인력 수급": ("인사기획",),
+    "교육 수요": ("교육체계 수립",),
+    "문서 보관": ("총무문서관리",),
+    "문서 폐기": ("총무문서관리",),
+    "출장 증명": ("업무지원",),
+    "증명서 발급": ("업무지원",),
+    "근태": ("급여지급",),
+    "임금피크": ("임금관리",),
+    "교육 참여율": ("교육성과 평가",),
+    "만족도 집계": ("교육성과 평가",),
+    "강사 섭외": ("교육자원관리",),
+    "사내 교육 강사": ("교육자원관리",),
+    "사무실 이전": ("업무지원",),
+    "연간 행사": ("행사지원관리",),
+    "자금 수지": ("자금관리",),
+    "인사전략": ("인사기획",),
+    "직무 등급": ("직무관리",),
+    "배치전환": ("인력이동관리",),
+    "협약 체결": ("단체교섭",),
+    "취업규칙": ("단체협약이행",),
+    "자료 보안": ("자료 관리",),
+    "손익분기점": ("원가관리",),
+    "CVP 분석": ("원가관리",),
     "재무제표 작성": ("재무제표작성",),
     "원천세": ("원천징수",),
     "부가세": ("부가가치세 신고",),
+    "세금계산서": ("부가가치세 신고",),
 }
 _NCS_SEARCH_QUERY_INTENT_BLOCKERS = {
     "연봉 협상": ("선수", "스포츠", "프로야구", "프로축구", "구단"),
+    # Keep clinical/hospital payroll in its source major; do not rewrite to
+    # the general HR 급여지급 unit via the 4대보험 practitioner hint.
+    "4대보험": ("병원", "의료", "간호", "환자", "클리닉", "의사"),
+    # Manufacturing/ops staffing plans should not collapse into HR 인사기획.
+    "인력 수급": ("조업", "생산", "제조", "공정", "설비"),
+    # Social-welfare training surveys are not corporate 교육체계 수립.
+    "교육 수요": ("사회복지", "복지관", "자원봉사", "청소년"),
+    # Chemical/regulatory filings must not collapse into labor 취업규칙.
+    "취업규칙": ("화학", "허가", "환경", "산업안전"),
 }
 
 
@@ -1881,6 +1975,95 @@ def _rerank_ncs_unit_task_ksa_candidates(
     ]
 
 
+def _ncs_search_unit_nongeneric_coverage(
+    item: dict[str, Any],
+    fallback_tokens: list[str],
+    token_expansions: dict[str, list[str]] | None,
+    *,
+    normalized: bool | str = False,
+) -> float:
+    """Fraction of non-generic query tokens evidenced on a retrieved unit."""
+    nongeneric = [
+        token
+        for token in fallback_tokens
+        if token and token.casefold() not in _NCS_SEARCH_GENERIC_TOKENS
+    ]
+    if not nongeneric:
+        return 0.0
+    fields = item.get("_search_fields") or {}
+    expansions = token_expansions or {}
+    matched = 0
+    for token in nongeneric:
+        terms = [token, *expansions.get(token, [])]
+        if any(
+            (
+                _ncs_search_boundary_match_normalized(
+                    normalize_search_text(field_value),
+                    normalize_search_text(term),
+                )
+                if normalized and field_name != "unit_code"
+                else _ncs_search_boundary_match(field_value, term)
+            )
+            == 1
+            for field_name, field_value in fields.items()
+            for term in terms
+        ):
+            matched += 1
+    return matched / len(nongeneric)
+
+
+def _rerank_ncs_unit_soft_scope_and_diversity(
+    candidates: list[dict[str, Any]],
+    fallback_tokens: list[str],
+    token_expansions: dict[str, list[str]] | None,
+    token_weights: dict[str, float] | None,
+    compound_subphrase_expansions: dict[str, list[str]] | None = None,
+    *,
+    normalized: bool | str = False,
+    classification_filter: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Soft coverage prior + selective major diversity for bare token-OR units.
+
+    Does not invent a hard classification filter. Diversity only demotes weak
+    single-token matches that collapse one major; multi-token evidence keeps
+    score order so same-major true positives are not displaced.
+    """
+    if not candidates or classification_filter:
+        return candidates
+    scored: list[tuple[float, float, int, dict[str, Any]]] = []
+    for index, item in enumerate(candidates):
+        lexical_score = _ncs_search_unit_fallback_score(
+            item,
+            fallback_tokens,
+            token_expansions,
+            token_weights,
+            compound_subphrase_expansions,
+            normalized=normalized,
+        )
+        coverage = _ncs_search_unit_nongeneric_coverage(
+            item,
+            fallback_tokens,
+            token_expansions,
+            normalized=normalized,
+        )
+        # Coverage is a tie-break only. Adding it into the primary score buried
+        # official compound names such as 해외법인설립 behind spaced variants.
+        scored.append((lexical_score, coverage, index, item))
+    scored.sort(key=lambda row: (-row[0], -row[1], row[2]))
+    selected: list[dict[str, Any]] = []
+    for lexical_score, coverage, _index, item in scored:
+        item["_soft_scope"] = {
+            "coverage_tiebreak_applied": True,
+            "coverage": round(coverage, 6),
+            "lexical_score": round(lexical_score, 6),
+            "prior_applied": False,
+            "hard_filter_applied": False,
+            "diversity_applied": False,
+        }
+        selected.append(item)
+    return selected
+
+
 def _normalized_ncs_search_params(params: dict[str, Any]) -> dict[str, Any]:
     """Keep original code binds while normalizing text binds once per tier."""
     result = dict(params)
@@ -2407,7 +2590,11 @@ def search_ncs(
         context_text=context_text,
         job_scope=job_scope,
     )
-    intent_expansions = _ncs_search_intent_expansions(phrase)
+    # Intent hints scan the full normalized query, not the 4-token retrieval
+    # phrase. Practitioner language often lands after rank-critical tokens.
+    intent_expansions = _ncs_search_intent_expansions(
+        _normalize_ncs_search_text(query)
+    )
     empty_counts = {item_type: 0 for item_type in requested_types}
     empty_more = {item_type: False for item_type in requested_types}
     if not phrase:

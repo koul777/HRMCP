@@ -924,6 +924,34 @@ class NcsSearchRecallTests(unittest.TestCase):
             ("U_SUPPLIES", "비품관리", "사무 비품을 구매하고 관리한다", "4", 1),
             ("U_SECURITY", "총무보안관리", "사옥 출입과 보안을 관리한다", "4", 1),
             ("U_VAT", "부가가치세 신고", "부가가치세 신고 업무를 수행한다", "4", 1),
+            ("U_FUND", "자금관리", "법인카드와 유가증권을 관리한다", "4", 1),
+            ("U_OUTSOURCE", "용역관리", "시설관리 용역 계약을 관리한다", "4", 4),
+            ("U_COST", "원가관리", "손익분기점과 CVP 분석을 수행한다", "4", 1),
+            ("U_OFFICE_AUTO", "사무자동화 프로그램 활용", "프레젠테이션 자료를 제작한다", "4", 1),
+            ("U_TEACH", "교수활동 수행", "교안 작성과 교수활동을 수행한다", "4", 1),
+            ("U_CURRICULUM", "교육과정 개발", "평가 도구와 교육과정을 개발한다", "4", 1),
+            ("U_EDU_PLAN", "교육운영기획", "교육 제도와 평가지표를 운용한다", "4", 1),
+            ("U_EDU_RESOURCE", "교육자원관리", "학습관리시스템 등 교육 인프라를 관리한다", "4", 1),
+            ("U_LEARN_ORG", "학습조직구축", "조직 내 학습조직을 구축한다", "4", 1),
+            ("U_BARGAIN", "단체교섭준비", "교섭 위원과 교섭안을 준비한다", "4", 1),
+            ("U_DOC_ADMIN", "총무문서관리", "문서 보관과 폐기를 관리한다", "4", 1),
+            ("U_EDU_SYSTEM", "교육체계 수립", "교육 수요와 교육체계를 수립한다", "4", 1),
+            ("U_EDU_EVAL", "교육성과 평가", "교육 참여율과 만족도를 집계한다", "4", 1),
+            ("U_EVENT", "행사지원관리", "연간 행사를 지원한다", "4", 1),
+            ("U_JOB", "직무관리", "직무 등급과 직무 평가를 관리한다", "4", 1),
+            ("U_MOVE", "인력이동관리", "배치전환 소요 인원을 파악한다", "4", 1),
+            ("U_BARGAIN_RUN", "단체교섭", "협약 체결과 교섭을 진행한다", "4", 1),
+            ("U_AGREE", "단체협약이행", "취업규칙 변경을 관리한다", "4", 1),
+            ("U_DOCS", "자료 관리", "사내 자료 보안을 관리한다", "4", 1),
+            ("U_PAY", "급여지급", "4대보험과 급여를 지급한다", "4", 1),
+            ("U_WITHHOLD", "원천징수", "연말정산과 원천징수를 수행한다", "4", 1),
+            ("U_HR_PLAN", "인사기획", "인건비 예산을 포함한 인사기획을 수행한다", "4", 1),
+            ("U_LABOR_CONFLICT", "노사갈등 해결", "노동관계법 준수와 분쟁을 예방한다", "4", 1),
+            ("U_ADMIN_SUPPORT", "업무지원", "법인 인감 날인을 지원한다", "4", 1),
+            ("U_OFFICE_ADMIN", "사무행정 업무 관리", "부서 일정과 경비 정산을 지원한다", "4", 1),
+            ("U_COMBINE", "사업결합회계", "연결재무제표를 작성한다", "4", 1),
+            ("U_NPO", "비영리회계", "비영리법인 회계 보고서를 작성한다", "4", 1),
+            ("U_USE_NOISE", "사용승인 관리", "공구 사용을 승인한다", "4", 6),
             ("U_PLAYER", "선수연봉계약", "프로야구 선수의 연봉 협상을 수행한다", "4", 3),
             # Same base code 02020102 20 shared by two 세분류: NCS lets a 세분류
             # borrow a unit developed elsewhere. The borrowed copy keeps the
@@ -1109,9 +1137,11 @@ class NcsSearchRecallTests(unittest.TestCase):
         result = server.search_ncs(query, scope="unit", limit=10)
         self.assertEqual(len(self.sql_statements), baseline_statement_count)
         self.assertEqual(result["results"][:baseline["returned"]], baseline["results"])
+        # U_PAY is the shared-fixture official 급여지급 unit used by intent
+        # seeds; it must stay ahead of the longer prefix-only synthetic row.
         self.assertEqual(
             [row["id"] for row in result["results"]],
-            ["C_SPACED", "C_JOINED", "C_JOINED_PREFIX"],
+            ["C_SPACED", "C_JOINED", "U_PAY", "C_JOINED_PREFIX"],
         )
         joined = result["results"][1]
         self.assertEqual(joined["match_mode"], "phrase")
@@ -1427,6 +1457,47 @@ class NcsSearchRecallTests(unittest.TestCase):
             "사무용품 구매 요청": ("U_SUPPLIES", "비품관리"),
             "사옥 보안 점검": ("U_SECURITY", "총무보안관리"),
             "부가세 신고 준비": ("U_VAT", "부가가치세 신고"),
+            "법인카드 사용 내역": ("U_FUND", "자금관리"),
+            "세금계산서 발행": ("U_VAT", "부가가치세 신고"),
+            "임직원 보안 점검": ("U_SECURITY", "총무보안관리"),
+            "시설관리 용역 계약": ("U_OUTSOURCE", "용역관리"),
+            "프레젠테이션 자료 제작": ("U_OFFICE_AUTO", "사무자동화 프로그램 활용"),
+            "발표 자료 요청": ("U_OFFICE_AUTO", "사무자동화 프로그램 활용"),
+            "손익분기점 분석": ("U_COST", "원가관리"),
+            "사내강사 준비": ("U_TEACH", "교수활동 수행"),
+            "평가문항 개발": ("U_CURRICULUM", "교육과정 개발"),
+            "교육 성과 지표 점검": ("U_EDU_PLAN", "교육운영기획"),
+            "LMS 운영 점검": ("U_EDU_RESOURCE", "교육자원관리"),
+            "학습조직 활성화": ("U_LEARN_ORG", "학습조직구축"),
+            "학습 동아리 운영": ("U_LEARN_ORG", "학습조직구축"),
+            "4대보험 취득": ("U_PAY", "급여지급"),
+            "연말정산 안내": ("U_WITHHOLD", "원천징수"),
+            "인건비 예산 수립": ("U_HR_PLAN", "인사기획"),
+            "노동관계법 교육": ("U_LABOR_CONFLICT", "노사갈등 해결"),
+            "교섭안 마련": ("U_BARGAIN", "단체교섭준비"),
+            "법인 인감 관리": ("U_ADMIN_SUPPORT", "업무지원"),
+            "부서 일정 관리": ("U_OFFICE_ADMIN", "사무행정 업무 관리"),
+            "연결재무제표 검토": ("U_COMBINE", "사업결합회계"),
+            "비영리법인 결산": ("U_NPO", "비영리회계"),
+            "비영리 회계 결산": ("U_NPO", "비영리회계"),
+            "교육 프로그램 콘텐츠 제작": ("U_CURRICULUM", "교육과정 개발"),
+            "근태 관리": ("U_PAY", "급여지급"),
+            "인력 수급 계획": ("U_HR_PLAN", "인사기획"),
+            "교육 수요 조사": ("U_EDU_SYSTEM", "교육체계 수립"),
+            "문서 보관 폐기": ("U_DOC_ADMIN", "총무문서관리"),
+            "출장 증명서 발급": ("U_ADMIN_SUPPORT", "업무지원"),
+            "임금피크제 검토": ("U_WAGE", "임금관리"),
+            "교육 참여율 집계": ("U_EDU_EVAL", "교육성과 평가"),
+            "강사 섭외": ("U_EDU_RESOURCE", "교육자원관리"),
+            "사무실 이전": ("U_ADMIN_SUPPORT", "업무지원"),
+            "연간 행사 일정": ("U_EVENT", "행사지원관리"),
+            "자금 수지 계획": ("U_FUND", "자금관리"),
+            "인사전략 수립": ("U_HR_PLAN", "인사기획"),
+            "직무 등급 산정": ("U_JOB", "직무관리"),
+            "배치전환 인원": ("U_MOVE", "인력이동관리"),
+            "협약 체결": ("U_BARGAIN_RUN", "단체교섭"),
+            "취업규칙 변경": ("U_AGREE", "단체협약이행"),
+            "자료 보안 관리": ("U_DOCS", "자료 관리"),
         }
 
         for query, (expected_id, expected_expansion) in expectations.items():
@@ -1439,6 +1510,66 @@ class NcsSearchRecallTests(unittest.TestCase):
                     result["results"][0]["matched_expansions"][0]["matched_as"],
                     expected_expansion,
                 )
+
+    def test_generic_usage_token_does_not_bury_definition_evidence(self) -> None:
+        result = server.search_ncs("법인카드 사용 내역 관리", scope="unit", limit=5)
+        ids = [row["id"] for row in result["results"]]
+        self.assertIn("U_FUND", ids[:3])
+        self.assertNotEqual(ids[0], "U_USE_NOISE")
+
+    def test_soft_scope_coverage_prior_prefers_multi_token_evidence(self) -> None:
+        from ncs_mcp.search.core import _rerank_ncs_unit_soft_scope_and_diversity
+
+        weak = {
+            "id": "U_WEAK",
+            "type": "unit",
+            "_match_tier": 3,
+            "_classification_codes": {
+                "major_code": "11",
+                "middle_code": "01",
+                "small_code": "01",
+                "sub_code": "01",
+            },
+            "_search_fields": {
+                "unit_name": "경비계획",
+                "alias": "",
+                "classification": "시설",
+                "definition": "경비 업무",
+            },
+        }
+        strong = {
+            "id": "U_STRONG",
+            "type": "unit",
+            "_match_tier": 3,
+            "_classification_codes": {
+                "major_code": "02",
+                "middle_code": "01",
+                "small_code": "01",
+                "sub_code": "01",
+            },
+            "_search_fields": {
+                "unit_name": "용역관리",
+                "alias": "",
+                "classification": "총무",
+                "definition": "시설관리 용역 계약을 관리한다",
+            },
+        }
+        reranked = _rerank_ncs_unit_soft_scope_and_diversity(
+            [weak, strong],
+            ["청소", "경비", "용역", "계약"],
+            {},
+            {"청소": 0.5, "경비": 0.5, "용역": 0.9, "계약": 0.8},
+            classification_filter=None,
+        )
+        self.assertEqual(reranked[0]["id"], "U_STRONG")
+        unchanged = _rerank_ncs_unit_soft_scope_and_diversity(
+            [weak, strong],
+            ["청소", "경비", "용역", "계약"],
+            {},
+            {},
+            classification_filter={"major_code": "11"},
+        )
+        self.assertEqual([item["id"] for item in unchanged], ["U_WEAK", "U_STRONG"])
 
     def test_intent_aliases_do_not_override_explicit_cross_domain_qualifiers(self) -> None:
         from ncs_mcp.search import core as search_core
@@ -1453,6 +1584,22 @@ class NcsSearchRecallTests(unittest.TestCase):
         )
         self.assertEqual(
             search_core._ncs_search_intent_expansions("설비보수 외주 용역"),
+            [],
+        )
+        self.assertEqual(
+            search_core._ncs_search_intent_expansions("병원 직원 급여와 4대보험"),
+            [],
+        )
+        self.assertEqual(
+            search_core._ncs_search_intent_expansions("4대보험 취득"),
+            ["급여지급"],
+        )
+        self.assertEqual(
+            search_core._ncs_search_intent_expansions("조업 인력 수급 계획"),
+            [],
+        )
+        self.assertEqual(
+            search_core._ncs_search_intent_expansions("사회복지 교육 수요 조사"),
             [],
         )
 
@@ -2087,9 +2234,11 @@ class NcsSearchHybridRecallTests(NcsSearchRecallTests):
             any("ncs_search_match_normalized" in sql for sql in self.sql_statements)
         )
         self.assertEqual(result["results"][:baseline["returned"]], baseline["results"])
+        # Shared-fixture U_PAY also owns the official 급여지급 name and ranks
+        # with the joined recovery hits under major_code=02.
         self.assertEqual(
             [row["id"] for row in result["results"]],
-            ["V2_LITERAL", "V2_JOINED", "V2_PREFIX"],
+            ["V2_LITERAL", "U_PAY", "V2_JOINED", "V2_PREFIX"],
         )
         self.assertNotIn(
             "V2_INTERNAL", [row["id"] for row in result["results"]]
@@ -2097,7 +2246,7 @@ class NcsSearchHybridRecallTests(NcsSearchRecallTests):
         self.assertNotIn(
             "V2_DEFINITION", [row["id"] for row in result["results"]]
         )
-        joined = result["results"][1]
+        joined = result["results"][2]
         self.assertEqual(joined["matched_tokens"], ["급여", "지급"])
         self.assertEqual(joined["match_fields"], ["unit_name"])
         self.assertEqual(joined["matched_expansions"][0]["matched_as"], "급여지급")
