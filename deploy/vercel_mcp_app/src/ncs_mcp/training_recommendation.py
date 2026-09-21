@@ -1008,6 +1008,29 @@ def _is_distant_scope_concept_only_candidate(match: dict[str, Any]) -> bool:
     return relation not in COURSE_SCOPE_NEAR_RELATIONS
 
 
+def _preferred_course_candidates_for_top_k(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """When near-scope courses exist, do not pad top-k with concept-only distant noise.
+
+    Middle/major-only courses that lack unit/element evidence and rely on weak
+    training-goal concept overlap (e.g. 총무 차량운영관리 on a 인사기획 transition)
+    should not displace near-scope recommendations just to fill the limit.
+    """
+    near_candidates = [
+        item
+        for item in candidates
+        if ((item.get("match") or {}).get("course_scope_fit") or {}).get("relation")
+        in COURSE_SCOPE_NEAR_RELATIONS
+    ]
+    if not near_candidates:
+        return list(candidates)
+    preferred = [
+        item
+        for item in candidates
+        if not _is_distant_scope_concept_only_candidate(item.get("match") or {})
+    ]
+    return preferred or list(candidates)
+
+
 def _course_candidate_sort_key(item: dict[str, Any]) -> tuple[int, int, float, str]:
     match = item.get("match") or {}
     relation = _clean((match.get("course_scope_fit") or {}).get("relation"))
@@ -4231,13 +4254,12 @@ def recommend_training_for_task(
         for item in candidates
         if ((item.get("match") or {}).get("course_scope_fit") or {}).get("relation") in COURSE_SCOPE_NEAR_RELATIONS
     ]
+    ranking_pool = _preferred_course_candidates_for_top_k(candidates)
     if near_candidates:
-        candidates.sort(
-            key=_course_candidate_sort_key
-        )
+        ranking_pool.sort(key=_course_candidate_sort_key)
     else:
-        candidates.sort(key=lambda item: (-float(item["score"]), _clean(item["row"]["compe_unit_name"])))
-    selected = _diversify_top_k_candidates(candidates, max_items=max_items)
+        ranking_pool.sort(key=lambda item: (-float(item["score"]), _clean(item["row"]["compe_unit_name"])))
+    selected = _diversify_top_k_candidates(ranking_pool, max_items=max_items)
     recommendations: list[dict[str, Any]] = []
     for rank, candidate in enumerate(selected, start=1):
         row = candidate["row"]

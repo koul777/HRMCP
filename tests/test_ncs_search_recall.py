@@ -930,6 +930,7 @@ class NcsSearchRecallTests(unittest.TestCase):
             ("U_OFFICE_AUTO", "사무자동화 프로그램 활용", "프레젠테이션 자료를 제작한다", "4", 1),
             ("U_TEACH", "교수활동 수행", "교안 작성과 교수활동을 수행한다", "4", 1),
             ("U_CURRICULUM", "교육과정 개발", "평가 도구와 교육과정을 개발한다", "4", 1),
+            ("U_CURRICULUM_DESIGN", "교육과정 설계", "교육과정 설계 계획을 수립한다", "4", 1),
             ("U_EDU_PLAN", "교육운영기획", "교육 제도와 평가지표를 운용한다", "4", 1),
             ("U_EDU_RESOURCE", "교육자원관리", "학습관리시스템 등 교육 인프라를 관리한다", "4", 1),
             ("U_LEARN_ORG", "학습조직구축", "조직 내 학습조직을 구축한다", "4", 1),
@@ -951,6 +952,9 @@ class NcsSearchRecallTests(unittest.TestCase):
             ("U_OFFICE_ADMIN", "사무행정 업무 관리", "부서 일정과 경비 정산을 지원한다", "4", 1),
             ("U_COMBINE", "사업결합회계", "연결재무제표를 작성한다", "4", 1),
             ("U_NPO", "비영리회계", "비영리법인 회계 보고서를 작성한다", "4", 1),
+            ("U_GUARD_CUST", "경비고객관계관리", "경비원 고객 응대와 불만을 처리한다", "4", 1),
+            ("U_AUTO_ACCIDENT", "차량사고 현장조사", "자동차 사고 현장을 조사하고 보고한다", "4", 1),
+            ("U_MAKEUP", "베이스 메이크업", "피부 표현과 얼굴 윤곽 메이크업을 수행한다", "4", 1),
             ("U_USE_NOISE", "사용승인 관리", "공구 사용을 승인한다", "4", 6),
             ("U_PLAYER", "선수연봉계약", "프로야구 선수의 연봉 협상을 수행한다", "4", 3),
             # Same base code 02020102 20 shared by two 세분류: NCS lets a 세분류
@@ -1498,6 +1502,10 @@ class NcsSearchRecallTests(unittest.TestCase):
             "협약 체결": ("U_BARGAIN_RUN", "단체교섭"),
             "취업규칙 변경": ("U_AGREE", "단체협약이행"),
             "자료 보안 관리": ("U_DOCS", "자료 관리"),
+            "경비원 고객 응대": ("U_GUARD_CUST", "경비고객관계관리"),
+            "자동차 사고 현장 조사": ("U_AUTO_ACCIDENT", "차량사고 현장조사"),
+            "교육과정 설계 계획": ("U_CURRICULUM_DESIGN", "교육과정 설계"),
+            "얼굴 윤곽 메이크업": ("U_MAKEUP", "베이스 메이크업"),
         }
 
         for query, (expected_id, expected_expansion) in expectations.items():

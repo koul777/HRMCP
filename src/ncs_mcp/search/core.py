@@ -302,6 +302,13 @@ _NCS_SEARCH_QUERY_INTENT_EQUIVALENTS = {
     "원천세": ("원천징수",),
     "부가세": ("부가가치세 신고",),
     "세금계산서": ("부가가치세 신고",),
+    # Cross-domain practitioner phrases: role/process words beat generic
+    # "고객 불만" / "자동차" / "얼굴" lexical traps that bury the official unit.
+    "경비원": ("경비고객관계관리",),
+    "사고 현장 조사": ("차량사고 현장조사",),
+    "사고 현장조사": ("차량사고 현장조사",),
+    "교육과정 설계": ("교육과정 설계",),
+    "메이크업": ("베이스 메이크업",),
 }
 _NCS_SEARCH_QUERY_INTENT_BLOCKERS = {
     "연봉 협상": ("선수", "스포츠", "프로야구", "프로축구", "구단"),

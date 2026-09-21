@@ -66,6 +66,8 @@ from ncs_mcp.training_recommendation import (
     _course_candidate_sort_key,
     _course_delivery_relations,
     _diversify_top_k_candidates,
+    _is_distant_scope_concept_only_candidate,
+    _preferred_course_candidates_for_top_k,
     _generic_job_query_normalization,
     _preference_fit_profile,
     _preference_time_adjustment,
@@ -2428,6 +2430,52 @@ class TrainingRecommendationTests(unittest.TestCase):
             ["direct plan", "direct dispute", "adjacent reference", "direct below boundary"],
         )
         self.assertIn("diversity_penalty", selected[-1]["match"]["reasons"])
+
+    def test_preferred_top_k_excludes_distant_scope_concept_only_when_near_exists(self) -> None:
+        def candidate(
+            course_name: str,
+            *,
+            relation: str,
+            score: float,
+            direct: bool = False,
+            goal_hits: int = 0,
+            element: bool = False,
+        ) -> dict[str, object]:
+            return {
+                "row": {"compe_unit_name": course_name, "ncs_subd_cd": "01"},
+                "score": score,
+                "match": {
+                    "direct_unit_evidence": direct,
+                    "source_element_covered": element,
+                    "goal_concept_hits": goal_hits,
+                    "course_scope_fit": {"relation": relation},
+                    "reasons": [],
+                    "score_components": {"penalty_score": 0.0},
+                },
+            }
+
+        pool = [
+            candidate("인사기획", relation="direct_scope_unit", score=0.6, direct=True, goal_hits=12),
+            candidate("임금관리", relation="same_small_classification", score=0.09, goal_hits=1),
+            candidate(
+                "차량운영관리",
+                relation="same_middle_classification",
+                score=0.01,
+                goal_hits=1,
+            ),
+            candidate(
+                "major-only concept noise",
+                relation="same_major_classification",
+                score=0.008,
+                goal_hits=1,
+            ),
+        ]
+        preferred = _preferred_course_candidates_for_top_k(pool)
+        names = [item["row"]["compe_unit_name"] for item in preferred]
+        self.assertEqual(names, ["인사기획", "임금관리"])
+        self.assertTrue(
+            _is_distant_scope_concept_only_candidate(pool[2]["match"])
+        )
 
     def test_course_candidate_sort_prefers_target_sub_scope_before_adjacent_small_scope(self) -> None:
         def candidate(
