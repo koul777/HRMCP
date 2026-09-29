@@ -67,6 +67,62 @@ artifact sizes, and bounded stdout/stderr tails in the JSON report. The final
 verification is archive-only; function bundle measurement and Vercel deployment
 are outside the Builder's scope.
 
+New compact builds include a contentless FTS5 trigram index over the effective
+normalized KSA search text. The index stores row IDs and trigrams without a
+second copy of the text. Search uses it only when the v2 normalization contract
+and `ksa_search_fts_schema=ncs_ksa_search_fts_v1` are attested; older snapshots
+keep the existing scan path. A three-character match only narrows candidates:
+the original boundary predicate, ranking, and result payload still decide the
+answer. Queries without a safe trigram also keep the scan path. The Builder
+records the index schema and KSA row count in the embedded manifest, and the
+normal compact SHA-256 and hard size gate cover the resulting artifact.
+The contentless table does not support a full `SELECT COUNT(*)` scan; inspect
+the build's declared row count in the manifest and check index behavior through
+read-only search response parity.
+
+For a local search latency and response-parity check between two compact DBs
+from the same Builder source, run:
+
+```powershell
+python scripts\benchmark_ncs_snapshot_ab.py --baseline-db <baseline-compact.db> --candidate-db <candidate-compact.db> --runs 5 --out reports\ncs_snapshot_search_ab.json
+```
+
+The script opens both DBs with the server's read-only SQLite cache and mmap
+settings, requires the same compact schema, raw KSA
+hash, and non-FTS table counts, alternates calls, compares complete search
+responses, and records input hashes and p50/p95 timing. Equal counts do not
+prove complete source lineage. Check the Builder source version separately
+before treating timing as a same-source comparison. This local check does not
+grant human relevance approval or deploy anything.
+
+For a newly packaged FTS snapshot, compare the same DB with the FTS prefilter
+disabled and enabled. Pass its path to both arguments and add
+`--disable-fts-baseline`; the script restores the search implementation after
+the comparison and does not modify the DB.
+
+```powershell
+python scripts\benchmark_ncs_snapshot_ab.py --baseline-db <fts-compact.db> --candidate-db <fts-compact.db> --disable-fts-baseline --runs 5 --out reports\ncs_snapshot_fts_toggle_ab.json
+```
+
+To repeat the 35 NCS domain queries used in the 2026-09-29 local check, add
+`--query-file tests\fixtures\ncs_search_performance_domain_queries.txt`.
+The UTF-8 file accepts one query per line and ignores blank lines or comments.
+Add `--major-code 02` to check the same queries inside a major classification
+boundary; the report records the applied filter.
+
+When a new Builder version combines a newer local DB with an older release,
+check both evidence directions before packaging:
+
+```powershell
+python scripts\check_ncs_builder_evidence_parity.py --current-db data\processed\ncs.db --older-builder-db .state\ncs-data-builder\versions\<older-version>\ncs.db --candidate-db .state\ncs-data-builder\versions\<new-version>\ncs.db --out reports\ncs_builder_evidence_parity.json
+```
+
+This read-only gate requires every current qualification row and every older
+Builder training relationship to remain in the ready candidate. It compares
+training projections with their duplicate counts so repeated goal relationships
+cannot disappear while the distinct relation values remain. A passing
+result is data retention evidence, not a human review decision.
+
 ## Change-aware Refresh Builder
 
 The selected Builder version invokes the change-aware ontology component after
@@ -131,6 +187,12 @@ It operates on the local canonical `data/processed/ncs.db`, creates a versioned
 working copy, refreshes the explicitly selected supplemental APIs, prepares the
 change-aware ontology candidate, builds the compact snapshot, verifies it, and
 then performs the guarded Vercel release from the selected Builder version.
+If the Vercel CLI build fails after the archive-only snapshot passes, the
+version's `release.json` still records `build_failed`. The release directory is
+immutable and the same version cannot be packaged again. Restore project access,
+create and validate a new Builder version from the verified data source, and
+package that new version. Do not relabel the archive-only result as a complete
+release or edit the failed release report.
 
 ```text
 run_ncs_builder.bat

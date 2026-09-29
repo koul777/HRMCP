@@ -64,6 +64,7 @@ from ncs_mcp.training_recommendation import (
     _candidate_score,
     _concept_quality_issue_penalty_map,
     _course_candidate_sort_key,
+    _score_course,
     _course_delivery_relations,
     _diversify_top_k_candidates,
     _is_distant_scope_concept_only_candidate,
@@ -2477,6 +2478,56 @@ class TrainingRecommendationTests(unittest.TestCase):
             _is_distant_scope_concept_only_candidate(pool[2]["match"])
         )
 
+    def test_rejected_course_links_cannot_create_direct_unit_evidence(self) -> None:
+        row = {"ncs_cl_cd": "other_unit", "train_time": "16"}
+        rejected_link = {"unit_code": "target_unit", "concept_id": 7, "review_status": "rejected"}
+        kwargs = {
+            "scope_unit_codes": {"target_unit"},
+            "source_element_id": None,
+            "source_concept_ids": {7},
+            "gap_concept_ids": set(),
+            "unit_links": [],
+            "concept_links": [rejected_link],
+            "element_links": [],
+            "goal_concept_links": [
+                {
+                    "concept_id": 7,
+                    "link_method": "training_goal_concept_text",
+                    "confidence_score": 1.0,
+                    "review_status": "auto_linked",
+                }
+            ],
+            "delivery_relations": [],
+            "career_path_unit_codes": set(),
+            "qualification_links": [{"unit_code": "target_unit", "jm_cd": "support_only"}],
+            "job_base_links": [],
+            "target_qualification_keys": set(),
+            "gap_qualification_keys": set(),
+            "target_job_base_keys": set(),
+            "gap_job_base_keys": set(),
+            "preferred_max_hours": None,
+            "preferred_methods": None,
+        }
+
+        rejected_score, rejected_match = _score_course(row, **kwargs)
+        self.assertGreater(rejected_score, 0)
+        self.assertFalse(rejected_match["direct_unit_evidence"])
+        self.assertEqual(rejected_match["score_components"]["unit_score"], 0)
+
+        valid_score, valid_match = _score_course(
+            row,
+            **{**kwargs, "unit_links": [{"unit_code": "target_unit", "review_status": "auto_linked"}]},
+        )
+        self.assertTrue(valid_match["direct_unit_evidence"])
+        self.assertGreater(valid_score, rejected_score)
+
+        raw_code_score, raw_code_match = _score_course(
+            {"ncs_cl_cd": "target_unit", "train_time": "16"},
+            **{**kwargs, "unit_links": [{"unit_code": "target_unit", "review_status": "rejected"}]},
+        )
+        self.assertFalse(raw_code_match["direct_unit_evidence"])
+        self.assertEqual(raw_code_score, rejected_score)
+
     def test_course_candidate_sort_prefers_target_sub_scope_before_adjacent_small_scope(self) -> None:
         def candidate(
             course_name: str,
@@ -3294,6 +3345,58 @@ class TrainingRecommendationTests(unittest.TestCase):
     def test_candidate_score_skips_unrelated_edit_distance_work(self) -> None:
         self.assertFalse(_candidate_allows_edit_distance("budget control report", "training"))
         self.assertEqual(_candidate_score("budget control report", "training"), 0.0)
+
+    def test_scope_resolution_keeps_exact_unit_and_element_after_large_candidate_batches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "ncs.db")
+            try:
+                initialize_database(conn)
+                conn.execute(
+                    """
+                    INSERT INTO classifications(
+                        major_code, major_name, middle_code, middle_name,
+                        small_code, small_name, sub_code, sub_name
+                    ) VALUES ('99', 'Other', '01', 'Other', '01', 'Other', '01', 'Other')
+                    """
+                )
+                classification_id = conn.execute(
+                    "SELECT classification_id FROM classifications"
+                ).fetchone()["classification_id"]
+                timestamp = now_utc()
+                unit_rows = []
+                element_rows = []
+                for index in range(501):
+                    base_code = f"{9900000000 + index}"
+                    unit_code = f"{base_code}_23v1"
+                    name = "alpha" if index == 500 else f"alpha training {index}"
+                    unit_rows.append(
+                        (unit_code, base_code, "23v1", name, "3", classification_id, timestamp, timestamp)
+                    )
+                    element_rows.append((unit_code, "1", f"{unit_code} 1", name, "3"))
+                conn.executemany(
+                    """
+                    INSERT INTO competency_units(
+                        unit_code, base_unit_code, unit_version, unit_name_raw,
+                        unit_level_raw, classification_id, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    unit_rows,
+                )
+                conn.executemany(
+                    """
+                    INSERT INTO competency_elements(
+                        unit_code, element_no, element_code_raw, element_name_raw, element_level_raw
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    element_rows,
+                )
+                result = resolve_ncs_query_scope(conn, "alpha", limit=5)
+            finally:
+                conn.close()
+
+        exact = [item for item in result["candidates"] if item["matched_text"] == "alpha"]
+        self.assertEqual({item["candidate_type"] for item in exact}, {"unit", "element"})
+        self.assertTrue(all(item["unit_code"] == "9900000500_23v1" for item in exact))
 
     def test_recommend_training_for_task_rejects_one_character_query_before_ranking(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

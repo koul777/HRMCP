@@ -1,5 +1,23 @@
 # Repository Guidelines
 
+## 작업 승인과 자율 실행
+
+- 사용자의 작업 요청은 그 범위에 필요한 조사, 코드·문서 수정, 테스트,
+  읽기 전용 진단, dry-run, 재생성 가능한 리포트 작성의 실행 권한으로 본다.
+  이 작업들은 단계마다 별도 승인을 묻지 않고 완료한 뒤 결과와 검증 근거를 보고한다.
+- 사용자가 현재 대화에서 이미 실행을 지시했거나 필요한 사람 결정을 제공했다면
+  같은 작업에 대해 중복 승인을 요청하지 않는다. 저장소 문구의 `operator decision`,
+  `manual_ready`, `guarded`는 무조건 새 승인 질문을 하라는 뜻이 아니라
+  해당 결정과 실행 조건을 확인하라는 뜻이다.
+- API 호출·운영 DB 갱신처럼 보호 조건이 있는 작업은 정해진 preflight와
+  범위·속도·재시도 제한을 먼저 확인한다. 조건이 충족되고 사용자 요청이
+  실행 범위를 포함하면 추가 승인 질문 없이 진행할 수 있다. 조건이 충족되지
+  않으면 가능한 읽기 전용 준비 작업을 마치고 막힌 조건을 보고한다.
+- `human_reviewed`, `accepted`, `reviewed`, 실질 KSA 정의 승격 등 사람의
+  판단을 기록하는 작업은 실제 사람 결정과 대상 행의 근거가 있어야 한다.
+  일반적인 작업 요청이나 이 문서의 자율 실행 규칙을 그 결정으로 간주하지 않는다.
+  외부 게시·배포처럼 되돌리기 어려운 작업도 요청 범위에 포함되어야 한다.
+
 ## AI-HR Agent Work Queue
 
 Release-readiness automation may generate the current queue artifacts:
@@ -37,8 +55,9 @@ After starting the dashboard, inspect the same preflight artifact at
 available at `/aihr-agent-queue-run` and `/api/aihr-agent-queue-run`.
 
 Only `ready_to_start` items are safe for automatic report regeneration. Items
-with `manual_ready` require an operator decision or guarded API timing, and
-`blocked_*` items must be fixed before execution.
+with `manual_ready` require an operator decision or guarded API timing; a
+decision already supplied in the current request or session does not require
+another approval prompt. `blocked_*` items must be fixed before execution.
 `agent-queue-run-ready` is limited to items marked `can_start_automated=true`
 with `mutation_policy=regenerate_reports_only`; it must not run human-decision
 items or guarded API collection items. Run artifacts store bounded stdout/stderr
@@ -166,8 +185,10 @@ python scripts\ncs_harness.py plan-ksa-definition-review-actions --csv <filled.c
 감사와 action plan도 `status_update_allowed=false`, `db_writes=false`,
 `approval_claim=false`를 유지한다. action plan 안에 `review_status:
 human_reviewed`가 보이더라도 이는 사람이 승인한 행에 대한 준비 목록일 뿐,
-자동 DB 쓰기가 아니다. 별도 guarded apply 절차와 명시적 운영자 승인이 없으면
-`ontology_concepts`를 갱신하지 않는다.
+자동 DB 쓰기가 아니다. 사람이 채운 결정 CSV에 대상 행의 승인 기록이 있고,
+guarded apply 실행이 사용자의 현재 요청에 포함되어 있으며 검증 조건을 통과하면
+추가 승인 질문 없이 진행할 수 있다. 이 조건이 없으면 `ontology_concepts`를
+갱신하지 않는다.
 
 불변 원칙:
 

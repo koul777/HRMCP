@@ -1840,9 +1840,16 @@ def _alias_unit_conflicts_with_exact_unit(
     return None
 
 
-def _candidate_score(text: str, query: str, *, exact_bonus: float = 0.0) -> float:
+def _candidate_score(
+    text: str,
+    query: str,
+    *,
+    exact_bonus: float = 0.0,
+    query_key: str | None = None,
+) -> float:
     text_key = _scope_lookup_key(text)
-    query_key = _scope_lookup_key(query)
+    if query_key is None:
+        query_key = _scope_lookup_key(query)
     if not query_key:
         return 0.0
     if text_key == query_key:
@@ -2121,6 +2128,7 @@ def resolve_ncs_query_scope(
         middle_code = requested_filters["middle_code"]
         small_code = requested_filters["small_code"]
         sub_code = requested_filters["sub_code"]
+    query_key = _scope_lookup_key(text)
     candidates: list[dict[str, Any]] = []
     class_rows = conn.execute(
         """
@@ -2143,7 +2151,11 @@ def resolve_ncs_query_scope(
             ("sub_classification", "sub_name"),
         ]
         for match_level, field in levels:
-            score = _candidate_score(rowd.get(field) or "", text, exact_bonus=0.08 if rowd.get("major_code") == "02" else 0.0)
+            score = _candidate_score(
+                rowd.get(field) or "", text,
+                exact_bonus=0.08 if rowd.get("major_code") == "02" else 0.0,
+                query_key=query_key,
+            )
             if score <= 0:
                 continue
             candidates.append(
@@ -2155,10 +2167,9 @@ def resolve_ncs_query_scope(
                     **rowd,
                 }
             )
-    unit_rows = conn.execute(
+    unit_scan_rows = conn.execute(
         """
-        SELECT cu.*, c.major_code, c.major_name, c.middle_code, c.middle_name,
-               c.small_code, c.small_name, c.sub_code, c.sub_name
+        SELECT cu.unit_code, cu.unit_name_raw, c.major_code
         FROM competency_units cu
         JOIN classifications c ON c.classification_id = cu.classification_id
         WHERE (? IS NULL OR c.major_code = ?)
@@ -2169,49 +2180,61 @@ def resolve_ncs_query_scope(
         """,
         (major_code, major_code, middle_code, middle_code, small_code, small_code, sub_code, sub_code),
     ).fetchall()
-    for row in unit_rows:
-        rowd = dict(row)
-        score = _candidate_score(rowd.get("unit_name_raw") or "", text, exact_bonus=0.05 if rowd.get("major_code") == "02" else 0.0)
+    unit_matches: list[tuple[str, float, str, str | None]] = []
+    for row in unit_scan_rows:
+        score = _candidate_score(
+            row["unit_name_raw"] or "", text,
+            exact_bonus=0.05 if row["major_code"] == "02" else 0.0,
+            query_key=query_key,
+        )
         match_level = "competency_unit"
         query_alias_review_status = None
-        if alias_unit_code and rowd.get("unit_code") == alias_unit_code:
+        if alias_unit_code and row["unit_code"] == alias_unit_code:
             score = max(score, float(query_alias.get("confidence_score") or 0.0), 0.9)
             match_level = "query_alias_unit"
             query_alias_review_status = query_alias.get("review_status")
         if score <= 0:
             continue
-        candidates.append(
-            {
-                "candidate_type": "unit",
-                "match_level": match_level,
-                "matched_text": rowd.get("unit_name_raw"),
-                "unit_name": rowd.get("unit_name_raw"),
-                "unit_code": rowd.get("unit_code"),
-                "query_alias_review_status": query_alias_review_status,
-                "confidence_score": round(min(score, 1.0), 4),
-                **rowd,
-            }
-        )
+        unit_matches.append((row["unit_code"], score, match_level, query_alias_review_status))
+    unit_detail_sql = """
+        SELECT cu.*, c.major_code, c.major_name, c.middle_code, c.middle_name,
+               c.small_code, c.small_name, c.sub_code, c.sub_name
+        FROM competency_units cu
+        JOIN classifications c ON c.classification_id = cu.classification_id
+    """
+    for start in range(0, len(unit_matches), 500):
+        batch = unit_matches[start : start + 500]
+        placeholders = ",".join("?" for _ in batch)
+        details = {
+            row["unit_code"]: dict(row)
+            for row in conn.execute(
+                f"{unit_detail_sql} WHERE cu.unit_code IN ({placeholders})",
+                [item[0] for item in batch],
+            ).fetchall()
+        }
+        for unit_code_value, score, match_level, query_alias_review_status in batch:
+            rowd = details.get(unit_code_value)
+            if rowd is None:
+                continue
+            candidates.append(
+                {
+                    "candidate_type": "unit",
+                    "match_level": match_level,
+                    "matched_text": rowd.get("unit_name_raw"),
+                    "unit_name": rowd.get("unit_name_raw"),
+                    "unit_code": rowd.get("unit_code"),
+                    "query_alias_review_status": query_alias_review_status,
+                    "confidence_score": round(min(score, 1.0), 4),
+                    **rowd,
+                }
+            )
     if query_alias and not alias_guard and not alias_is_trusted and _clean(query_alias.get("unit_code")):
         alias_code = _clean(query_alias.get("unit_code"))
-        alias_row = next((dict(row) for row in unit_rows if _clean(row["unit_code"]) == alias_code), None)
-        if alias_row is None:
-            alias_row = next(
-                (
-                    dict(row)
-                    for row in conn.execute(
-                        """
-                        SELECT cu.*, c.major_code, c.major_name, c.middle_code, c.middle_name,
-                               c.small_code, c.small_name, c.sub_code, c.sub_name
-                        FROM competency_units cu
-                        JOIN classifications c ON c.classification_id = cu.classification_id
-                        WHERE cu.unit_code = ?
-                        """,
-                        (alias_code,),
-                    ).fetchall()
-                ),
-                None,
-            )
+        alias_detail = conn.execute(
+            f"{unit_detail_sql} WHERE cu.unit_code = ?",
+            (alias_code,),
+        ).fetchone()
+        alias_row = dict(alias_detail) if alias_detail is not None else None
         if alias_row is not None:
             candidates.append(
                 {
@@ -2240,38 +2263,58 @@ def resolve_ncs_query_scope(
                     **alias_row,
                 }
             )
-    element_rows = conn.execute(
+    element_scan_rows = conn.execute(
         """
-        SELECT ce.*, cu.unit_name_raw, c.major_code, c.major_name, c.middle_code, c.middle_name,
-               c.small_code, c.small_name, c.sub_code, c.sub_name
+        SELECT ce.element_id, ce.element_name_raw
         FROM competency_elements ce
         JOIN competency_units cu ON cu.unit_code = ce.unit_code
         JOIN classifications c ON c.classification_id = cu.classification_id
+        WHERE (? IS NULL OR c.major_code = ?)
+          AND (? IS NULL OR c.middle_code = ?)
+          AND (? IS NULL OR c.small_code = ?)
+          AND (? IS NULL OR c.sub_code = ?)
         ORDER BY ce.element_id
-        """
-    ).fetchall()
-    for row in element_rows:
-        rowd = dict(row)
-        if major_code and rowd.get("major_code") != major_code:
-            continue
-        if middle_code and rowd.get("middle_code") != middle_code:
-            continue
-        if small_code and rowd.get("small_code") != small_code:
-            continue
-        if sub_code and rowd.get("sub_code") != sub_code:
-            continue
-        score = _candidate_score(rowd.get("element_name_raw") or "", text)
-        if score <= 0:
-            continue
-        candidates.append(
-            {
-                "candidate_type": "element",
-                "match_level": "competency_element",
-                "matched_text": rowd.get("element_name_raw"),
-                "confidence_score": round(min(score, 1.0), 4),
-                **rowd,
-            }
+        """,
+        (
+            major_code or None, major_code or None,
+            middle_code or None, middle_code or None,
+            small_code or None, small_code or None,
+            sub_code or None, sub_code or None,
         )
+    ).fetchall()
+    element_scores: dict[int, float] = {}
+    for row in element_scan_rows:
+        score = _candidate_score(row["element_name_raw"] or "", text, query_key=query_key)
+        if score > 0:
+            element_scores[int(row["element_id"])] = score
+    element_ids = list(element_scores)
+    for start in range(0, len(element_ids), 500):
+        batch = element_ids[start : start + 500]
+        placeholders = ",".join("?" for _ in batch)
+        element_rows = conn.execute(
+            f"""
+            SELECT ce.*, cu.unit_name_raw, c.major_code, c.major_name, c.middle_code, c.middle_name,
+                   c.small_code, c.small_name, c.sub_code, c.sub_name
+            FROM competency_elements ce
+            JOIN competency_units cu ON cu.unit_code = ce.unit_code
+            JOIN classifications c ON c.classification_id = cu.classification_id
+            WHERE ce.element_id IN ({placeholders})
+            ORDER BY ce.element_id
+            """,
+            batch,
+        ).fetchall()
+        for row in element_rows:
+            rowd = dict(row)
+            score = element_scores[int(rowd["element_id"])]
+            candidates.append(
+                {
+                    "candidate_type": "element",
+                    "match_level": "competency_element",
+                    "matched_text": rowd.get("element_name_raw"),
+                    "confidence_score": round(min(score, 1.0), 4),
+                    **rowd,
+                }
+            )
     concept_query_key = normalize_concept_key(text)
     concept_rows = conn.execute(
         """
@@ -2288,7 +2331,7 @@ def resolve_ncs_query_scope(
     ).fetchall()
     for row in concept_rows:
         rowd = dict(row)
-        score = _candidate_score(rowd.get("concept_name") or "", text)
+        score = _candidate_score(rowd.get("concept_name") or "", text, query_key=query_key)
         if score <= 0:
             continue
         candidates.append(
@@ -3020,24 +3063,28 @@ def _candidate_training_course_rows(
                 SELECT 1
                 FROM ncs_training_course_unit_links l
                 WHERE l.training_course_id = tc.training_course_id
+                  AND l.review_status != 'rejected'
                   AND l.unit_code IN (SELECT value FROM json_each(?))
            )
            OR EXISTS (
                 SELECT 1
                 FROM ncs_training_course_element_links l
                 WHERE l.training_course_id = tc.training_course_id
+                  AND l.review_status != 'rejected'
                   AND l.unit_code IN (SELECT value FROM json_each(?))
            )
            OR EXISTS (
                 SELECT 1
                 FROM ncs_training_course_concept_links l
                 WHERE l.training_course_id = tc.training_course_id
+                  AND l.review_status != 'rejected'
                   AND l.unit_code IN (SELECT value FROM json_each(?))
            )
            OR EXISTS (
                 SELECT 1
                 FROM training_goal_concept_links l
                 WHERE l.training_course_id = tc.training_course_id
+                  AND l.review_status != 'rejected'
                   AND l.concept_id IN (SELECT value FROM json_each(?))
            )
         ORDER BY tc.training_course_id
@@ -3648,6 +3695,7 @@ def _score_course(
     source_element_id: int | None,
     source_concept_ids: set[int],
     gap_concept_ids: set[int],
+    unit_links: list[dict[str, Any]],
     concept_links: list[dict[str, Any]],
     element_links: list[dict[str, Any]],
     goal_concept_links: list[dict[str, Any]],
@@ -3662,9 +3710,17 @@ def _score_course(
     preferred_max_hours: float | None,
     preferred_methods: list[str] | None,
 ) -> tuple[float, dict[str, Any]]:
-    linked_unit_codes = {link.get("unit_code") for link in concept_links + element_links if link.get("unit_code")}
-    linked_unit_codes.update(link.get("unit_code") for link in qualification_links if link.get("unit_code"))
-    if row["ncs_cl_cd"]:
+    rejected_unit_codes = {
+        link.get("unit_code")
+        for link in unit_links
+        if link.get("unit_code") and not _link_is_usable(link)
+    }
+    linked_unit_codes = {
+        link.get("unit_code")
+        for link in unit_links + concept_links + element_links
+        if link.get("unit_code") and _link_is_usable(link)
+    }
+    if row["ncs_cl_cd"] and row["ncs_cl_cd"] not in rejected_unit_codes:
         linked_unit_codes.add(row["ncs_cl_cd"])
     direct_unit_evidence = bool(scope_unit_codes & set(linked_unit_codes))
     source_element_covered = bool(
@@ -4109,18 +4165,23 @@ def recommend_training_for_task(
     for row in course_rows:
         cid = int(row["training_course_id"])
         payload = course_payloads.get(cid, {})
+        rejected_unit_codes = {
+            _clean(link.get("unit_code"))
+            for link in payload.get("unit_links", [])
+            if _clean(link.get("unit_code")) and not _link_is_usable(link)
+        }
         linked_unit_codes = {
-            _clean(row["ncs_cl_cd"]),
+            _clean(row["ncs_cl_cd"]) if _clean(row["ncs_cl_cd"]) not in rejected_unit_codes else "",
             *[
                 _clean(link.get("unit_code"))
                 for link in payload.get("unit_links", [])
-                if _clean(link.get("unit_code"))
+                if _clean(link.get("unit_code")) and _link_is_usable(link)
             ],
         }
         linked_unit_codes.update(
             _clean(link.get("unit_code"))
             for link in payload.get("concept_links", []) + payload.get("element_links", [])
-            if _clean(link.get("unit_code"))
+            if _clean(link.get("unit_code")) and _link_is_usable(link)
         )
         course_unit_codes_by_id[cid] = {code for code in linked_unit_codes if code}
         candidate_unit_codes.update(course_unit_codes_by_id[cid])
@@ -4149,6 +4210,7 @@ def recommend_training_for_task(
             source_element_id=source.get("element_id"),
             source_concept_ids=source_concept_ids,
             gap_concept_ids=gap_concept_ids,
+            unit_links=payload["unit_links"],
             concept_links=payload["concept_links"],
             element_links=payload["element_links"],
             goal_concept_links=payload["goal_concept_links"],

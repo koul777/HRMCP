@@ -1288,6 +1288,22 @@ def _add_compact_search_normalization_columns(dst: sqlite3.Connection) -> None:
             )
 
 
+def _create_compact_ksa_search_fts(dst: sqlite3.Connection) -> int:
+    """Index effective v2 KSA text without storing a second copy of that text."""
+    dst.execute(
+        "CREATE VIRTUAL TABLE ksa_search_fts USING fts5("
+        "search_text, content='', detail='none', columnsize=0, tokenize='trigram')"
+    )
+    dst.execute(
+        "INSERT INTO ksa_search_fts(rowid, search_text) "
+        "SELECT ksa_id, "
+        "COALESCE(ksa_text_raw_search_override, ksa_text_raw, '') || ' ' || "
+        "COALESCE(ksa_text_refined_search_override, ksa_text_refined, '') "
+        "FROM ksa_items ORDER BY ksa_id"
+    )
+    return int(dst.execute("SELECT COUNT(*) FROM ksa_items").fetchone()[0])
+
+
 def _execute_indexes(
     dst: sqlite3.Connection,
     statements: tuple[str, ...],
@@ -1521,6 +1537,7 @@ def _export_vercel_ontology_compact(
     if _copy_query_aliases(src, dst):
         empty_compatibility_tables.append("ncs_query_aliases")
     _add_compact_search_normalization_columns(dst)
+    ksa_fts_rows = _create_compact_ksa_search_fts(dst)
 
     relation_posting_counts, relation_edge_count = (
         _create_ontology_relation_postings(dst)
@@ -1610,8 +1627,10 @@ def _export_vercel_ontology_compact(
             ),
             (
                 "search_normalization_index_policy",
-                "unit_name_exact_prefix_only; contains_search_not_indexed",
+                "unit_name_exact_prefix_only; ksa_trigram_fts; other_contains_not_indexed",
             ),
+            ("ksa_search_fts_schema", "ncs_ksa_search_fts_v1"),
+            ("ksa_search_fts_rows", str(ksa_fts_rows)),
         ),
     )
 
@@ -1625,7 +1644,8 @@ def _export_vercel_ontology_compact(
               AND name NOT LIKE 'sqlite_%'
               AND name NOT IN (
                   'serving_snapshot_manifest',
-                  'serving_snapshot_table_counts'
+                  'serving_snapshot_table_counts',
+                  'ksa_search_fts'
               )
             ORDER BY name
             """
@@ -1719,6 +1739,8 @@ def _export_vercel_ontology_compact(
             "raw_ksa_parity_status": "verified_equal",
             "search_normalization_schema": SEARCH_NORMALIZATION_V2_SCHEMA,
             "search_normalization_storage": SEARCH_NORMALIZATION_V2_STORAGE,
+            "ksa_search_fts_schema": "ncs_ksa_search_fts_v1",
+            "ksa_search_fts_rows": ksa_fts_rows,
             "search_normalization_fields": json.loads(
                 _search_normalization_manifest_fields()
             ),
@@ -2083,6 +2105,7 @@ def _export_serving_db(
                     FROM sqlite_master
                     WHERE type = 'table'
                       AND name NOT LIKE 'sqlite_%'
+                      AND name != 'ksa_search_fts'
                     ORDER BY name
                     """
                 ).fetchall()

@@ -2374,6 +2374,64 @@ def _execute_ncs_search_tiers(
     return original_rows
 
 
+_KSA_FTS_BIND_PATTERN = re.compile(
+    r"LIKE '%' \|\| :([A-Za-z0-9_]+) \|\| '%'"
+)
+_KSA_FTS_SAFE_TRIGRAM = re.compile(r"[A-Za-z0-9\uac00-\ud7a3]{3}")
+
+
+def _compact_ksa_search_fts_available(conn: Any, normalized: bool | str) -> bool:
+    """Use only a manifest-attested v2 compact index."""
+    if normalized != "v2":
+        return False
+    row = conn.execute(
+        "SELECT manifest_value FROM serving_snapshot_manifest "
+        "WHERE manifest_key = 'ksa_search_fts_schema'"
+    ).fetchone()
+    if not row or row[0] != "ncs_ksa_search_fts_v1":
+        return False
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ksa_search_fts'"
+    ).fetchone() is not None
+
+
+def _compact_ksa_search_fts_tiers(
+    tiers: list[tuple[int, str, dict[str, Any], str, str]],
+) -> list[tuple[int, str, dict[str, Any], str, str]]:
+    """Restrict KSA scans by a trigram superset, then keep the original SQL."""
+    filtered = []
+    for match_tier, where_clause, params, score_clause, meaningful_clause in tiers:
+        bind_names = set(_KSA_FTS_BIND_PATTERN.findall(where_clause))
+        anchors = []
+        for name in bind_names:
+            value = params.get(name)
+            anchor = _KSA_FTS_SAFE_TRIGRAM.search(str(value or ""))
+            if anchor is None:
+                anchors = []
+                break
+            anchors.append(anchor.group())
+        if not anchors or len(anchors) > 32:
+            filtered.append(
+                (match_tier, where_clause, params, score_clause, meaningful_clause)
+            )
+            continue
+        fts_match = " OR ".join(
+            '"' + anchor + '"' for anchor in sorted(set(anchors))
+        )
+        filtered.append(
+            (
+                match_tier,
+                "ki.ksa_id IN (SELECT rowid FROM ksa_search_fts "
+                "WHERE ksa_search_fts MATCH :_ksa_fts_match) AND ("
+                + where_clause + ")",
+                {**params, "_ksa_fts_match": fts_match},
+                score_clause,
+                meaningful_clause,
+            )
+        )
+    return filtered
+
+
 def _ncs_search_match_metadata(
     item: dict[str, Any],
     *,
@@ -2986,6 +3044,8 @@ def search_ncs(
                 normalized_classification_filter,
                 normalized=normalized_search,
             )
+            if _compact_ksa_search_fts_available(conn, normalized_search):
+                tiers = _compact_ksa_search_fts_tiers(tiers)
             rows = _active_tier_executor()(
                 conn,
                 """

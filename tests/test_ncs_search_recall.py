@@ -2197,6 +2197,67 @@ class NcsSearchHybridRecallTests(NcsSearchRecallTests):
         )
         self.assertEqual(search_core._normalized_search_storage(conn), "v2")
 
+    def test_v2_ksa_trigram_index_preserves_full_search_payload(self) -> None:
+        with self._open_db() as conn:
+            conn.executemany(
+                "INSERT INTO ksa_items VALUES (?, 'knowledge', ?, ?, 5)",
+                (
+                    (100, "alpha beta", None),
+                    (101, "delta epsilon", "alpha remedy"),
+                    (102, "\uff21\uff2c\uff30\uff28\uff21", None),
+                    (103, "ab short term", None),
+                    (104, "채용교육 과정 운영", None),
+                ),
+            )
+            self._add_normalized_columns(conn)
+            conn.commit()
+
+        cases = [
+            (query, scope, scope_filter)
+            for query in (
+                "alpha", "beta", "alpha beta", "delta", "ab", "ALPHA",
+                "alpha remedy", "alp%ha", "alpha_beta", "채용교육",
+            )
+            for scope in ("all", "ksa")
+            for scope_filter in (None, {"major_code": "02"})
+        ]
+        baseline = [
+            server.search_ncs(query, scope=scope, limit=15, classification_filter=scope_filter)
+            for query, scope, scope_filter in cases
+        ]
+        with self._open_db() as conn:
+            conn.execute(
+                "CREATE VIRTUAL TABLE ksa_search_fts USING fts5("
+                "search_text, content='', detail='none', columnsize=0, tokenize='trigram')"
+            )
+            conn.execute(
+                "INSERT INTO ksa_search_fts(rowid, search_text) "
+                "SELECT ksa_id, COALESCE(ksa_text_raw_search_override, ksa_text_raw, '') "
+                "|| ' ' || COALESCE(ksa_text_refined_search_override, ksa_text_refined, '') "
+                "FROM ksa_items"
+            )
+            conn.execute(
+                "INSERT INTO serving_snapshot_manifest VALUES (?, ?)",
+                ("ksa_search_fts_schema", "ncs_ksa_search_fts_v1"),
+            )
+            conn.commit()
+        self.sql_statements.clear()
+        candidate = [
+            server.search_ncs(query, scope=scope, limit=15, classification_filter=scope_filter)
+            for query, scope, scope_filter in cases
+        ]
+        self.assertEqual(candidate, baseline)
+        self.assertTrue(any("ksa_search_fts MATCH" in sql for sql in self.sql_statements))
+        self.sql_statements.clear()
+        server.search_ncs("ab", scope="ksa", limit=15)
+        self.assertFalse(any("ksa_search_fts MATCH" in sql for sql in self.sql_statements))
+        with self._open_db() as conn:
+            conn.execute("DELETE FROM serving_snapshot_manifest WHERE manifest_key = 'ksa_search_fts_schema'")
+            conn.commit()
+        self.sql_statements.clear()
+        self.assertEqual(server.search_ncs("alpha", scope="ksa", limit=15), baseline[2])
+        self.assertFalse(any("ksa_search_fts MATCH" in sql for sql in self.sql_statements))
+
     def test_v2_joined_compound_uses_normalized_name_only_with_guards(self) -> None:
         with self._open_db() as conn:
             conn.executemany(
