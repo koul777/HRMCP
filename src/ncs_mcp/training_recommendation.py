@@ -3307,12 +3307,21 @@ def build_training_course_ontology_links(
                     continue
                 conn.execute(
                     """
-                    INSERT OR IGNORE INTO training_goal_concept_links(
+                    INSERT INTO training_goal_concept_links(
                         training_course_id, unit_code, element_id, concept_id, link_method,
                         confidence_score, evidence_text, review_status, created_at, updated_at
-                    ) VALUES (?, ?, NULL, ?, ?, ?, ?, 'auto_linked', ?, ?)
+                    ) SELECT ?, ?, NULL, ?, ?, ?, ?, 'auto_linked', ?, ?
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM training_goal_concept_links
+                        WHERE training_course_id = ? AND element_id IS NULL
+                          AND concept_id = ? AND link_method = ?
+                    )
                     """,
-                    (course_id, unit_code, concept_id, method, confidence, goal or concept_name, timestamp, timestamp),
+                    (
+                        course_id, unit_code, concept_id, method, confidence,
+                        goal or concept_name, timestamp, timestamp,
+                        course_id, concept_id, method,
+                    ),
                 )
         for relation in _course_delivery_relations(course):
             conn.execute(

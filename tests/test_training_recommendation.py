@@ -6521,6 +6521,19 @@ class TrainingRecommendationTests(unittest.TestCase):
             self.assertEqual(upsert_training_courses(conn, payload["rows"]), 1)
 
             linked = build_training_course_ontology_links(conn)
+            first_goal_ids = [
+                row["link_id"]
+                for row in conn.execute(
+                    "SELECT link_id FROM training_goal_concept_links ORDER BY link_id"
+                ).fetchall()
+            ]
+            linked_again = build_training_course_ontology_links(conn)
+            second_goal_ids = [
+                row["link_id"]
+                for row in conn.execute(
+                    "SELECT link_id FROM training_goal_concept_links ORDER BY link_id"
+                ).fetchall()
+            ]
             courses = search_training_courses(conn, concept_query="workforce planning", limit=5)
             unit_link_statuses = {
                 row["review_status"]
@@ -6538,6 +6551,11 @@ class TrainingRecommendationTests(unittest.TestCase):
             self.assertEqual(unit_link_statuses, {"auto_linked"})
             self.assertGreaterEqual(linked["element_links_after"], 1)
             self.assertGreaterEqual(linked["goal_concept_links_after"], 1)
+            self.assertEqual(first_goal_ids, second_goal_ids)
+            self.assertEqual(
+                linked["goal_concept_links_after"],
+                linked_again["goal_concept_links_after"],
+            )
             self.assertGreaterEqual(linked["delivery_relations_after"], 1)
             self.assertIn("has_level", relation_types)
             self.assertIn("requires_time", relation_types)
