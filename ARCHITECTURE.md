@@ -212,6 +212,32 @@ Required planner surfaces:
 The guide trace is a validation rubric. It does not directly raise scores and
 does not turn sample guide rows into source data.
 
+## Compact Search Candidate Indexes
+
+Builder compact exports derive `ksa_prefix_fts` and `criteria_prefix_fts` from
+the effective normalized v2 fields. These contentless FTS5 tables contain
+hex-encoded two/three-character prefixes at a conservative superset of lexical
+boundaries. They do not store replacement source text or alter recommendation
+evidence. The original SQL predicate, boundary check, ranking, and pagination
+remain authoritative after candidate filtering.
+
+`search/prefix_index.py` defines the shared producer/runtime contract. Runtime
+uses these indexes only when the v2 normalization contract, all
+`lexical_prefix_fts_*` schema/boundary/length attestations, and both tables are
+present. Older snapshots keep their trigram or ordinary SQL fallback. A
+mandatory AND group can restrict candidates only when every alternative in
+that group is indexable; unindexable OR alternatives must stay reachable.
+One-character queries use the ordinary predicate.
+
+Unit document-frequency weights are computed only when unit results are
+requested. Element, criterion, and KSA ranking use their existing fixed
+weights and do not need a scan of the unit corpus.
+
+Only Builder creates the indexes. Packaging records their physical shadow
+tables in count metadata, excluding the non-scannable contentless root tables.
+Production adoption requires a new Builder snapshot; changing runtime code
+alone does not add indexes to existing databases.
+
 ## Invariants
 
 - `ksa_items.ksa_text_raw` is never modified.

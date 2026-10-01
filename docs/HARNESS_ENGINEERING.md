@@ -17,6 +17,26 @@ python scripts\ncs_harness.py quality-gates --out reports\quality_gates.json --m
 large local SQLite DB. Use `python scripts\ncs_harness.py inspect --full` only
 when legacy/reference table counts are needed.
 
+## Query Performance Comparisons
+
+`scripts/benchmark_ncs_code_ab.py` runs two frozen source trees in separate
+processes against one read-only DB, alternating AB/BA calls. Cases are a JSON
+list with `id`, `workload` (`search` or `scope`), and tool `params`.
+
+```powershell
+python scripts\benchmark_ncs_code_ab.py --baseline-source <frozen-src> --candidate-source src --db <snapshot.db> --cases <cases.json> --runs 7 --out <comparison.json>
+```
+
+The report preserves complete warmup responses, all measured samples, response
+hashes, source/DB fingerprints before and after, connection PRAGMAs, and process
+memory. Only `audit.generated_at` is excluded from function-response equality.
+It reports query-level p50 medians separately by workload, pooled p95, and
+individual regressions. `--profile` instruments only warmup. Keep benchmarks
+separate from test/build workloads; imports, IPC, and response hashing are
+outside function latency. Actual MCP transport and ZIP startup need separate
+measurements. An explicit `--candidate-db` labels a different-artifact comparison;
+omit it for the decisive same-DB code comparison.
+
 ## Workspace Hygiene
 
 This repository can contain multi-GB Git LFS working files such as

@@ -23,10 +23,12 @@ def _pid_exists(pid: int) -> bool:
         result = subprocess.run(
             ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
             capture_output=True,
-            text=True,
             check=False,
         )
-        return f'"{pid}"' in result.stdout
+        result.check_returncode()
+        # Native Windows output is not necessarily UTF-8, even in Python's
+        # UTF-8 mode. The CSV PID field itself contains only ASCII bytes.
+        return f'"{pid}"'.encode("ascii") in result.stdout
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

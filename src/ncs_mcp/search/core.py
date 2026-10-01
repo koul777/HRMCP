@@ -13,6 +13,11 @@ from ncs_mcp.query_router import (
     search_context_request_contract,
 )
 
+from .prefix_index import (
+    PREFIX_FTS_REQUIRED_MANIFEST,
+    PREFIX_FTS_TABLES,
+    prefix_fts_term,
+)
 from .semantic_rescue import (
     DEFAULT_RESCUE_MARGIN,
     SemanticSimilarityProvider,
@@ -2190,10 +2195,12 @@ def _ncs_search_tier_predicates(
         )
     if normalized:
         params = _normalized_ncs_search_params(params)
-    tiers = [
-        (0, phrase_clause, dict(params), "", ""),
-        (1, token_and, dict(params), "", ""),
-    ]
+    # With one unchanged token the phrase already tests the same rows. If
+    # it is empty, neither repeating it as AND nor scoring it as OR can help.
+    single_token_phrase = len(fallback_tokens) == 1 and fallback_tokens[0] == phrase and not joined_compound
+    tiers = [(0, phrase_clause, dict(params), "", "")]
+    if not single_token_phrase:
+        tiers.append((1, token_and, dict(params), "", ""))
     if has_expansions:
         tiers.append(
             (
@@ -2210,15 +2217,16 @@ def _ncs_search_tier_predicates(
     token_or_candidates = (
         meaningful_clause if meaningful_clause != "0 = 1" else token_or
     )
-    tiers.append(
-        (
-            3,
-            token_or_candidates,
-            dict(params),
-            score_clause,
-            meaningful_clause if meaningful_clause == "0 = 1" else "",
+    if not single_token_phrase or has_expansions or compound_groups:
+        tiers.append(
+            (
+                3,
+                token_or_candidates,
+                dict(params),
+                score_clause,
+                meaningful_clause if meaningful_clause == "0 = 1" else "",
+            )
         )
-    )
     morphology = _ncs_search_morphology_expansions(fallback_tokens)
     if morphology:
         morphology_params: dict[str, Any] = {}
@@ -2395,41 +2403,107 @@ def _compact_ksa_search_fts_available(conn: Any, normalized: bool | str) -> bool
     ).fetchone() is not None
 
 
-def _compact_ksa_search_fts_tiers(
+def _compact_fts_tiers(
     tiers: list[tuple[int, str, dict[str, Any], str, str]],
+    *,
+    index_table: str,
+    identifier: str,
+    parameter: str,
+    anchor_for: Any,
 ) -> list[tuple[int, str, dict[str, Any], str, str]]:
-    """Restrict KSA scans by a trigram superset, then keep the original SQL."""
+    """Apply necessary candidate conditions without changing the search predicate.
+
+    Tier 1 requires every token. Tier 2 requires every token's OR group of
+    alternatives. A group with an unindexable alternative cannot restrict FTS,
+    but other mandatory groups can. OR tiers require every alternative to be
+    indexable. SQL identifiers are supplied only by the wrappers below.
+    """
     filtered = []
     for match_tier, where_clause, params, score_clause, meaningful_clause in tiers:
         bind_names = set(_KSA_FTS_BIND_PATTERN.findall(where_clause))
-        anchors = []
-        for name in bind_names:
-            value = params.get(name)
-            anchor = _KSA_FTS_SAFE_TRIGRAM.search(str(value or ""))
-            if anchor is None:
-                anchors = []
-                break
-            anchors.append(anchor.group())
-        if not anchors or len(anchors) > 32:
-            filtered.append(
-                (match_tier, where_clause, params, score_clause, meaningful_clause)
-            )
+        anchors = {name: anchor_for(params.get(name)) for name in bind_names}
+        fts_match = ""
+        if bind_names and len(bind_names) <= 32:
+            groups: dict[str, list[str]] = {}
+            if match_tier in (1, 2):
+                for name in sorted(bind_names):
+                    token = re.fullmatch(r"token_(\d+)", name)
+                    expanded = (
+                        re.fullmatch(r"expanded_(\d+)_\d+", name)
+                        if match_tier == 2 else None
+                    )
+                    match = token or expanded
+                    if match is None:
+                        groups = {}
+                        break
+                    groups.setdefault(match[1], []).append(name)
+                if any(f"token_{index}" not in names for index, names in groups.items()):
+                    groups = {}
+            if groups:
+                usable = []
+                for names in groups.values():
+                    if all(anchors[name] for name in names):
+                        alternatives = sorted({anchors[name] for name in names})
+                        usable.append("(" + " OR ".join('"' + value + '"' for value in alternatives) + ")")
+                fts_match = " AND ".join(usable)
+            elif all(anchors.values()):
+                fts_match = " OR ".join('"' + value + '"' for value in sorted(set(anchors.values())))
+        if not fts_match:
+            filtered.append((match_tier, where_clause, params, score_clause, meaningful_clause))
             continue
-        fts_match = " OR ".join(
-            '"' + anchor + '"' for anchor in sorted(set(anchors))
-        )
-        filtered.append(
-            (
-                match_tier,
-                "ki.ksa_id IN (SELECT rowid FROM ksa_search_fts "
-                "WHERE ksa_search_fts MATCH :_ksa_fts_match) AND ("
-                + where_clause + ")",
-                {**params, "_ksa_fts_match": fts_match},
-                score_clause,
-                meaningful_clause,
-            )
-        )
+        filtered.append((
+            match_tier,
+            f"{identifier} IN (SELECT rowid FROM {index_table} "
+            f"WHERE {index_table} MATCH :{parameter}) AND (" + where_clause + ")",
+            {**params, parameter: fts_match},
+            score_clause, meaningful_clause,
+        ))
     return filtered
+
+
+def _compact_ksa_search_fts_tiers(
+    tiers: list[tuple[int, str, dict[str, Any], str, str]],
+) -> list[tuple[int, str, dict[str, Any], str, str]]:
+    """Keep older compact snapshots' trigram candidate index usable."""
+    def trigram(value: Any) -> str | None:
+        match = _KSA_FTS_SAFE_TRIGRAM.search(str(value or ""))
+        return match.group() if match else None
+
+    return _compact_fts_tiers(
+        tiers, index_table="ksa_search_fts", identifier="ki.ksa_id",
+        parameter="_ksa_fts_match", anchor_for=trigram,
+    )
+
+
+def _compact_lexical_prefix_available(conn: Any, normalized: bool | str) -> bool:
+    """Only use a complete, Builder-attested pair of normalized prefix indexes."""
+    if normalized != "v2":
+        return False
+    keys = tuple(PREFIX_FTS_REQUIRED_MANIFEST)
+    placeholders = ",".join("?" for _ in keys)
+    rows = conn.execute(
+        "SELECT manifest_key, manifest_value FROM serving_snapshot_manifest "
+        f"WHERE manifest_key IN ({placeholders})", keys,
+    ).fetchall()
+    if len(rows) != len(keys) or dict(rows) != PREFIX_FTS_REQUIRED_MANIFEST:
+        return False
+    names = set(PREFIX_FTS_TABLES.values())
+    tables = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name IN (?,?)",
+        tuple(sorted(names)),
+    ).fetchall()
+    return {row[0] for row in tables} == names
+
+
+def _compact_lexical_prefix_tiers(
+    tiers: list[tuple[int, str, dict[str, Any], str, str]],
+    scope: str,
+) -> list[tuple[int, str, dict[str, Any], str, str]]:
+    return _compact_fts_tiers(
+        tiers, index_table=PREFIX_FTS_TABLES[scope],
+        identifier={"ksa": "ki.ksa_id", "criteria": "pc.criteria_id"}[scope],
+        parameter="_lexical_prefix_match", anchor_for=prefix_fts_term,
+    )
 
 
 def _ncs_search_match_metadata(
@@ -2711,6 +2785,10 @@ def search_ncs(
             classification_filter=classification_filter,
         )
         normalized_search = _normalized_search_storage(conn)
+        lexical_prefix_available = (
+            _compact_lexical_prefix_available(conn, normalized_search)
+            if any(kind in requested_types for kind in ("criteria", "ksa")) else False
+        )
         tier_options = {"normalized": normalized_search} if normalized_search else {}
         token_expansions = _active_token_expander()(
             conn,
@@ -2738,11 +2816,15 @@ def search_ncs(
             fallback_tokens,
             token_expansions,
         )
-        token_weights = _ncs_search_token_idf_weights(
-            conn,
-            fallback_tokens,
-            normalized_classification_filter,
-            normalized=normalized_search,
+        # Only unit ranking consumes these corpus frequencies. Leaf-only
+        # searches use their own fixed weights and need no unit-table scan.
+        token_weights = (
+            _ncs_search_token_idf_weights(
+                conn,
+                fallback_tokens,
+                normalized_classification_filter,
+                normalized=normalized_search,
+            ) if "unit" in requested_types else {}
         )
         if "unit" in requested_types:
             columns = (
@@ -2986,6 +3068,8 @@ def search_ncs(
                 normalized_classification_filter,
                 normalized=normalized_search,
             )
+            if lexical_prefix_available:
+                tiers = _compact_lexical_prefix_tiers(tiers, "criteria")
             rows = _active_tier_executor()(
                 conn,
                 """
@@ -3044,7 +3128,9 @@ def search_ncs(
                 normalized_classification_filter,
                 normalized=normalized_search,
             )
-            if _compact_ksa_search_fts_available(conn, normalized_search):
+            if lexical_prefix_available:
+                tiers = _compact_lexical_prefix_tiers(tiers, "ksa")
+            elif _compact_ksa_search_fts_available(conn, normalized_search):
                 tiers = _compact_ksa_search_fts_tiers(tiers)
             rows = _active_tier_executor()(
                 conn,

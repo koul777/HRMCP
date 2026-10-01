@@ -58,7 +58,7 @@ class ApiRefreshBuilderTests(unittest.TestCase):
             if sys.platform != "win32":
                 self.skipTest("Directory aliases unavailable")
             result = subprocess.run(["cmd", "/c", "mklink", "/J", str(alias), str(self.db_path.parent)],
-                                    capture_output=True, text=True)
+                                    capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
         try:
             original = self.db_path.read_bytes()
@@ -285,7 +285,7 @@ class ApiRefreshBuilderTests(unittest.TestCase):
                 self.skipTest("Directory symlinks are unavailable")
             junction = subprocess.run(
                 ["cmd", "/c", "mklink", "/J", str(redirected), str(target)],
-                capture_output=True, text=True, check=False,
+                capture_output=True, check=False,
             )
             self.assertEqual(junction.returncode, 0, junction.stderr)
         try:

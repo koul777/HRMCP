@@ -53,6 +53,11 @@ from ncs_mcp.search.normalization import (  # noqa: E402
     SEARCH_NORMALIZATION_V2_STORAGE,
     normalize_search_text,
 )
+from ncs_mcp.search.prefix_index import (  # noqa: E402
+    PREFIX_FTS_REQUIRED_MANIFEST,
+    PREFIX_FTS_SCHEMA,
+    prefix_fts_document,
+)
 from ncs_mcp.builder_authorization import BuilderOperationContext  # noqa: E402
 from ncs_mcp.builder_release import package_guard  # noqa: E402
 
@@ -1288,20 +1293,42 @@ def _add_compact_search_normalization_columns(dst: sqlite3.Connection) -> None:
             )
 
 
-def _create_compact_ksa_search_fts(dst: sqlite3.Connection) -> int:
-    """Index effective v2 KSA text without storing a second copy of that text."""
-    dst.execute(
-        "CREATE VIRTUAL TABLE ksa_search_fts USING fts5("
-        "search_text, content='', detail='none', columnsize=0, tokenize='trigram')"
-    )
-    dst.execute(
-        "INSERT INTO ksa_search_fts(rowid, search_text) "
-        "SELECT ksa_id, "
-        "COALESCE(ksa_text_raw_search_override, ksa_text_raw, '') || ' ' || "
-        "COALESCE(ksa_text_refined_search_override, ksa_text_refined, '') "
-        "FROM ksa_items ORDER BY ksa_id"
-    )
-    return int(dst.execute("SELECT COUNT(*) FROM ksa_items").fetchone()[0])
+def _create_compact_lexical_prefix_fts(dst: sqlite3.Connection) -> dict[str, int]:
+    """Build candidate-only indexes from the effective normalized v2 text.
+
+    Contentless ASCII tokens hold two/three-character prefixes, not source
+    text. Search still verifies every candidate with its original predicate.
+    Both indexes are built before their manifest attestation is published.
+    """
+    queries = {
+        "ksa_prefix_fts": (
+            "SELECT ksa_id, COALESCE(ksa_text_raw_search_override, ksa_text_raw, ''), "
+            "COALESCE(ksa_text_refined_search_override, ksa_text_refined, '') "
+            "FROM ksa_items ORDER BY ksa_id"
+        ),
+        "criteria_prefix_fts": (
+            "SELECT criteria_id, criteria_text_raw_search_norm, "
+            "criteria_text_refined_search_norm FROM performance_criteria ORDER BY criteria_id"
+        ),
+    }
+    counts = {}
+    for table, query in queries.items():
+        dst.execute(
+            f"CREATE VIRTUAL TABLE {table} USING fts5("
+            "search_prefixes, content='', detail='none', columnsize=0, tokenize='ascii')"
+        )
+        cursor = dst.execute(query)
+        count = 0
+        while rows := cursor.fetchmany(500):
+            dst.executemany(
+                f"INSERT INTO {table}(rowid, search_prefixes) VALUES (?, ?)",
+                ((row[0], prefix_fts_document(row[1], row[2])) for row in rows),
+            )
+            count += len(rows)
+        dst.execute(f"INSERT INTO {table}({table}) VALUES ('optimize')")
+        dst.execute(f"INSERT INTO {table}({table}) VALUES ('integrity-check')")
+        counts[table] = count
+    return counts
 
 
 def _execute_indexes(
@@ -1537,7 +1564,7 @@ def _export_vercel_ontology_compact(
     if _copy_query_aliases(src, dst):
         empty_compatibility_tables.append("ncs_query_aliases")
     _add_compact_search_normalization_columns(dst)
-    ksa_fts_rows = _create_compact_ksa_search_fts(dst)
+    prefix_fts_rows = _create_compact_lexical_prefix_fts(dst)
 
     relation_posting_counts, relation_edge_count = (
         _create_ontology_relation_postings(dst)
@@ -1627,10 +1654,10 @@ def _export_vercel_ontology_compact(
             ),
             (
                 "search_normalization_index_policy",
-                "unit_name_exact_prefix_only; ksa_trigram_fts; other_contains_not_indexed",
+                "unit_name_exact_prefix_only; ksa_criteria_lexical_prefix_fts; other_contains_not_indexed",
             ),
-            ("ksa_search_fts_schema", "ncs_ksa_search_fts_v1"),
-            ("ksa_search_fts_rows", str(ksa_fts_rows)),
+            *PREFIX_FTS_REQUIRED_MANIFEST.items(),
+            ("lexical_prefix_fts_rows", json.dumps(prefix_fts_rows, sort_keys=True)),
         ),
     )
 
@@ -1645,7 +1672,7 @@ def _export_vercel_ontology_compact(
               AND name NOT IN (
                   'serving_snapshot_manifest',
                   'serving_snapshot_table_counts',
-                  'ksa_search_fts'
+                  'ksa_search_fts', 'ksa_prefix_fts', 'criteria_prefix_fts'
               )
             ORDER BY name
             """
@@ -1739,8 +1766,8 @@ def _export_vercel_ontology_compact(
             "raw_ksa_parity_status": "verified_equal",
             "search_normalization_schema": SEARCH_NORMALIZATION_V2_SCHEMA,
             "search_normalization_storage": SEARCH_NORMALIZATION_V2_STORAGE,
-            "ksa_search_fts_schema": "ncs_ksa_search_fts_v1",
-            "ksa_search_fts_rows": ksa_fts_rows,
+            "lexical_prefix_fts_schema": PREFIX_FTS_SCHEMA,
+            "lexical_prefix_fts_rows": prefix_fts_rows,
             "search_normalization_fields": json.loads(
                 _search_normalization_manifest_fields()
             ),
@@ -2105,7 +2132,7 @@ def _export_serving_db(
                     FROM sqlite_master
                     WHERE type = 'table'
                       AND name NOT LIKE 'sqlite_%'
-                      AND name != 'ksa_search_fts'
+                      AND name NOT IN ('ksa_search_fts', 'ksa_prefix_fts', 'criteria_prefix_fts')
                     ORDER BY name
                     """
                 ).fetchall()

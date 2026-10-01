@@ -67,18 +67,24 @@ artifact sizes, and bounded stdout/stderr tails in the JSON report. The final
 verification is archive-only; function bundle measurement and Vercel deployment
 are outside the Builder's scope.
 
-New compact builds include a contentless FTS5 trigram index over the effective
-normalized KSA search text. The index stores row IDs and trigrams without a
-second copy of the text. Search uses it only when the v2 normalization contract
-and `ksa_search_fts_schema=ncs_ksa_search_fts_v1` are attested; older snapshots
-keep the existing scan path. A three-character match only narrows candidates:
-the original boundary predicate, ranking, and result payload still decide the
-answer. Queries without a safe trigram also keep the scan path. The Builder
-records the index schema and KSA row count in the embedded manifest, and the
-normal compact SHA-256 and hard size gate cover the resulting artifact.
-The contentless table does not support a full `SELECT COUNT(*)` scan; inspect
-the build's declared row count in the manifest and check index behavior through
-read-only search response parity.
+New compact builds include two contentless FTS5 indexes over effective v2 KSA
+and performance-criterion search fields: `ksa_prefix_fts` and
+`criteria_prefix_fts`. They store row IDs and hex-encoded two/three-character
+prefixes at a conservative superset of lexical boundaries, without a second
+copy of source text. The shared contract is `search/prefix_index.py`.
+Runtime requires the v2 normalization contract, all schema/boundary/length
+attestations in `lexical_prefix_fts_*`, and both tables. Older snapshots keep
+their attested KSA trigram index or ordinary SQL fallback.
+
+The original boundary predicate, ranking, and result payload still decide the
+answer. One-character queries keep the ordinary predicate; mandatory AND
+groups may narrow candidates only when all their OR alternatives are indexable.
+Builder records source row counts in `lexical_prefix_fts_rows`, and the compact
+SHA-256 and hard size gate cover the artifact. Contentless root tables do not
+support `SELECT COUNT(*)`; count metadata includes their physical shadow tables
+instead. Verify behavior with complete read-only response parity. Creating a
+local diagnostic index/ZIP does not create a Builder release or authorize
+publication.
 
 For a local search latency and response-parity check between two compact DBs
 from the same Builder source, run:
@@ -98,7 +104,9 @@ grant human relevance approval or deploy anything.
 For a newly packaged FTS snapshot, compare the same DB with the FTS prefilter
 disabled and enabled. Pass its path to both arguments and add
 `--disable-fts-baseline`; the script restores the search implementation after
-the comparison and does not modify the DB.
+the comparison and does not modify the DB. The toggle covers both legacy
+trigram and lexical-prefix indexes and requires an index that the runtime can
+actually use.
 
 ```powershell
 python scripts\benchmark_ncs_snapshot_ab.py --baseline-db <fts-compact.db> --candidate-db <fts-compact.db> --disable-fts-baseline --runs 5 --out reports\ncs_snapshot_fts_toggle_ab.json

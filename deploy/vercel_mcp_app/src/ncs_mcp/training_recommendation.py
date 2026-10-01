@@ -155,10 +155,13 @@ def _clean(value: Any) -> str:
     return normalize_spaces("" if value is None else str(value))
 
 
+_SCOPE_LOOKUP_STRIP = re.compile(r"[\W_]+", flags=re.UNICODE)
+
+
 def _scope_lookup_key(value: Any) -> str:
-    """Normalize recommendation scope labels without changing ontology keys."""
-    normalized = unicodedata.normalize("NFKC", _clean(value))
-    return re.sub(r"[\W_]+", "", normalized, flags=re.UNICODE).casefold()
+    """Normalize scope labels; whitespace removal also subsumes `_clean`."""
+    normalized = unicodedata.normalize("NFKC", "" if value is None else str(value))
+    return _SCOPE_LOOKUP_STRIP.sub("", normalized).casefold()
 
 
 def _with_korean_direction_particle(value: str) -> str:
@@ -1736,8 +1739,7 @@ def _exact_unit_name_match(
         return None
     rows = conn.execute(
         """
-        SELECT cu.*, c.major_code, c.major_name, c.middle_code, c.middle_name,
-               c.small_code, c.small_name, c.sub_code, c.sub_name
+        SELECT cu.unit_code, cu.unit_name_raw
         FROM competency_units cu
         JOIN classifications c ON c.classification_id = cu.classification_id
         WHERE (? IS NULL OR c.major_code = ?)
@@ -1749,11 +1751,21 @@ def _exact_unit_name_match(
             c.major_code, c.middle_code, c.small_code, c.sub_code, cu.unit_code
         """,
         (major_code, major_code, middle_code, middle_code, small_code, small_code, sub_code, sub_code),
-    ).fetchall()
+    )
     for row in rows:
-        rowd = dict(row)
-        if _scope_lookup_key(rowd.get("unit_name_raw") or "") == query_key:
-            return rowd
+        if _scope_lookup_key(row["unit_name_raw"] or "") != query_key:
+            continue
+        detail = conn.execute(
+            """
+            SELECT cu.*, c.major_code, c.major_name, c.middle_code, c.middle_name,
+                   c.small_code, c.small_name, c.sub_code, c.sub_name
+            FROM competency_units cu
+            JOIN classifications c ON c.classification_id = cu.classification_id
+            WHERE cu.unit_code = ?
+            """,
+            (row["unit_code"],),
+        ).fetchone()
+        return dict(detail) if detail is not None else None
     return None
 
 
@@ -1860,7 +1872,7 @@ def _candidate_score(
         return 0.64 + exact_bonus
     if not _candidate_allows_edit_distance(text_key, query_key):
         return 0.0
-    distance = _levenshtein(text_key, query_key)
+    distance = _bounded_levenshtein(text_key, query_key)
     if distance <= 2 and min(len(text_key), len(query_key)) >= 5:
         return max(0.55, 0.8 - distance * 0.1)
     return 0.0
@@ -1873,10 +1885,35 @@ def _candidate_allows_edit_distance(text_key: str, query_key: str) -> bool:
         return False
     if text_key[:1] == query_key[:1]:
         return True
-    query_bigrams = {query_key[index : index + 2] for index in range(len(query_key) - 1)}
-    if not query_bigrams:
-        return False
-    return any(text_key[index : index + 2] in query_bigrams for index in range(len(text_key) - 1))
+    # Containment checks the same bigram intersection without allocating the
+    # query's set again for every source name.
+    return any(text_key[index : index + 2] in query_key for index in range(len(text_key) - 1))
+
+
+def _bounded_levenshtein(left: str, right: str, maximum: int = 2) -> int:
+    """Exact distance up to `maximum`, otherwise the sentinel `maximum + 1`."""
+    if left == right:
+        return 0
+    overflow = maximum + 1
+    if abs(len(left) - len(right)) > maximum:
+        return overflow
+    if not left or not right:
+        return min(max(len(left), len(right)), overflow)
+    width = len(right)
+    previous = list(range(width + 1))
+    for i, left_char in enumerate(left, start=1):
+        current = [overflow] * (width + 1)
+        current[0] = i
+        minimum = overflow
+        for j in range(max(1, i - maximum), min(width, i + maximum) + 1):
+            value = min(current[j - 1] + 1, previous[j] + 1,
+                        previous[j - 1] + (left_char != right[j - 1]))
+            current[j] = value
+            minimum = min(minimum, value)
+        if minimum > maximum:
+            return overflow
+        previous = current
+    return min(previous[width], overflow)
 
 
 def _levenshtein(left: str, right: str) -> int:
@@ -2320,14 +2357,12 @@ def resolve_ncs_query_scope(
         """
         SELECT concept_id, concept_name, concept_type, definition_status, review_status
         FROM ontology_concepts
-        WHERE normalized_key = ?
-           OR normalized_key LIKE ?
-           OR normalized_key LIKE ?
+        WHERE normalized_key LIKE ?
            OR concept_name LIKE ?
         ORDER BY concept_id
         LIMIT 2000
         """,
-        (concept_query_key, f"{concept_query_key}%", f"%{concept_query_key}%", f"%{text}%"),
+        (f"%{concept_query_key}%", f"%{text}%"),
     ).fetchall()
     for row in concept_rows:
         rowd = dict(row)

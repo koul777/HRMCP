@@ -175,7 +175,6 @@ class PackageInstallSmokeTests(unittest.TestCase):
             created = subprocess.run(
                 ["cmd", "/c", "mklink", "/J", str(junction), str(outside)],
                 capture_output=True,
-                text=True,
                 check=False,
             )
             if created.returncode != 0:

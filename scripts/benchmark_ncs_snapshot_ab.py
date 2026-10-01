@@ -66,19 +66,31 @@ def _database_record(path: Path) -> dict[str, Any]:
             embedded = dict(conn.execute(
                 "SELECT manifest_key, manifest_value FROM serving_snapshot_manifest "
                 "WHERE manifest_key IN ('schema', 'raw_ksa_sha256', "
-                "'search_normalization_schema', 'ksa_search_fts_schema')"
+                "'search_normalization_schema', 'ksa_search_fts_schema', "
+                "'lexical_prefix_fts_schema', 'lexical_prefix_fts_boundary_policy', "
+                "'lexical_prefix_fts_lengths')"
             ).fetchall())
         counts = dict(conn.execute(
             "SELECT object_name || ':' || count_kind, row_count "
             "FROM serving_snapshot_table_counts "
-            "WHERE object_name NOT LIKE 'ksa_search_fts%'"
+            "WHERE object_name NOT LIKE 'ksa_search_fts%' "
+            "AND object_name NOT LIKE 'ksa_prefix_fts%' "
+            "AND object_name NOT LIKE 'criteria_prefix_fts%'"
         ).fetchall())
+        normalized = search_core._normalized_search_storage(conn)
+        available_indexes = [
+            name for name, available in (
+                ("ksa_trigram", search_core._compact_ksa_search_fts_available(conn, normalized)),
+                ("lexical_prefix", search_core._compact_lexical_prefix_available(conn, normalized)),
+            ) if available
+        ]
     return {
         "path": str(resolved),
         "bytes": resolved.stat().st_size,
         "sha256_before": _sha256(resolved),
         "embedded_manifest": embedded,
         "snapshot_table_counts": counts,
+        "available_candidate_indexes": available_indexes,
         "read_only": True,
     }
 
@@ -110,11 +122,8 @@ def benchmark(
             "Use one database path only with --disable-fts-baseline; "
             "otherwise supply distinct snapshots"
         )
-    if disable_fts_baseline and (
-        databases["candidate"]["embedded_manifest"].get("ksa_search_fts_schema")
-        != "ncs_ksa_search_fts_v1"
-    ):
-        raise ValueError("Same-DB FTS toggle requires an attested trigram index")
+    if disable_fts_baseline and not databases["candidate"]["available_candidate_indexes"]:
+        raise ValueError("Same-DB FTS toggle requires an available, attested candidate index")
     baseline_manifest = databases["baseline"]["embedded_manifest"]
     comparable_data = (
         bool(baseline_manifest.get("schema"))
@@ -133,9 +142,13 @@ def benchmark(
     selected = "baseline"
     original_open_db = server.open_db
     original_fts_available = search_core._compact_ksa_search_fts_available
+    original_prefix_available = search_core._compact_lexical_prefix_available
 
     def fts_available(conn: Any, normalized: bool | str) -> bool:
         return selected != "baseline" and original_fts_available(conn, normalized)
+
+    def prefix_available(conn: Any, normalized: bool | str) -> bool:
+        return selected != "baseline" and original_prefix_available(conn, normalized)
 
     @contextmanager
     def open_selected_db() -> Iterator[sqlite3.Connection]:
@@ -160,6 +173,7 @@ def benchmark(
     server.open_db = open_selected_db
     if disable_fts_baseline:
         search_core._compact_ksa_search_fts_available = fts_available
+        search_core._compact_lexical_prefix_available = prefix_available
     try:
         for query in queries:
             call(query, "baseline")
@@ -190,6 +204,7 @@ def benchmark(
     finally:
         server.open_db = original_open_db
         search_core._compact_ksa_search_fts_available = original_fts_available
+        search_core._compact_lexical_prefix_available = original_prefix_available
 
     pooled = {
         label: [value for record in records for value in record["samples_ms"][label]]

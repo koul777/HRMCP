@@ -22,6 +22,10 @@ REQUIRED_SOURCE_MIRROR_PAIRS = (
         "src/ncs_mcp/search/normalization.py",
         "deploy/vercel_mcp_app/src/ncs_mcp/search/normalization.py",
     ),
+    (
+        "src/ncs_mcp/search/prefix_index.py",
+        "deploy/vercel_mcp_app/src/ncs_mcp/search/prefix_index.py",
+    ),
 )
 
 

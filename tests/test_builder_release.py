@@ -532,7 +532,7 @@ class BuilderReleaseTests(unittest.TestCase):
         os.replace(stage, external)
         if os.name == 'nt':
             completed = subprocess.run(['cmd', '/c', 'mklink', '/J', str(stage), str(external)],
-                                       capture_output=True, text=True)
+                                       capture_output=True)
             self.assertEqual(completed.returncode, 0, completed.stderr)
         else:
             stage.symlink_to(external, target_is_directory=True)

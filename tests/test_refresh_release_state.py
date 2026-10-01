@@ -607,7 +607,6 @@ class RefreshReleaseStateTests(unittest.TestCase):
                 created = subprocess.run(
                     ["cmd", "/c", "mklink", "/J", str(baselines), str(external)],
                     capture_output=True,
-                    text=True,
                     check=False,
                 )
                 if created.returncode != 0:

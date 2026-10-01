@@ -2168,6 +2168,63 @@ class NcsSearchRecallTests(unittest.TestCase):
 class NcsSearchHybridRecallTests(NcsSearchRecallTests):
     """Run the same ranking/Unicode/evidence contract against v2 storage."""
 
+    def test_prefix_indexes_preserve_payload_pages_and_manifest_fallback(self) -> None:
+        from ncs_mcp.search.prefix_index import PREFIX_FTS_REQUIRED_MANIFEST, prefix_fts_document
+
+        texts = ("alpha beta", "ab short term", "alpha remedy", "xxalphabeta",
+                 "ＡＬＰＨＡ Straße", "cafe\u0301 école", "가나 출입", "인사 채용",
+                 "alpha hr", "C++ r&d", "alpha_beta", "alpha—beta")
+        with self._open_db() as conn:
+            for index, value in enumerate(texts, 100):
+                conn.execute("INSERT INTO ksa_items VALUES (?, 'knowledge', ?, ?, 5)",
+                             (index, value if index % 2 else "원문 근거", value))
+                conn.execute("INSERT INTO performance_criteria VALUES (?, ?, ?, 5)",
+                             (index, value if index % 2 else "원문 과업", value))
+            self._add_normalized_columns(conn)
+            conn.commit()
+        cases = [
+            dict(query=query, scope=scope, classification_filter=scope_filter, limit=3, offset=offset)
+            for query in ("alpha", "alpha hr", "ab", "a", "ALPHA", "café", "strasse",
+                          "가나", "채용", "C++", "alpha%beta", "alpha_beta", "없는검색")
+            for scope in ("all", "criteria", "ksa")
+            for scope_filter in (None, {"major_code": "02"}, {"major_code": "15"})
+            for offset in (0, 3)
+        ]
+        baseline = [server.search_ncs(**case) for case in cases]
+        with self._open_db() as conn:
+            for table, query in (
+                ("ksa_prefix_fts", "SELECT ksa_id, COALESCE(ksa_text_raw_search_override,ksa_text_raw,''), COALESCE(ksa_text_refined_search_override,ksa_text_refined,'') FROM ksa_items"),
+                ("criteria_prefix_fts", "SELECT criteria_id, criteria_text_raw_search_norm, criteria_text_refined_search_norm FROM performance_criteria"),
+            ):
+                conn.execute(f"CREATE VIRTUAL TABLE {table} USING fts5(search_prefixes, content='', detail='none', columnsize=0, tokenize='ascii')")
+                rows = conn.execute(query).fetchall()
+                conn.executemany(f"INSERT INTO {table}(rowid,search_prefixes) VALUES (?,?)",
+                                 ((row[0], prefix_fts_document(row[1], row[2])) for row in rows))
+            conn.executemany("INSERT INTO serving_snapshot_manifest VALUES (?,?)", PREFIX_FTS_REQUIRED_MANIFEST.items())
+            self.assertTrue(search_core._compact_lexical_prefix_available(conn, "v2"))
+            self.assertFalse(search_core._compact_lexical_prefix_available(conn, True))
+            conn.commit()
+        self.sql_statements.clear()
+        self.assertEqual(baseline, [server.search_ncs(**case) for case in cases])
+        self.assertTrue(any("ksa_prefix_fts MATCH" in sql for sql in self.sql_statements))
+        self.assertTrue(any("criteria_prefix_fts MATCH" in sql for sql in self.sql_statements))
+        for key, value in PREFIX_FTS_REQUIRED_MANIFEST.items():
+            with self._open_db() as conn:
+                conn.execute("UPDATE serving_snapshot_manifest SET manifest_value='unsupported' WHERE manifest_key=?", (key,))
+                self.assertFalse(search_core._compact_lexical_prefix_available(conn, "v2"))
+                conn.commit()
+            self.sql_statements.clear()
+            self.assertEqual(baseline[0], server.search_ncs(**cases[0]))
+            self.assertFalse(any("prefix_fts MATCH" in sql for sql in self.sql_statements))
+            with self._open_db() as conn:
+                conn.execute("UPDATE serving_snapshot_manifest SET manifest_value=? WHERE manifest_key=?", (value, key))
+                conn.commit()
+        with self._open_db() as conn:
+            conn.execute("DROP TABLE criteria_prefix_fts")
+            self.assertFalse(search_core._compact_lexical_prefix_available(conn, "v2"))
+            conn.commit()
+        self.assertEqual(baseline[0], server.search_ncs(**cases[0]))
+
     def _add_normalized_columns(self, conn: sqlite3.Connection) -> None:
         for table, fields in SEARCH_NORMALIZATION_V2_FIELDS.items():
             for raw, derived in fields.items():

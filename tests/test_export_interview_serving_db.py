@@ -1713,11 +1713,19 @@ class ExportVercelOntologyCompactDatabaseTests(
                 manifest["search_normalization_schema"],
             )
             self.assertEqual("verified_equal", manifest["raw_ksa_parity_status"])
-            self.assertEqual("ncs_ksa_search_fts_v1", manifest["ksa_search_fts_schema"])
-            self.assertEqual(
-                str(dst.execute("SELECT COUNT(*) FROM ksa_items").fetchone()[0]),
-                manifest["ksa_search_fts_rows"],
-            )
+            for key, value in serving_export.PREFIX_FTS_REQUIRED_MANIFEST.items():
+                self.assertEqual(value, manifest[key])
+            self.assertNotIn("ksa_search_fts_schema", manifest)
+            prefix_counts = json.loads(manifest["lexical_prefix_fts_rows"])
+            for table, source_table in (("ksa_prefix_fts", "ksa_items"),
+                                        ("criteria_prefix_fts", "performance_criteria")):
+                self.assertEqual(
+                    dst.execute(f"SELECT COUNT(*) FROM {source_table}").fetchone()[0],
+                    prefix_counts[table],
+                )
+                self.assertIsNone(dst.execute(
+                    "SELECT 1 FROM serving_snapshot_table_counts WHERE object_name = ?", (table,)
+                ).fetchone())
             effective_ksa = dst.execute(
                 "SELECT COALESCE(ksa_text_raw_search_override, ksa_text_raw, '') "
                 "FROM ksa_items WHERE ksa_id = 1000"
@@ -1725,8 +1733,8 @@ class ExportVercelOntologyCompactDatabaseTests(
             self.assertIn(
                 1000,
                 [row[0] for row in dst.execute(
-                    "SELECT rowid FROM ksa_search_fts WHERE ksa_search_fts MATCH ?",
-                    ('"' + effective_ksa[:3] + '"',),
+                    "SELECT rowid FROM ksa_prefix_fts WHERE ksa_prefix_fts MATCH ?",
+                    ("p" + effective_ksa[:3].encode("utf-8").hex(),),
                 )],
             )
             self.assertEqual(

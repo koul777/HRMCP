@@ -189,7 +189,7 @@ class OntologyRefreshBuilderTests(unittest.TestCase):
                 self.skipTest("Directory symlinks are unavailable")
             junction = subprocess.run(
                 ["cmd", "/c", "mklink", "/J", str(redirected), str(target)],
-                capture_output=True, text=True, check=False,
+                capture_output=True, check=False,
             )
             self.assertEqual(junction.returncode, 0, junction.stderr)
         try:
