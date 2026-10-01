@@ -49,7 +49,7 @@ def _attach_read_only(conn: sqlite3.Connection, alias: str, path: Path) -> None:
         raise ValueError(f"Not a SQLite database: {resolved}")
     conn.execute(
         f"ATTACH DATABASE ? AS {alias}",
-        (f"file:{resolved.as_posix()}?mode=ro",),
+        (resolved.as_uri() + "?mode=ro",),
     )
 
 
@@ -87,7 +87,7 @@ def check(
     }
     if len(set(paths.values())) != 3:
         raise ValueError("All three database paths must differ")
-    with closing(sqlite3.connect(":memory:")) as conn:
+    with closing(sqlite3.connect(":memory:", uri=True)) as conn:
         conn.execute("PRAGMA query_only=ON")
         for alias, path in paths.items():
             _attach_read_only(conn, alias, path)

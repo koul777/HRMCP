@@ -11,6 +11,7 @@ from pathlib import Path
 
 from scripts.check_ncs_builder_evidence_parity import (
     TRAINING_PROJECTIONS,
+    _attach_read_only,
     check,
 )
 
@@ -19,7 +20,8 @@ class BuilderEvidenceParityTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        root = Path(self.temporary.name)
+        root = Path(self.temporary.name) / "evidence #100% 한글"
+        root.mkdir()
         self.current = root / "current.db"
         self.older = root / "older.db"
         candidate_dir = root / "candidate"
@@ -112,6 +114,24 @@ class BuilderEvidenceParityTests(unittest.TestCase):
         )
         self.assertFalse(report["training_ok"])
         self.assertFalse(report["ok"])
+
+    def test_attached_database_remains_read_only_without_query_only(self) -> None:
+        with closing(sqlite3.connect(":memory:", uri=True)) as conn:
+            _attach_read_only(conn, "current", self.current)
+            self.assertEqual(conn.execute("PRAGMA query_only").fetchone()[0], 0)
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM current.ncs_qualification_items").fetchone()[0],
+                0,
+            )
+            with self.assertRaisesRegex(sqlite3.OperationalError, "readonly"):
+                conn.execute("INSERT INTO current.ncs_qualification_items VALUES ('Q1')")
+
+    def test_missing_database_is_not_created(self) -> None:
+        missing = self.current.parent / "missing.db"
+        with closing(sqlite3.connect(":memory:", uri=True)) as conn:
+            with self.assertRaises(FileNotFoundError):
+                _attach_read_only(conn, "missing", missing)
+        self.assertFalse(missing.exists())
 
 
 if __name__ == "__main__":
