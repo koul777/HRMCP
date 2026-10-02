@@ -42,6 +42,23 @@ task/KSA evidence used to rank the first row. Candidates beyond that prefix
 retain lexical order. Exact phrases and stronger lexical tiers retain their
 original retrieval bounds.
 
+### Long-sentence unit search
+
+`tests/fixtures/ncs_search_eval_nl_dev_long.json` holds 50 development queries
+of 6-11 words written as practitioners type them to an assistant (HR 42,
+cross-domain controls 8). Unit search resolves such queries into at most six
+corpus-checked terms (`unit_query_terms` in the response); this set measures
+that path, which the 40-query regression set (at most four words) never
+reaches. It is a tuning set, not a holdout.
+
+```powershell
+python scripts\audit_ncs_search_precision.py --nl-eval --input tests\fixtures\ncs_search_eval_nl_dev_long.json --db <snapshot.db> --limit 10 --out reports\search_eval_dev_long.json --markdown-out reports\search_eval_dev_long.md
+```
+
+The first unit search in a process builds an in-memory word index of unit
+names and definitions (about 0.3 s for 13,435 units); later searches reuse it
+until the database file changes.
+
 ### Latency and response comparisons
 
 `scripts/benchmark_ncs_code_ab.py` runs two frozen source trees in separate

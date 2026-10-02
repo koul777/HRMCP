@@ -1194,6 +1194,8 @@ class NcsSearchRecallTests(unittest.TestCase):
             conn.commit()
 
         query = "급여 지급"
+        # Warm the per-process unit lexicon so both runs issue the same SQL.
+        server.search_ncs(query, scope="unit", limit=10)
         self.sql_statements.clear()
         with patch.object(
             search_core, "_ncs_search_joined_compound_phrase", return_value=""
@@ -2225,6 +2227,9 @@ class NcsSearchRecallTests(unittest.TestCase):
         for query in ("광학교정업무를", "검토 광학교정업무를", "광학교정업무를 장비로"):
             for scope in ("unit", "all"):
                 with self.subTest(query=query, scope=scope):
+                    # Warm the per-process unit lexicon so both runs issue
+                    # the same SQL.
+                    server.search_ncs(query, scope=scope, limit=20)
                     self.sql_statements.clear()
                     with patch.object(search_core, "_ncs_search_morphology_compound_bases", return_value=[]):
                         before = server.search_ncs(query, scope=scope, limit=20)
