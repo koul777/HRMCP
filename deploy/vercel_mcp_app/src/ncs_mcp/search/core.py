@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import bisect
 import hashlib
 import math
+import os
 import re
+import threading
 import unicodedata
+from collections import Counter
 from typing import Any
 
 from ncs_mcp.query_router import (
@@ -226,6 +230,10 @@ _NCS_SEARCH_TASK_KSA_WEIGHT = 0.5
 # Rerank a fixed lexical prefix before slicing pages. Using the requested page
 # size here makes limit=3 discard evidence that limit=50 would rank first.
 _NCS_SEARCH_UNIT_RERANK_WINDOW = 50
+# Leaf (element, criterion, KSA) fallback predicates use at most this many raw
+# query tokens.  Unit search resolves longer queries itself; see
+# _select_ncs_search_unit_terms.
+_NCS_SEARCH_FALLBACK_TOKEN_BOUND = 4
 # Public-search recall equivalences bridge practitioner language to official NCS
 # names.  They are candidate-only expansions, not source evidence or DB writes.
 _NCS_SEARCH_QUERY_EQUIVALENTS = {
@@ -345,7 +353,7 @@ def _normalize_ncs_search_text(value: Any) -> str:
 
 def _normalize_ncs_search_query(query: str) -> tuple[str, list[str], list[str]]:
     normalized = _normalize_ncs_search_text(query)
-    query_tokens = normalized.split()[:4]
+    query_tokens = normalized.split()[:_NCS_SEARCH_FALLBACK_TOKEN_BOUND]
     fallback_tokens = [token for token in query_tokens if len(token) > 1]
     # Bound the expensive fallback predicates, not the literal phrase. Official
     # unit names can exceed four tokens and differ only in their final words.
@@ -453,6 +461,491 @@ def _ncs_search_morphology_expansions(tokens: list[str]) -> dict[str, list[str]]
                 expansions[token] = [stem]
             break
     return expansions
+
+
+# Long practitioner sentences ("올해 정원 대비 현원을 분석해서 ... 세우려고
+# 합니다") used to reach unit ranking as their first four raw words, particles
+# and all, so the subject words at the end never matched and words such as 대비
+# pulled 비상상황 대비 to first place.  Unit search now resolves every word
+# against the unit corpus, then keeps up to _NCS_SEARCH_UNIT_TERM_LIMIT terms.
+# These lists only describe query wording; they never touch source text,
+# evidence, or review state.
+_NCS_SEARCH_UNIT_TERM_LIMIT = 6
+_NCS_SEARCH_LONG_QUERY_STOPWORDS = frozenset(
+    {
+        # Time and frequency framing.
+        "올해", "금년", "작년", "내년", "내년도", "상반기", "하반기",
+        "매달", "매월", "매주", "매일", "매년", "분기마다",
+        # Connectives and relational nouns.
+        "때", "때마다", "다음", "후", "뒤", "전", "위해", "위한", "대비",
+        "대해", "대한", "관련", "관련된", "같은", "및", "등", "또는",
+        "그리고", "새로", "따로", "각종", "모든", "전체", "사이", "얼마나",
+        "어떻게", "무엇", "하나", "데", "것", "수", "중", "안", "내",
+        # Requester framing and filler nouns.  Exact official names still
+        # match through the untouched phrase tier.
+        "우리", "저희", "회사", "사내", "직원", "직원들", "일", "작업", "업무",
+        "단계", "방안", "방법", "내용", "부분", "프로젝트", "프로그램",
+        # Bare predicates.
+        "있는", "없는", "하는", "하고", "합니다", "해야", "해요", "주세요",
+        "싶습니다", "싶어요", "필요", "필요한",
+    }
+)
+# Sino-Korean verbal nouns carry the subject; strip the predicate that follows.
+_NCS_SEARCH_PREDICATE_SUFFIXES = (
+    "하려고", "하려는", "합니다", "시키고", "시키는", "적으로",
+    "받아서", "하는", "하고", "해서", "하여", "하기", "하며", "하면", "한다",
+    "했다", "해야", "되는", "되고", "되어", "시킨", "적인", "받는", "할", "한",
+    "된",
+)
+# Noun particles in longest-first order with the same final-consonant rules
+# as _ncs_search_morphology_expansions, plus plural/distributive endings.
+_NCS_SEARCH_TERM_PARTICLES = (
+    ("에서는", "any"), ("으로는", "consonant_except_rieul"),
+    ("마다", "any"), ("별로", "any"), ("에서", "any"), ("에게", "any"),
+    ("으로", "consonant_except_rieul"), ("부터", "any"), ("까지", "any"),
+    ("에는", "any"), ("에도", "any"), ("처럼", "any"), ("보다", "any"),
+    ("들의", "any"), ("들이", "any"), ("들을", "any"), ("들", "any"),
+    ("별", "any"), ("은", "consonant"), ("는", "vowel"),
+    ("을", "consonant"), ("를", "vowel"), ("이", "consonant"),
+    ("가", "vowel"), ("과", "consonant"), ("와", "vowel"),
+    ("로", "vowel_or_rieul"), ("의", "any"), ("에", "any"),
+)
+# Endings that mark a remaining word as a predicate or modifier.  In a long
+# query such a word is dropped unless an official unit name contains it.
+# Syllables that also end common nouns (문서, 재고, 화면, 복지, 전기) are
+# deliberately absent.
+_NCS_SEARCH_PREDICATE_FINALS = (
+    "는", "은", "며", "면", "던", "려고", "도록", "니다", "까요", "나요",
+    "세요", "지만", "는지", "아서", "어서", "여서", "져서", "춰서", "워서",
+)
+_NCS_SEARCH_COMPOUND_PIECE_MIN = 2
+
+
+def _ncs_search_particle_allowed(stem: str, rule: str) -> bool:
+    if rule == "any":
+        return True
+    final = (ord(stem[-1]) - 0xAC00) % 28
+    return (
+        (rule == "consonant" and final != 0)
+        or (rule == "vowel" and final == 0)
+        or (rule == "consonant_except_rieul" and final not in (0, 8))
+        or (rule == "vowel_or_rieul" and final in (0, 8))
+    )
+
+
+def _ncs_search_term_stems(word: str) -> list[str]:
+    """Return candidate stems for one query word, most reduced first.
+
+    A predicate suffix is removed before a noun particle so that
+    ``분석해서`` yields ``분석`` and ``직원들에게`` yields ``직원``.  Stems must
+    keep at least two Hangul syllables; the caller accepts a stem only when the
+    unit corpus contains it, so an over-eager strip cannot invent a term.
+    """
+    stems: list[str] = []
+    latin = re.fullmatch(r"([A-Za-z0-9]{2,})([가-힣]{1,2})", word)
+    if latin:
+        # DBMS를, LMS로: a Latin term followed by a bare particle.
+        if any(latin.group(2) == suffix for suffix, _ in _NCS_SEARCH_TERM_PARTICLES):
+            stems.append(latin.group(1))
+        return stems
+    if not re.fullmatch(r"[가-힣]{3,}", word):
+        return stems
+    current = word
+    for suffix in _NCS_SEARCH_PREDICATE_SUFFIXES:
+        stem = current[: -len(suffix)]
+        if current.endswith(suffix) and len(stem) >= 2:
+            stems.append(stem)
+            current = stem
+            break
+    for _ in range(2):
+        if len(current) < 3:
+            break
+        stripped = None
+        for suffix, rule in _NCS_SEARCH_TERM_PARTICLES:
+            stem = current[: -len(suffix)]
+            if (
+                current.endswith(suffix)
+                and len(stem) >= 2
+                and re.fullmatch(r"[가-힣]+", stem)
+                and _ncs_search_particle_allowed(stem, rule)
+            ):
+                stripped = stem
+                break
+        if not stripped:
+            break
+        stems.append(stripped)
+        current = stripped
+    # Prefer the most reduced stem: 직원들에게 -> 직원 before 직원들.
+    return list(dict.fromkeys(reversed(stems)))
+
+
+def _ncs_search_compound_pieces(word: str) -> list[str]:
+    """Return the prefix/suffix pieces of a closed compound, longest first."""
+    if not re.fullmatch(r"[가-힣]{3,}", word):
+        return []
+    pieces: list[str] = []
+    for size in range(len(word) - 1, _NCS_SEARCH_COMPOUND_PIECE_MIN - 1, -1):
+        for piece in (word[-size:], word[:size]):
+            if piece not in pieces:
+                pieces.append(piece)
+    return pieces
+
+
+class _NcsUnitLexicon:
+    """Word-level document frequencies of unit names and definitions.
+
+    A term "occurs" in a unit when some word of the field starts with it,
+    which is the lexical-boundary rule the search tiers use, so ``퇴직`` counts
+    for ``퇴직업무지원`` but ``계도`` does not count for ``설계도``.  Counts for a
+    prefix are summed over the matching words and capped at the corpus size;
+    they rank specificity and never decide a match by themselves.
+    """
+
+    __slots__ = ("total", "_name_words", "_name_counts", "_any_words", "_any_counts")
+
+    def __init__(self, rows: list[Any]) -> None:
+        name_df: Counter[str] = Counter()
+        any_df: Counter[str] = Counter()
+        for name, definition in rows:
+            words = set(_NCS_SEARCH_LEXICON_WORD(_ncs_search_lexicon_text(name)))
+            name_df.update(words)
+            words.update(_NCS_SEARCH_LEXICON_WORD(_ncs_search_lexicon_text(definition)))
+            any_df.update(words)
+        self.total = len(rows)
+        self._name_words = sorted(name_df)
+        self._name_counts = [name_df[word] for word in self._name_words]
+        self._any_words = sorted(any_df)
+        self._any_counts = [any_df[word] for word in self._any_words]
+
+    @staticmethod
+    def _prefix_count(words: list[str], counts: list[int], term: str, cap: int) -> int:
+        index = bisect.bisect_left(words, term)
+        total = 0
+        while index < len(words) and words[index].startswith(term):
+            total += counts[index]
+            if total >= cap:
+                return cap
+            index += 1
+        return total
+
+    def counts(self, term: str) -> tuple[int, int]:
+        key = _ncs_search_lexicon_text(term)
+        if not key or not _NCS_SEARCH_LEXICON_WORD(key) == [key]:
+            return 0, 0
+        return (
+            self._prefix_count(self._name_words, self._name_counts, key, self.total),
+            self._prefix_count(self._any_words, self._any_counts, key, self.total),
+        )
+
+
+_NCS_SEARCH_LEXICON_WORD = re.compile(r"\w+").findall
+_NCS_UNIT_LEXICON_CACHE: dict[tuple[str, int, int, int], _NcsUnitLexicon] = {}
+_NCS_UNIT_LEXICON_LOCK = threading.Lock()
+
+
+def _ncs_search_lexicon_text(value: Any) -> str:
+    return unicodedata.normalize("NFKC", str(value or "")).casefold()
+
+
+def _ncs_search_unit_lexicon(conn: Any) -> _NcsUnitLexicon:
+    """Build once per database file state; in-memory databases always rebuild.
+
+    The key combines the file path, size, modification time, and the highest
+    unit rowid, so a snapshot replaced in place or a unit added between calls
+    (as tests do) cannot be answered from a stale lexicon.
+    """
+    key: tuple[str, int, int, int] | None = None
+    try:
+        for row in conn.execute("PRAGMA database_list").fetchall():
+            if row[1] == "main" and row[2]:
+                stat = os.stat(row[2])
+                max_rowid = conn.execute(
+                    "SELECT MAX(rowid) FROM competency_units"
+                ).fetchone()[0]
+                key = (row[2], stat.st_size, stat.st_mtime_ns, int(max_rowid or 0))
+    except (OSError, IndexError, TypeError):
+        key = None
+    if key is not None:
+        cached = _NCS_UNIT_LEXICON_CACHE.get(key)
+        if cached is not None:
+            return cached
+    with _NCS_UNIT_LEXICON_LOCK:
+        if key is not None and key in _NCS_UNIT_LEXICON_CACHE:
+            return _NCS_UNIT_LEXICON_CACHE[key]
+        lexicon = _NcsUnitLexicon(
+            conn.execute(
+                "SELECT unit_name_raw, api_definition FROM competency_units"
+            ).fetchall()
+        )
+        if key is not None:
+            # A replaced snapshot gets a new key; keep only the live one.
+            _NCS_UNIT_LEXICON_CACHE.clear()
+            _NCS_UNIT_LEXICON_CACHE[key] = lexicon
+    return lexicon
+
+
+def _ncs_search_unit_term_counts(
+    conn: Any,
+    terms: list[str],
+    classification_filter: dict[str, str],
+    *,
+    normalized: bool | str,
+) -> tuple[int, dict[str, int], dict[str, int]]:
+    """Count units whose name, and name or definition, contain each term.
+
+    Both counts use the tiers' lexical-boundary rule.  Without a
+    classification filter the cached unit lexicon answers in memory.  Inside a
+    filtered scope (a small corpus) one SQL pass applies the same boundary
+    UDF after a LIKE prefilter; column expressions come from fixed
+    server-side text and terms stay bound.
+    """
+    terms = list(dict.fromkeys(term for term in terms if term))
+    if not terms:
+        return 0, {}, {}
+    if not classification_filter:
+        lexicon = _ncs_search_unit_lexicon(conn)
+        name_counts: dict[str, int] = {}
+        any_counts: dict[str, int] = {}
+        for term in terms:
+            name_counts[term], any_counts[term] = lexicon.counts(term)
+        return lexicon.total, name_counts, any_counts
+    params: dict[str, Any] = {}
+    projections: list[str] = []
+    for index, term in enumerate(terms):
+        # The token_ prefix makes _normalized_ncs_search_params bind both the
+        # normalized and raw forms, as the tier predicates do.
+        parameter = f"token_probe_{index}"
+        params[parameter] = term
+        name_match = _ncs_search_boundary_any(
+            ("cu.unit_name_raw",), parameter, normalized=normalized
+        )
+        definition_match = _ncs_search_boundary_any(
+            ("cu.api_definition",), parameter, normalized=normalized
+        )
+        projections.append(f"SUM(CASE WHEN {name_match} THEN 1 ELSE 0 END)")
+        projections.append(
+            f"SUM(CASE WHEN {name_match} OR {definition_match} THEN 1 ELSE 0 END)"
+        )
+    if normalized:
+        params = _normalized_ncs_search_params(params)
+    scope_clause, scope_params = _ncs_classification_filter_sql(
+        classification_filter, alias="c", normalized=normalized
+    )
+    params.update(scope_params)
+    row = conn.execute(
+        f"SELECT COUNT(*), {', '.join(projections)} FROM competency_units cu "
+        "JOIN classifications c ON c.classification_id = cu.classification_id "
+        f"WHERE {scope_clause}",
+        params,
+    ).fetchone()
+    name_counts = {}
+    any_counts = {}
+    for index, term in enumerate(terms):
+        name_counts[term] = int(row[1 + index * 2] or 0)
+        any_counts[term] = int(row[2 + index * 2] or 0)
+    return int(row[0] or 0), name_counts, any_counts
+
+
+def _ncs_search_idf(total: int, frequency: int) -> float:
+    if total <= 1:
+        return 1.0
+    return max(
+        _NCS_SEARCH_IDF_FLOOR,
+        math.log(total / max(frequency, 1)) / math.log(total),
+    )
+
+
+def _select_ncs_search_unit_terms(
+    conn: Any,
+    phrase: str,
+    fallback_tokens: list[str],
+    classification_filter: dict[str, str],
+    *,
+    normalized: bool | str,
+) -> tuple[list[str], dict[str, str], list[str]]:
+    """Resolve query words into unit-corpus terms for fallback ranking.
+
+    Short queries (up to the fallback bound) keep their tokens unless a token
+    and all of its stems are absent from the unit corpus.  Such a closed
+    compound (``명예퇴직``) is replaced by its head (``퇴직``): the longest
+    trailing piece, other than a workflow word, that starts a word in some
+    unit name.  Particle forms whose stem exists stay with the morphology fill
+    tier, and ``X관리``/``X운영`` compounds stay with the alias-validated
+    expander, so short-query behavior only changes where nothing matched.
+
+    Long queries also drop framing words, resolve particles and predicates
+    against the corpus (stems first, unit names before definitions), drop
+    predicates no unit is named after, fall back to a leading piece when a
+    compound has no head (``인력풀`` -> ``인력``), drop workflow words when two
+    specific terms remain, and keep at most _NCS_SEARCH_UNIT_TERM_LIMIT terms
+    in query order, preferring terms that name a unit and then the rarest.
+
+    Returns the terms, a word -> term trace for response metadata, and the
+    words that matched no unit field.  The task/KSA second stage may still
+    find those in criteria or KSA text (``직무기술서``).  An empty term list
+    means "keep the original tokens".
+    """
+    words = phrase.split()
+    long_query = len(words) > _NCS_SEARCH_FALLBACK_TOKEN_BOUND
+    if long_query:
+        words = [
+            word for word in words
+            if len(word) > 1
+            and word.casefold() not in _NCS_SEARCH_LONG_QUERY_STOPWORDS
+        ]
+    else:
+        words = list(fallback_tokens)
+    words = list(dict.fromkeys(words))
+    if not words:
+        return [], {}, []
+    stems_by_word = {word: _ncs_search_term_stems(word) for word in words}
+    probe_terms = [
+        term
+        for word in words
+        for term in (word, *stems_by_word[word])
+    ]
+    total, name_counts, any_counts = _ncs_search_unit_term_counts(
+        conn, probe_terms, classification_filter, normalized=normalized,
+    )
+    if total <= 1:
+        return [], {}, []
+
+    resolved: list[tuple[str, str]] = []
+    unresolved: list[str] = []
+    for word in words:
+        stems = stems_by_word[word]
+        if not long_query:
+            # Keep present words and particle forms whose stem the morphology
+            # fill tier already recovers; only closed compounds move.
+            if any_counts.get(word, 0) or any(any_counts.get(stem, 0) for stem in stems):
+                resolved.append((word, word))
+            else:
+                unresolved.append(word)
+            continue
+        # Prefer a stem over the inflected word (시설의 -> 시설, 보정하고 ->
+        # 보정): every field the word matches at a boundary, its prefix stem
+        # matches too.  A unit-name occurrence outranks a definition one.
+        candidates = (*stems, word)
+        term = next(
+            (candidate for candidate in candidates if name_counts.get(candidate, 0)),
+            "",
+        ) or next(
+            (candidate for candidate in candidates if any_counts.get(candidate, 0)),
+            "",
+        )
+        if not term:
+            unresolved.append(word)
+            continue
+        if term.casefold() in _NCS_SEARCH_LONG_QUERY_STOPWORDS:
+            continue
+        if not name_counts.get(term, 0) and term.endswith(_NCS_SEARCH_PREDICATE_FINALS):
+            # A predicate or modifier that no unit is named after.
+            continue
+        resolved.append((word, term))
+
+    if unresolved:
+        base_by_word = {
+            word: (stems_by_word[word][0] if stems_by_word[word] else word)
+            for word in unresolved
+        }
+        pieces_by_word = {
+            word: [
+                piece for piece in _ncs_search_compound_pieces(base)
+                if piece.casefold() not in _NCS_SEARCH_LONG_QUERY_STOPWORDS
+            ]
+            for word, base in base_by_word.items()
+        }
+        _, piece_counts, _ = _ncs_search_unit_term_counts(
+            conn,
+            [piece for pieces in pieces_by_word.values() for piece in pieces],
+            classification_filter,
+            normalized=normalized,
+        )
+        for word in unresolved:
+            base = base_by_word[word]
+            if _candidate_ncs_search_expansion_bases(base):
+                # 채용관리: the trailing workflow noun is not the subject, and
+                # short queries already recover the base through the
+                # alias-validated expander.  Long queries take the base here.
+                piece = next(
+                    (
+                        candidate
+                        for candidate in _candidate_ncs_search_expansion_bases(base)
+                        if piece_counts.get(candidate, 0)
+                    ),
+                    None,
+                ) if long_query else None
+            else:
+                present = [
+                    piece for piece in pieces_by_word[word]
+                    if piece_counts.get(piece, 0)
+                    and piece.casefold() not in _NCS_SEARCH_GENERIC_TOKENS
+                ]
+                head = next((piece for piece in present if base.endswith(piece)), None)
+                modifier = (
+                    next((piece for piece in present if base.startswith(piece)), None)
+                    if long_query else None
+                )
+                piece = head or modifier
+            if piece:
+                resolved.append((word, piece))
+            elif not long_query:
+                # Nothing better is known; keep the caller's token.
+                resolved.append((word, word))
+
+    order = {word: index for index, word in enumerate(words)}
+    resolved.sort(key=lambda pair: order[pair[0]])
+    terms: list[str] = []
+    trace: dict[str, str] = {}
+    for word, term in resolved:
+        if term not in terms:
+            terms.append(term)
+        trace.setdefault(word, term)
+    if long_query:
+        # Workflow words (작성, 관리, 계획) name hundreds of units; in a
+        # sentence they let 보고서 작성 outrank the subject.  Keep them only
+        # when fewer than two specific terms would remain.
+        specific = [
+            term for term in terms
+            if term.casefold() not in _NCS_SEARCH_GENERIC_TOKENS
+        ]
+        if len(specific) >= 2:
+            terms = specific
+            trace = {word: term for word, term in trace.items() if term in terms}
+    if long_query and len(terms) > _NCS_SEARCH_UNIT_TERM_LIMIT:
+        uncounted = [term for term in terms if term not in any_counts]
+        if uncounted:
+            _, extra_names, extra_any = _ncs_search_unit_term_counts(
+                conn, uncounted, classification_filter, normalized=normalized,
+            )
+            name_counts.update(extra_names)
+            any_counts.update(extra_any)
+
+        # Official unit names are noun phrases, so a term some unit is named
+        # with is a subject; a definition-only word may still be a verb.
+        rank_key = {
+            term: (
+                not name_counts.get(term, 0),
+                -_ncs_search_idf(total, any_counts.get(term, 0)),
+                index,
+            )
+            for index, term in enumerate(terms)
+        }
+        ranked = sorted(terms, key=rank_key.__getitem__)
+        keep = set(ranked[:_NCS_SEARCH_UNIT_TERM_LIMIT])
+        terms = [term for term in terms if term in keep]
+        trace = {word: term for word, term in trace.items() if term in keep}
+    if not terms or terms == list(fallback_tokens):
+        return [], {}, []
+    evidence_words = [
+        stems_by_word[word][0] if stems_by_word[word] else word
+        for word in unresolved
+    ]
+    evidence_words = [
+        word for word in dict.fromkeys(evidence_words)
+        if word not in terms and len(word) > 1
+    ]
+    return terms, trace, evidence_words
 
 
 def _ncs_search_boundary_match(value: Any, needle: Any) -> int:
@@ -2838,18 +3331,40 @@ def search_ncs(
             conn,
             fallback_tokens,
         )
+        # Unit ranking uses words resolved against the unit corpus: long
+        # sentences keep their specific terms instead of the first four raw
+        # words, and absent closed compounds fall back to their head noun.
+        # Element, criterion, and KSA search keep the original tokens.
+        unit_terms = list(fallback_tokens)
+        unit_term_trace: dict[str, str] = {}
+        unit_evidence_words: list[str] = []
+        if "unit" in requested_types:
+            selected_terms, unit_term_trace, unit_evidence_words = _select_ncs_search_unit_terms(
+                conn,
+                phrase,
+                fallback_tokens,
+                normalized_classification_filter,
+                normalized=normalized_search,
+            )
+            if selected_terms:
+                unit_terms = selected_terms
+        unit_base_expansions = (
+            token_expansions
+            if unit_terms == fallback_tokens
+            else _active_token_expander()(conn, unit_terms)
+        )
         # Compound subphrase recovery is activated only inside an explicit
         # source-backed classification scope.  Outside a hard scope, the same
         # joined token can be a valid term in another NCS major and changing
         # its rank would trade away precision for broad lexical recall.
         unit_compound_expansions = (
-            _ncs_search_joined_compound_subphrases(fallback_tokens)
+            _ncs_search_joined_compound_subphrases(unit_terms)
             if normalized_classification_filter
             else {}
         )
         unit_token_expansions = {
             token: list(alternatives)
-            for token, alternatives in token_expansions.items()
+            for token, alternatives in unit_base_expansions.items()
         }
         for token, alternatives in unit_compound_expansions.items():
             values = unit_token_expansions.setdefault(token, [])
@@ -2865,7 +3380,7 @@ def search_ncs(
         token_weights = (
             _ncs_search_token_idf_weights(
                 conn,
-                fallback_tokens,
+                unit_terms,
                 normalized_classification_filter,
                 normalized=normalized_search,
             ) if "unit" in requested_types else {}
@@ -2893,7 +3408,7 @@ def search_ncs(
             tiers = _active_tier_predicates()(
                 columns,
                 phrase,
-                fallback_tokens,
+                unit_terms,
                 unit_token_expansions,
                 compound_subphrase_expansions=unit_compound_expansions,
                 weighted_columns=weighted_columns,
@@ -3039,7 +3554,7 @@ def search_ncs(
                 unit_task_ksa_scores = _ncs_search_unit_task_ksa_scores(
                     conn,
                     [item["id"] for item in raw_candidates["unit"] if item["_match_tier"] == 3][:_NCS_SEARCH_UNIT_RERANK_WINDOW],
-                    fallback_tokens,
+                    [*unit_terms, *unit_evidence_words],
                     token_weights,
                     normalized=normalized_search,
                 )
@@ -3237,7 +3752,7 @@ def search_ncs(
         mode for modes in modes_by_type.values() for mode in modes
     }
     applied_token_expansions = (
-        token_expansions
+        {**token_expansions, **unit_base_expansions}
         if "expanded_token_and" in active_match_modes
         else {}
     )
@@ -3259,8 +3774,8 @@ def search_ncs(
         candidates_by_type["unit"] = _rerank_ncs_unit_task_ksa_candidates(
             unit_or_candidates[:_NCS_SEARCH_UNIT_RERANK_WINDOW],
             unit_task_ksa_scores,
-            fallback_tokens,
-            token_expansions,
+            unit_terms,
+            unit_base_expansions,
             token_weights,
             compound_subphrase_expansions=unit_compound_expansions,
             normalized=normalized_search,
@@ -3349,7 +3864,7 @@ def search_ncs(
         )
         _ncs_search_match_metadata(
             item,
-            query_tokens=query_tokens,
+            query_tokens=unit_terms if item["type"] == "unit" else query_tokens,
             phrase=phrase,
             match_mode=_NCS_SEARCH_MATCH_MODES[item["_match_tier"]],
             token_expansions=item_token_expansions,
@@ -3376,6 +3891,10 @@ def search_ncs(
         "match_mode_by_type": match_mode_by_type,
         "query_expansions": applied_token_expansions,
         "query_intent_expansions": applied_intent_expansions,
+        **(
+            {"unit_query_terms": {"terms": unit_terms, "resolved_from": unit_term_trace}}
+            if unit_term_trace else {}
+        ),
         "counts_by_type": counts_by_type,
         "has_more_by_type": has_more_by_type,
         "returned": len(page),

@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+- Resolved long practitioner sentences into unit-corpus terms before unit
+  ranking. Unit search used the first four raw words, particles included, so
+  "올해 정원 대비 현원을 분석해서 내년도 인력 운영 계획을 세우려고 합니다"
+  ranked on 올해/정원/대비/현원을 and returned 비상상황 대비 first. Queries
+  longer than four words now drop framing words, resolve each word against a
+  cached word index of unit names and definitions (stems first, unit names
+  before definitions, the tiers' lexical-boundary rule), drop predicates no unit
+  is named after and workflow words such as 작성 when two specific terms remain,
+  and keep up to six terms in query order. A word that matches nothing, at any
+  length, falls back to the head of the closed compound (명예퇴직 -> 퇴직), or
+  for long queries its leading piece (인력풀 -> 인력); `X관리` compounds stay
+  with the alias-validated expander. Words that match no unit field still feed
+  the task/KSA second stage. Element, criterion, and KSA search keep the
+  original four tokens, `query_tokens` is unchanged, and the response reports
+  the terms used as `unit_query_terms`. On a new 50-query long-sentence
+  development set (`ncs_search_eval_nl_dev_long.json`, 6-11 words, HR plus
+  cross-domain controls) Hit@3 went 0.32 -> 0.52 and MRR 0.292 -> 0.507 with
+  no empty results left; the 40-query regression set, the 90-query development
+  set, and holdout v2 keep their Hit@3, and holdout v1 moved 0.647 -> 0.667.
+  Across those five sets 27 queries ranked better and 8 worse, two of them
+  leaving the top three. Measured on the 2026-08 release serving DB with v1
+  normalized columns added, not the canonical DB. Warm p50 is unchanged
+  (146.3 -> 148.7 ms) and p95 rose 179.9 -> 211.7 ms, because five- and
+  six-word queries now require every specific term in the AND tier and more of
+  them reach the OR tier; the first unit search in a process also builds the
+  word index (about 0.3 s for 13,435 units). Holdout v2 now scores Hit@3 1.000
+  before and after this change, so its misses have been absorbed by tuning and
+  it no longer estimates generalization.
+
 - Restored CI, which had failed on every push since 2026-09-12. Builder release
   guards now accept a Windows 8.3 short spelling of the Builder root (GitHub
   runners hand out `C:\Users\RUNNER~1\...`) while still resolving the full
