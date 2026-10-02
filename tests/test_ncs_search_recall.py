@@ -136,6 +136,70 @@ class NcsSearchRecallTests(unittest.TestCase):
         self.assertEqual(result["results"][0]["id"], "U_NORMALIZED_EXACT")
         self.assertEqual(result["results"][0]["text"], "ＡＬＰＨＡ")
 
+    def test_full_official_phrase_keeps_discriminating_tail_with_bounded_fallback(self) -> None:
+        names = ("현장 장비 부품 진단", "현장 장비 부품 진단 결과 분석",
+                 "현장 장비 부품 진단 결과 기록")
+        with self._open_db() as conn:
+            conn.executemany(
+                "INSERT INTO competency_units VALUES (?, ?, '', '4', 1)",
+                [(f"LONG_{index}", name) for index, name in enumerate(names)],
+            )
+            conn.commit()
+        for normalized in (False, True):
+            if normalized:
+                with self._open_db() as conn:
+                    self._add_normalized_columns(conn)
+                    conn.commit()
+            for index in (1, 2):
+                with self.subTest(normalized=normalized, name=names[index]):
+                    result = server.search_ncs(names[index], scope="unit", limit=3)
+                    self.assertEqual(result["normalized_query"], names[index])
+                    self.assertEqual(len(result["query_tokens"]), 4)
+                    self.assertEqual(result["match_mode"], "phrase")
+                    self.assertEqual(result["results"][0]["id"], f"LONG_{index}")
+
+    def test_exact_official_name_precedes_intent_rewrite_with_scope_and_unicode(self) -> None:
+        with self._open_db() as conn:
+            conn.execute("INSERT INTO competency_units VALUES ('LITERAL', 'ＳＥＮＳＯＲ diagnostics', '', '4', 2)")
+            conn.execute("INSERT INTO competency_units VALUES ('HINT', 'control tuning', '', '4', 1)")
+            conn.commit()
+        with patch.dict(search_core._NCS_SEARCH_QUERY_INTENT_EQUIVALENTS,
+                        {"sensor": ("control tuning",)}, clear=True):
+            for normalized in (False, True):
+                if normalized:
+                    with self._open_db() as conn:
+                        self._add_normalized_columns(conn)
+                        conn.commit()
+                with self.subTest(normalized=normalized):
+                    # Legacy boundary LIKE does not handle fullwidth storage;
+                    # verify the same Unicode-aware guard independently there.
+                    with self._open_db() as conn:
+                        search_core._register_ncs_search_udfs(conn)
+                        self.assertTrue(search_core._ncs_search_has_exact_unit_name(
+                            conn, "sensor diagnostics", {}, normalized=normalized))
+                    if normalized:
+                        for limit in (1, 3, 10):
+                            exact = server.search_ncs("sensor diagnostics", scope="unit", limit=limit)
+                            self.assertEqual(exact["results"][0]["id"], "LITERAL")
+                            self.assertEqual(exact["match_mode"], "phrase")
+                            self.assertEqual(exact["query_intent_expansions"], [])
+                    # An exact name in another major must not disable valid
+                    # intent retrieval inside the explicit classification.
+                    scoped = server.search_ncs("sensor diagnostics", scope="unit", limit=3,
+                                               classification_filter={"major_code": "02"})
+                    self.assertEqual(scoped["results"][0]["id"], "HINT")
+                    self.assertEqual(scoped["match_mode"], "intent_alias")
+
+    def test_korean_official_name_does_not_collapse_into_general_intent(self) -> None:
+        with self._open_db() as conn:
+            conn.execute("INSERT INTO competency_units VALUES ('LITERAL_CLUB', '학습동아리 운영', '', '4', 1)")
+            conn.commit()
+        for limit in (1, 3, 10):
+            exact = server.search_ncs("학습동아리 운영", scope="unit", limit=limit)
+            self.assertEqual(exact["results"][0]["id"], "LITERAL_CLUB")
+            self.assertEqual(exact["match_mode"], "phrase")
+            self.assertEqual(exact["query_intent_expansions"], [])
+
     def test_normalized_task_ksa_prefilter_and_boundary(self) -> None:
         with self._open_db() as conn:
             conn.execute("INSERT INTO performance_criteria VALUES (90, ?, NULL, 5)", ("ＡＬＰＨＡ Straße",))
@@ -1649,6 +1713,25 @@ class NcsSearchRecallTests(unittest.TestCase):
 
         self.assertGreater(scores["U_TASK_SIGNAL"], 0.0)
         self.assertEqual(scores["U_NAME_ONLY"], 0.0)
+
+    def test_unit_evidence_ranking_is_stable_across_limits_and_pages(self) -> None:
+        with self._open_db() as conn:
+            conn.executemany(
+                "INSERT INTO competency_units VALUES (?, ?, '', '4', 1)",
+                [(f"WINDOW_{i:02}", f"sensor candidate {i:02}") for i in range(61)],
+            )
+            conn.execute("INSERT INTO competency_elements VALUES (500, 'sensor testing', 'WINDOW_49')")
+            conn.execute("INSERT INTO performance_criteria VALUES (500, 'sensor diagnostics', NULL, 500)")
+            conn.commit()
+        full = server.search_ncs("sensor diagnostics", scope="unit", limit=100)
+        self.assertEqual(full["results"][0]["id"], "WINDOW_49")
+        expected = [row["id"] for row in full["results"]]
+        for limit in (1, 3, 5, 20, 50):
+            for offset in (0, 3, 49, 50, 60):
+                with self.subTest(limit=limit, offset=offset):
+                    page = server.search_ncs("sensor diagnostics", scope="unit", limit=limit, offset=offset)
+                    self.assertEqual([row["id"] for row in page["results"]], expected[offset:offset + limit])
+                    self.assertEqual(page["next_offset"], offset + limit if offset + limit < len(expected) else None)
 
     def test_token_idf_weights_scan_the_corpus_once(self) -> None:
         from ncs_mcp.search import core as search_core

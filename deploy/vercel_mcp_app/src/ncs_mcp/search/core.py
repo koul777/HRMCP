@@ -223,6 +223,9 @@ _NCS_SEARCH_DEFINITION_WEIGHT = 2.0
 # It is deliberately below the unit-name/definition weights so that broad
 # evidence cannot override an exact or token-AND match.
 _NCS_SEARCH_TASK_KSA_WEIGHT = 0.5
+# Rerank a fixed lexical prefix before slicing pages. Using the requested page
+# size here makes limit=3 discard evidence that limit=50 would rank first.
+_NCS_SEARCH_UNIT_RERANK_WINDOW = 50
 # Public-search recall equivalences bridge practitioner language to official NCS
 # names.  They are candidate-only expansions, not source evidence or DB writes.
 _NCS_SEARCH_QUERY_EQUIVALENTS = {
@@ -343,9 +346,10 @@ def _normalize_ncs_search_text(value: Any) -> str:
 def _normalize_ncs_search_query(query: str) -> tuple[str, list[str], list[str]]:
     normalized = _normalize_ncs_search_text(query)
     query_tokens = normalized.split()[:4]
-    phrase = " ".join(query_tokens)
     fallback_tokens = [token for token in query_tokens if len(token) > 1]
-    return phrase, query_tokens, fallback_tokens
+    # Bound the expensive fallback predicates, not the literal phrase. Official
+    # unit names can exceed four tokens and differ only in their final words.
+    return normalized, query_tokens, fallback_tokens
 
 
 def _ncs_search_joined_compound_phrase(
@@ -497,6 +501,7 @@ def _register_ncs_search_udfs(conn: Any) -> None:
     conn.create_function(
         "ncs_search_match_normalized", 2, _ncs_search_boundary_match_normalized
     )
+    conn.create_function("ncs_search_normalize", 1, normalize_search_text)
 
 
 def _has_normalized_search_columns(conn: Any) -> bool:
@@ -1504,6 +1509,30 @@ def _ncs_search_intent_expansions(phrase: str) -> list[str]:
     return expansions
 
 
+def _ncs_search_has_exact_unit_name(
+    conn: Any,
+    phrase: str,
+    classification_filter: dict[str, str],
+    *,
+    normalized: bool | str = False,
+) -> bool:
+    """Keep a scoped official name ahead of practitioner-language rewrites."""
+    name_column = _ncs_search_column("cu.unit_name_raw", normalized)
+    if not normalized:
+        name_column = f"ncs_search_normalize({name_column})"
+    clause, params = _ncs_classification_filter_sql(
+        classification_filter, normalized=normalized
+    )
+    params["literal_name"] = normalize_search_text(phrase)
+    return conn.execute(
+        "SELECT 1 FROM competency_units cu JOIN classifications c "
+        "ON c.classification_id = cu.classification_id "
+        f"WHERE {name_column} = :literal_name"
+        + (f" AND {clause}" if clause else "") + " LIMIT 1",
+        params,
+    ).fetchone() is not None
+
+
 def _escape_ncs_search_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
@@ -2360,6 +2389,11 @@ def _execute_ncs_search_tiers(
         params = dict(tier_params)
         params.update(base_params)
         params["match_tier"] = match_tier
+        if match_tier == 3:
+            params["candidate_limit"] = max(
+                base_params["candidate_limit"],
+                base_params.get("rerank_candidate_limit", 0),
+            )
         if original_rows:
             params["candidate_limit"] -= len(original_rows)
         rows = conn.execute(
@@ -2729,8 +2763,8 @@ def search_ncs(
         context_text=context_text,
         job_scope=job_scope,
     )
-    # Intent hints scan the full normalized query, not the 4-token retrieval
-    # phrase. Practitioner language often lands after rank-critical tokens.
+    # Practitioner hints inspect the full query, including words outside the
+    # bounded fallback tokens.
     intent_expansions = _ncs_search_intent_expansions(
         _normalize_ncs_search_text(query)
     )
@@ -2771,6 +2805,7 @@ def search_ncs(
         }
 
     candidate_limit = applied_offset + max_rows + 1
+    unit_candidate_limit = max(candidate_limit, _NCS_SEARCH_UNIT_RERANK_WINDOW + 1)
     raw_candidates: dict[str, list[dict[str, Any]]] = {
         item_type: [] for item_type in requested_types
     }
@@ -2785,6 +2820,15 @@ def search_ncs(
             classification_filter=classification_filter,
         )
         normalized_search = _normalized_search_storage(conn)
+        if (
+            "unit" in requested_types
+            and intent_expansions
+            and _ncs_search_has_exact_unit_name(
+                conn, phrase, normalized_classification_filter,
+                normalized=normalized_search,
+            )
+        ):
+            intent_expansions = []
         lexical_prefix_available = (
             _compact_lexical_prefix_available(conn, normalized_search)
             if any(kind in requested_types for kind in ("criteria", "ksa")) else False
@@ -2958,6 +3002,7 @@ def search_ncs(
                     ),
                     "order_phrase_pattern": f"%{_escape_ncs_search_like(order_phrase)}%",
                     "candidate_limit": candidate_limit,
+                    "rerank_candidate_limit": unit_candidate_limit,
                 },
             )
             for row in rows:
@@ -2993,7 +3038,7 @@ def search_ncs(
             if selected_unit_tier == 3:
                 unit_task_ksa_scores = _ncs_search_unit_task_ksa_scores(
                     conn,
-                    [item["id"] for item in raw_candidates["unit"] if item["_match_tier"] == 3],
+                    [item["id"] for item in raw_candidates["unit"] if item["_match_tier"] == 3][:_NCS_SEARCH_UNIT_RERANK_WINDOW],
                     fallback_tokens,
                     token_weights,
                     normalized=normalized_search,
@@ -3208,15 +3253,20 @@ def search_ncs(
     )
     candidates_by_type = {item_type: list(rows) for item_type, rows in raw_candidates.items()}
     if selected_tier_by_type.get("unit") == 3 and unit_task_ksa_scores:
+        unit_or_candidates = [
+            item for item in candidates_by_type["unit"] if item["_match_tier"] == 3
+        ]
         candidates_by_type["unit"] = _rerank_ncs_unit_task_ksa_candidates(
-            [item for item in candidates_by_type["unit"] if item["_match_tier"] == 3],
+            unit_or_candidates[:_NCS_SEARCH_UNIT_RERANK_WINDOW],
             unit_task_ksa_scores,
             fallback_tokens,
             token_expansions,
             token_weights,
             compound_subphrase_expansions=unit_compound_expansions,
             normalized=normalized_search,
-        ) + [item for item in candidates_by_type["unit"] if item["_match_tier"] == 4]
+        ) + unit_or_candidates[_NCS_SEARCH_UNIT_RERANK_WINDOW:] + [
+            item for item in candidates_by_type["unit"] if item["_match_tier"] == 4
+        ]
     if search_context.get("status") == "not_provided":
         search_context["needs_context"] = _ncs_search_needs_context(
             candidates_by_type,
@@ -3276,7 +3326,10 @@ def search_ncs(
         selected_tier = selected_tier_by_type[item_type]
         may_have_more_selected = bool(
             selected_tier is not None
-            and len(fetched) == candidate_limit
+            and len(fetched) == (
+                unit_candidate_limit if item_type == "unit" and selected_tier == 3
+                else candidate_limit
+            )
             and fetched
         )
         has_more_by_type[item_type] = (

@@ -19,6 +19,31 @@ when legacy/reference table counts are needed.
 
 ## Query Performance Comparisons
 
+### Source self-retrieval accuracy
+
+`scripts/audit_ncs_exact_lookup.py` checks official unit names or codes against
+the read-only source DB across every NCS major. Identical official names accept
+all corresponding unit codes. By default every distinct query is measured;
+`--per-major-limit` selects a deterministic sample across the full vocabulary.
+
+```powershell
+python scripts\audit_ncs_exact_lookup.py --db <snapshot.db> --out reports\ncs_exact_names.json --fail-on-miss
+python scripts\audit_ncs_exact_lookup.py --db <snapshot.db> --kind code --per-major-limit 10 --out reports\ncs_exact_codes.json --fail-on-miss
+python scripts\audit_ncs_exact_lookup.py --db <snapshot.db> --variant nfd --per-major-limit 10 --out reports\ncs_exact_unicode.json --fail-on-miss
+```
+
+The report records per-major Hit@1/Hit@3/MRR, returned source identifiers,
+runtime identity, and source-file stability. This is a structural lookup check,
+not human-validated semantic relevance. Keep natural-language development and
+independent holdout evaluation separate. Test small result limits as well as
+the default: token-OR unit ranking now compares a fixed prefix of 50 lexical
+candidates before pagination, so requesting three rows does not discard the
+task/KSA evidence used to rank the first row. Candidates beyond that prefix
+retain lexical order. Exact phrases and stronger lexical tiers retain their
+original retrieval bounds.
+
+### Latency and response comparisons
+
 `scripts/benchmark_ncs_code_ab.py` runs two frozen source trees in separate
 processes against one read-only DB, alternating AB/BA calls. Cases are a JSON
 list with `id`, `workload` (`search` or `scope`), and tool `params`.
