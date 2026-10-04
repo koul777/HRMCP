@@ -42,6 +42,37 @@ task/KSA evidence used to rank the first row. Candidates beyond that prefix
 retain lexical order. Exact phrases and stronger lexical tiers retain their
 original retrieval bounds.
 
+### Conversational request framing
+
+Search recognizes complete Korean lookup requests such as
+`NCS 기준으로 다음 직무를 찾아줘: <subject>` and
+`<subject>에 필요한 지식과 기술을 알려줘`. Request framing is removed before
+the bounded fallback tokens are selected, so introductory words cannot hide
+the actual subject. The input remains in `query`; `normalized_query` exposes
+the effective subject. Subject qualifiers, classification filters, source
+evidence, ranking and pagination still use the existing search path. This is
+anchored request parsing, not global deletion of words such as 기술 or 지식.
+Incomplete or unrecognized requests retain their original search text.
+
+Use the source lookup audit to check all-major prompt containment with the
+same official names/codes and deterministic samples as literal lookup:
+
+```powershell
+python scripts\audit_ncs_exact_lookup.py --db <snapshot.db> --per-major-limit 10 --prompt-template all --out reports\ncs_prompt_lookup.json --fail-on-miss
+```
+
+`--prompt-template` can be repeated to choose individual request frames.
+`--source-root` selects a frozen baseline source tree for comparison. Reports
+can use `--surface public` to exercise `ncs_search` routing and scope guards as
+well as the search core; validation errors count as misses. The router treats
+the standard name 국가직무능력표준 as a standard reference, not a job named 국가.
+An actual request such as `인사 직무에 필요한 역량` still binds its job scope.
+Reports
+include per-template and per-major results, source identifiers, and runtime/DB
+stability. These synthetic request-framing checks do not establish independent
+natural-language relevance or human approval. Evaluate development questions
+separately and retain the holdout review/freeze contract.
+
 ### Latency and response comparisons
 
 `scripts/benchmark_ncs_code_ab.py` runs two frozen source trees in separate

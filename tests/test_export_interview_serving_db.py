@@ -1715,6 +1715,12 @@ class ExportVercelOntologyCompactDatabaseTests(
             self.assertEqual("verified_equal", manifest["raw_ksa_parity_status"])
             for key, value in serving_export.PREFIX_FTS_REQUIRED_MANIFEST.items():
                 self.assertEqual(value, manifest[key])
+            for key, value in serving_export.CONCEPT_MASK_REQUIRED_MANIFEST.items():
+                self.assertEqual(value, manifest[key])
+            concept_ids = [row[0] for row in dst.execute("SELECT concept_id FROM ontology_concepts ORDER BY concept_id")]
+            mask_ids = [row[0] for row in dst.execute("SELECT concept_id FROM ontology_concept_masks ORDER BY concept_id")]
+            self.assertEqual(concept_ids, mask_ids)
+            self.assertEqual(str(len(concept_ids)), manifest["concept_mask_rows"])
             self.assertNotIn("ksa_search_fts_schema", manifest)
             prefix_counts = json.loads(manifest["lexical_prefix_fts_rows"])
             for table, source_table in (("ksa_prefix_fts", "ksa_items"),

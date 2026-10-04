@@ -9,6 +9,7 @@ from typing import Any
 from ncs_mcp.query_router import (
     NCS_SEARCH_CONTEXT_RESOLVER_VERSION,
     NCS_SEARCH_CONTEXT_SCHEMA,
+    _strip_ncs_standard_request_prefix,
     normalize_search_context_inputs,
     search_context_request_contract,
 )
@@ -343,8 +344,72 @@ def _normalize_ncs_search_text(value: Any) -> str:
     return re.sub(r"\s+", " ", "".join(normalized)).strip()
 
 
+_NCS_SEARCH_REQUEST_VERB = (
+    r"(?:찾아|알려|보여|검색해|조회해|설명해|정리해)\s*(?:줘요?|주세요|주십시오)"
+)
+_NCS_SEARCH_EVIDENCE_NOUN = (
+    r"(?:수행\s*준거|능력\s*단위\s*요소|능력\s*단위|지식|기술|태도|KSA)"
+    r"(?:\s*\([KSA]\))?"
+)
+_NCS_SEARCH_REQUEST_FRONT = re.compile(
+    rf"(?:다음\s+)?(?:직무|업무|과업|능력단위)(?:를|을)?\s*"
+    rf"{_NCS_SEARCH_REQUEST_VERB}\s*[:：]\s*(?P<subject>.+)", re.IGNORECASE,
+)
+_NCS_SEARCH_REQUEST_END = re.compile(rf"{_NCS_SEARCH_REQUEST_VERB}$", re.IGNORECASE)
+_NCS_SEARCH_REQUEST_TAILS = tuple(re.compile(pattern, re.IGNORECASE) for pattern in (
+    rf"(?P<subject>.+?)(?:에\s*(?:대한|필요한)|에서\s*필요한|의|\s+관련)\s*"
+    rf"{_NCS_SEARCH_EVIDENCE_NOUN}"
+    rf"(?:(?:\s*(?:과|와|및|,|·|/)\s*|\s+){_NCS_SEARCH_EVIDENCE_NOUN})*"
+    rf"(?:를|을)?\s*{_NCS_SEARCH_REQUEST_VERB}",
+    rf"(?P<subject>.+?)에\s*(?:대해(?:서)?|관해(?:서)?)\s*{_NCS_SEARCH_REQUEST_VERB}",
+    rf"(?P<subject>.+?)\s+{_NCS_SEARCH_REQUEST_VERB}",
+))
+
+
+def _ncs_search_prompt_subject(query: str) -> str:
+    """Remove explicit request framing, never arbitrary domain stopwords.
+
+    A full conversational prefix must not consume the four-token fallback
+    budget before the actual subject. Only complete, anchored requests are
+    recognized. Keep all subject qualifiers, alternatives and negations;
+    classification filters still apply independently. No domain aliases or
+    relevance labels are introduced. The public ``query`` retains the input,
+    and ``normalized_query`` exposes the effective search subject.
+    """
+    original = unicodedata.normalize("NFKC", str(query or "")).strip()
+    text = re.sub(r"\s+", " ", original).rstrip(".!?。！？ ")
+    without_intro = _strip_ncs_standard_request_prefix(text)
+    front = _NCS_SEARCH_REQUEST_FRONT.fullmatch(without_intro)
+    subject = front.group("subject") if front else None
+    if subject is None:
+        if not _NCS_SEARCH_REQUEST_END.search(text):
+            return original
+        for pattern in _NCS_SEARCH_REQUEST_TAILS:
+            match = pattern.fullmatch(text)
+            if match:
+                subject = match.group("subject")
+                break
+    if subject is None:
+        return original
+    subject = _strip_ncs_standard_request_prefix(subject)
+    subject = re.sub(
+        r"^우리\s+(?:회사|조직)에서\s*수행하는\s*(?:업무|직무|과업)\s*중\s+",
+        "", subject, count=1,
+    ).strip()
+    if len(subject) >= 2 and (subject[0], subject[-1]) in (
+        ('"', '"'), ("'", "'"), ("“", "”"), ("‘", "’"),
+    ):
+        subject = subject[1:-1].strip()
+    # Incomplete requests contain no independently specified search subject.
+    if not subject or re.fullmatch(
+        rf"(?:{_NCS_SEARCH_EVIDENCE_NOUN}|직무|업무|과업)(?:를|을)?", subject, re.IGNORECASE,
+    ):
+        return original
+    return subject
+
+
 def _normalize_ncs_search_query(query: str) -> tuple[str, list[str], list[str]]:
-    normalized = _normalize_ncs_search_text(query)
+    normalized = _normalize_ncs_search_text(_ncs_search_prompt_subject(query))
     query_tokens = normalized.split()[:4]
     fallback_tokens = [token for token in query_tokens if len(token) > 1]
     # Bound the expensive fallback predicates, not the literal phrase. Official

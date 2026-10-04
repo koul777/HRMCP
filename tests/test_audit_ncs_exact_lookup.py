@@ -58,6 +58,26 @@ class ExactLookupAuditTests(unittest.TestCase):
         self.assertEqual(metrics["hit_at_3"], 0.5)
         self.assertAlmostEqual(metrics["mrr"], 1 / 6)
 
+    def test_public_scope_error_is_a_miss_not_a_success_or_a_crash(self):
+        cases = audit.build_cases([("A", "name", "01")])
+        results = audit.evaluate(cases, lambda *a, **kw: {
+            "ok": False, "error": {"code": "route_context_required"},
+        })
+        self.assertIsNone(results[0]["rank"])
+        self.assertEqual(results[0]["error_code"], "route_context_required")
+        self.assertEqual(audit.aggregate(results)["overall"]["hit_at_3"], 0)
+
+    def test_prompt_frames_preserve_all_expected_source_identifiers(self):
+        cases = audit.build_cases([("A", "장비 진단", "01"), ("B", "장비 진단", "24")])
+        wrapped = audit.with_prompt_templates(cases, ("prefix", "evidence"))
+        self.assertEqual(len(wrapped), 2)
+        self.assertEqual(cases[0]["query"], "장비 진단")
+        self.assertEqual(wrapped[0]["query"], "NCS 기준으로 다음 직무를 찾아줘: 장비 진단")
+        for case in wrapped:
+            self.assertEqual(case["source_query"], "장비 진단")
+            self.assertEqual(case["expected"], ["A", "B"])
+            self.assertEqual(case["majors"], ["01", "24"])
+
 
 if __name__ == "__main__":
     unittest.main()

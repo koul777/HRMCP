@@ -15,6 +15,15 @@ import unicodedata
 
 
 ROOT = Path(__file__).resolve().parents[1]
+PROMPT_TEMPLATES = {
+    "literal": "{query}",
+    "prefix": "NCS 기준으로 다음 직무를 찾아줘: {query}",
+    "evidence": "{query}에 필요한 지식과 기술을 알려줘",
+    "organization": "우리 회사에서 수행하는 업무 중 {query}에 대한 수행준거를 찾아줘",
+    "polite": "{query}의 능력단위요소와 수행준거를 알려 주세요.",
+    "standard": "국가직무능력표준에 따라 {query}에 대해 설명해주세요",
+    "quoted": '다음 과업을 검색해 주세요: "{query}"',
+}
 
 
 def validate_output_path(output: Path, db: Path) -> Path:
@@ -57,13 +66,28 @@ def evaluate(cases, search, *, limit=3):
     for index, case in enumerate(cases, 1):
         started = time.perf_counter()
         payload = search(case["query"], scope="unit", limit=limit)
-        top = [{"id": row["id"], "text": row["text"]} for row in payload["results"]]
+        top = [{"id": row["id"], "text": row["text"]} for row in payload.get("results", [])]
         rank = next((i for i, row in enumerate(top, 1) if str(row["id"]) in case["expected"]), None)
+        error = payload.get("error") or {}
         results.append({**case, "rank": rank, "match_mode": payload.get("match_mode"),
+                        "error_code": error.get("code") if isinstance(error, dict) else "search_error",
                         "elapsed_ms": round((time.perf_counter() - started) * 1000, 3), "top": top})
         if index % 500 == 0:
             print(json.dumps({"completed": index, "cases": len(cases)}, ensure_ascii=False), flush=True)
     return results
+
+
+def with_prompt_templates(cases, templates):
+    """Wrap source queries without changing their authoritative identifiers.
+
+    These are synthetic request-framing checks, not human relevance labels or
+    independent natural-language holdout questions.
+    """
+    return [
+        {**case, "source_query": case["query"], "prompt_template": template,
+         "query": PROMPT_TEMPLATES[template].format(query=case["query"])}
+        for case in cases for template in templates
+    ]
 
 
 def aggregate(results):
@@ -85,11 +109,15 @@ def main():
     parser.add_argument("--db", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--source-root", type=Path, default=ROOT / "src")
+    parser.add_argument("--surface", choices=("core", "public"), default="core",
+                        help="Public also exercises routing, job-scope inference, and the tool guard")
     parser.add_argument("--kind", choices=("name", "code"), default="name")
     parser.add_argument("--variant", choices=("raw", "nfd"), default="raw")
     parser.add_argument("--per-major-limit", type=int, default=0, help="0 audits every distinct source query")
     parser.add_argument("--limit", type=int, default=3)
     parser.add_argument("--fail-on-miss", action="store_true")
+    parser.add_argument("--prompt-template", action="append", choices=(*PROMPT_TEMPLATES, "all"),
+                        help="Repeat for synthetic request frames; default is an unwrapped source query")
     args = parser.parse_args()
     if args.per_major_limit < 0 or not 3 <= args.limit <= 100:
         parser.error("per-major-limit must be nonnegative and limit must be 3..100")
@@ -109,24 +137,40 @@ def main():
     if not rows:
         parser.error("source database has no units")
     cases = build_cases(rows, kind=args.kind, variant=args.variant, per_major_limit=args.per_major_limit)
+    templates = (list(PROMPT_TEMPLATES) if "all" in (args.prompt_template or [])
+                 else list(dict.fromkeys(args.prompt_template or [])))
+    if templates:
+        cases = with_prompt_templates(cases, templates)
     source = args.source_root.resolve(strict=True)
     core_path = source / "ncs_mcp/search/core.py"
     core_before = hashlib.sha256(core_path.read_bytes()).hexdigest()
+    router_path = source / "ncs_mcp/query_router.py"
+    router_before = hashlib.sha256(router_path.read_bytes()).hexdigest()
     sys.path.insert(0, str(source))
     os.environ["NCS_DB_PATH"] = str(db)
     os.environ["NCS_MCP_READ_ONLY"] = "1"
     os.environ["NCS_MCP_ENABLE_OPERATOR_TOOLS"] = "0"
     from ncs_mcp import server
-    results = evaluate(cases, server.search_ncs, limit=args.limit)
+    search = server.ncs_search if args.surface == "public" else server.search_ncs
+    results = evaluate(cases, search, limit=args.limit)
     metrics = aggregate(results)
+    if templates:
+        metrics["by_prompt_template"] = {
+            template: aggregate([row for row in results if row["prompt_template"] == template])["overall"]
+            for template in templates
+        }
     unchanged = (db.stat().st_size, db.stat().st_mtime_ns) == db_before
-    runtime_unchanged = hashlib.sha256(core_path.read_bytes()).hexdigest() == core_before
+    runtime_unchanged = (hashlib.sha256(core_path.read_bytes()).hexdigest() == core_before
+                         and hashlib.sha256(router_path.read_bytes()).hexdigest() == router_before)
     report = {"schema": "ncs_exact_lookup_audit_v1", "generated_at": datetime.now(UTC).isoformat(),
-              "evidence_kind": "source_self_retrieval_not_semantic_gold", "db_writes": False,
+              "evidence_kind": ("synthetic_source_request_framing_not_semantic_gold" if templates
+                                else "source_self_retrieval_not_semantic_gold"), "db_writes": False,
               "human_approval_claim": False, "source": {"db": str(db), "units": len(rows),
               "db_bytes": db_before[0], "db_mtime_ns": db_before[1], "db_unchanged_during_run": unchanged,
-              "runtime": str(source), "search_core_sha256": core_before, "runtime_unchanged_during_run": runtime_unchanged},
-              "parameters": {"kind": args.kind, "variant": args.variant, "per_major_limit": args.per_major_limit, "limit": args.limit},
+              "runtime": str(source), "search_core_sha256": core_before, "query_router_sha256": router_before,
+              "runtime_unchanged_during_run": runtime_unchanged},
+              "parameters": {"kind": args.kind, "variant": args.variant, "per_major_limit": args.per_major_limit,
+                             "limit": args.limit, "surface": args.surface, "prompt_templates": templates},
               **metrics, "cases": results}
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
