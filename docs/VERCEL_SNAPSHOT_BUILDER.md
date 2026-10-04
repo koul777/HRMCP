@@ -86,6 +86,22 @@ instead. Verify behavior with complete read-only response parity. Creating a
 local diagnostic index/ZIP does not create a Builder release or authorize
 publication.
 
+New compact builds also include `ontology_concept_masks`, a candidate-only
+index for scope resolution's concept substring search. Each concept stores a
+47-bit mask of adjacent character pairs from its actual `concept_name` and
+`normalized_key`. Fixed ASCII case folding and CRC32 keep the format portable
+across Python Unicode versions. The Builder verifies complete concept-ID
+coverage before publishing the `concept_mask_*` attestation and row count.
+
+Runtime requires the matching manifest, table schema and native SQLite LIKE.
+It falls back to the original scan for old/incompatible snapshots, custom LIKE
+implementations, or an OR branch without a two-character literal run. SQL
+wildcards and NUL termination retain native LIKE semantics. The final LIKE
+predicates, concept-ID order and 2,000-row limit are unchanged; mask collisions
+can add candidates but never establish evidence or relevance. This is a derived
+index, with no concept-definition or review-status changes. Its actual bytes
+remain subject to the same compact snapshot and function-bundle size gates.
+
 For a local search latency and response-parity check between two compact DBs
 from the same Builder source, run:
 

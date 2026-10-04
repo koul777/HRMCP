@@ -307,6 +307,8 @@ class NcsQueryRouterTests(unittest.TestCase):
             ("인사 직무에 필요한 역량을 알려줘.", "인사"),
             ("NCSMCP로 인사 직무에 필요한 역량을 알려줘.", "인사"),
             ("NCS MCP로 사회복지 업무에 필요한 역량을 알려줘.", "사회복지"),
+            ("국가직무능력표준에 따라 인사 직무에 필요한 역량을 알려줘.", "인사"),
+            ("NCS 기준으로 사회복지 업무에서 요구되는 능력을 알려줘.", "사회복지"),
         )
 
         for query, expected_scope in cases:
@@ -314,6 +316,19 @@ class NcsQueryRouterTests(unittest.TestCase):
                 route = route_ncs_query(query)
                 self.assertEqual(route["params"]["query"], expected_scope)
                 self.assertEqual(route["params"]["job_scope"], expected_scope)
+
+    def test_compound_standard_name_is_not_an_explicit_job_scope(self) -> None:
+        for query in (
+            "국가직무능력표준에 따라 인력채용에 대해 설명해주세요",
+            "국가직무능력표준 검색", "국가 직무능력표준 조회",
+            "국가직무능력표준을 알려줘", "인사 직무능력평가 기준 검색",
+        ):
+            with self.subTest(query=query):
+                route = route_ncs_query(query)
+                self.assertNotIn("job_scope", route["params"])
+                self.assertNotEqual(
+                    route["classification_context"].get("source"), "explicit_query_job_scope",
+                )
 
     def test_job_and_work_marker_particles_preserve_explicit_scope(self) -> None:
         cases = (

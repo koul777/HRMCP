@@ -1172,6 +1172,17 @@ def _classification_context_contract(
     }
 
 
+_NCS_STANDARD_REQUEST_PREFIX_RE = re.compile(
+    r"^(?:NCS|국가직무능력표준)\s*"
+    r"(?:기준으로|기반으로|에\s*따라|에서|를\s*기준으로)\s+", re.IGNORECASE,
+)
+
+
+def _strip_ncs_standard_request_prefix(text: str) -> str:
+    """Share the explicit standard-reference prefix between routing and search."""
+    return _NCS_STANDARD_REQUEST_PREFIX_RE.sub("", text, count=1)
+
+
 _EXPLICIT_JOB_SCOPE_REQUEST_RE = re.compile(
     r"(?:^|[\s,:])"
     r"(?:@?NCS\s*MCP(?:로|에서|를|에게)?\s*)?"
@@ -1179,7 +1190,8 @@ _EXPLICIT_JOB_SCOPE_REQUEST_RE = re.compile(
     r"(?:\s+[가-힣A-Za-z0-9][가-힣A-Za-z0-9·&/+.-]*){0,3}?)"
     r"\s*(?P<marker>직무|업무)\s*"
     r"(?:(?:에서|에|의)\s*)?(?:필요(?:한)?|요구(?:되는)?)?\s*"
-    r"(?:역량|능력|KSA)",
+    r"(?:역량|능력|KSA)(?:으로|을|를|의|에|과|와|은|는|이|가|로)?"
+    r"(?![가-힣A-Za-z0-9])",
     flags=re.IGNORECASE,
 )
 
@@ -1195,7 +1207,9 @@ def _extract_explicit_job_scope_request(query: Any) -> dict[str, Any] | None:
     value such as ``인사`` is therefore never special-cased here, and a bare
     task such as ``인사하기`` remains an unscoped lexical query.
     """
-    text = unicodedata.normalize("NFKC", str(query or ""))
+    text = _strip_ncs_standard_request_prefix(
+        unicodedata.normalize("NFKC", str(query or "")).strip()
+    )
     match = _EXPLICIT_JOB_SCOPE_REQUEST_RE.search(text)
     if not match:
         return None

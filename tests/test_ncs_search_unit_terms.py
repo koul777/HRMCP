@@ -159,6 +159,18 @@ class NcsSearchUnitTermTests(unittest.TestCase):
         self.assertEqual([row["id"] for row in result["results"]], ["HR_RETIRE"])
         self.assertEqual(result["unit_query_terms"]["terms"], ["퇴직"])
 
+    def test_request_framing_preserves_long_query_unit_term_selection(self) -> None:
+        subject = "올해 정원 대비 현원을 분석해서 내년도 인력 운영 계획을 세우려고 합니다"
+        prompt = f"NCS 기준으로 다음 직무를 찾아줘: {subject}"
+        bare = server.ncs_search(subject, scope="unit", limit=3)
+        framed = server.ncs_search(prompt, scope="unit", limit=3)
+        self.assertEqual(framed["query"], prompt)
+        self.assertEqual(framed["normalized_query"], bare["normalized_query"])
+        self.assertEqual(framed["unit_query_terms"], bare["unit_query_terms"])
+        self.assertEqual([row["id"] for row in framed["results"]],
+                         [row["id"] for row in bare["results"]])
+        self.assertEqual(framed["results"][0]["id"], "HR_PLAN")
+
     def test_short_query_with_present_tokens_is_unchanged(self) -> None:
         result = server.search_ncs("인사기획", scope="unit", limit=5)
 

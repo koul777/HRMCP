@@ -82,6 +82,85 @@ class NcsSearchRecallTests(unittest.TestCase):
             with self.subTest(raw=raw):
                 self.assertEqual(normalize_search_text(raw), expected)
 
+    def test_search_request_frames_keep_subject_and_all_source_evidence(self) -> None:
+        with self._open_db() as conn:
+            conn.execute("INSERT INTO competency_elements VALUES (9001, '데이터분석', 'U_EXACT')")
+            conn.execute("INSERT INTO performance_criteria VALUES (9001, '데이터분석', NULL, 9001)")
+            conn.execute("INSERT INTO ksa_items VALUES (9001, 'knowledge', '데이터분석', NULL, 9001)")
+            conn.commit()
+        templates = (
+            "NCS 기준으로 다음 직무를 찾아줘: {subject}",
+            "우리 회사에서 수행하는 업무 중 {subject}에 대한 수행준거를 찾아줘",
+            "{subject}에 필요한 지식과 기술을 알려줘",
+            "{subject}의 능력단위요소와 수행준거를 알려 주세요.",
+            "국가직무능력표준에 따라 {subject}에 대해 설명해주세요",
+            "다음 과업을 검색해 주세요: {subject}",
+            "{subject} 관련 KSA를 보여줘",
+        )
+        for normalized in (False, True):
+            if normalized:
+                with self._open_db() as conn:
+                    self._add_normalized_columns(conn)
+                    conn.commit()
+            for scope in ("unit", "element", "criteria", "ksa", "all"):
+                expected = server.search_ncs("데이터분석", scope=scope, limit=5)
+                self.assertTrue(expected["results"])
+                for template in templates:
+                    query = template.format(subject="데이터분석")
+                    with self.subTest(normalized=normalized, scope=scope, query=query):
+                        actual = server.search_ncs(query, scope=scope, limit=5)
+                        self.assertEqual(actual["query"], query)
+                        self.assertEqual(actual["normalized_query"], "데이터분석")
+                        self.assertEqual(actual["results"], expected["results"])
+                        self.assertEqual(actual["query_tokens"], expected["query_tokens"])
+                        public = server.ncs_search(query, scope=scope, limit=5)
+                        self.assertTrue(public["ok"], public.get("error"))
+                        self.assertEqual(public["results"], expected["results"])
+
+    def test_prompt_subject_preserves_exact_codes_and_long_official_names(self) -> None:
+        long_name = "장비 진단 측정 결과 보고서 작성"
+        with self._open_db() as conn:
+            conn.execute("INSERT INTO competency_units VALUES ('U_LONG_PROMPT', ?, '', '4', 1)",
+                         (long_name,))
+            conn.commit()
+        for subject, expected_code in (("U_EXACT", "U_EXACT"), (long_name, "U_LONG_PROMPT")):
+            query = f"NCS 기준으로 다음 직무를 찾아줘: {subject}"
+            with self.subTest(subject=subject):
+                result = server.ncs_search(query, scope="unit", limit=3)
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["results"][0]["id"], expected_code)
+                self.assertEqual(result["normalized_query"], subject)
+
+    def test_prompt_subject_preserves_qualifiers_filters_and_pagination(self) -> None:
+        subject = "인사 데이터분석"
+        query = f"NCS 기준으로 다음 직무를 찾아줘: {subject}"
+        for scope_filter in ({"major_code": "02"}, {"major_code": "15"}):
+            for offset in (0, 1, 10):
+                params = dict(scope="unit", limit=3, offset=offset,
+                              classification_filter=scope_filter)
+                with self.subTest(scope_filter=scope_filter, offset=offset):
+                    expected = server.search_ncs(subject, **params)
+                    actual = server.search_ncs(query, **params)
+                    for key in ("results", "next_offset", "has_more_by_type",
+                                "classification_filter", "classification_scope_invariant"):
+                        self.assertEqual(actual.get(key), expected.get(key))
+
+    def test_request_normalization_does_not_strip_domain_words_or_incomplete_commands(self) -> None:
+        unchanged = (
+            "데이터분석 지식 기술 태도", "지식재산 기술이전 관리",
+            "금형 설계에 필요한 재료 선정", "우리 회사 인력 운영계획 수립",
+            "NCS 기준으로", "직무를 찾아줘", "수행준거를 알려줘",
+            "채용을 제외하고 인사기획", "회계 및 용접 비교",
+        )
+        for query in unchanged:
+            with self.subTest(query=query):
+                self.assertEqual(search_core._normalize_ncs_search_query(query)[0], query)
+        subject = "금형 설계에 필요한 재료 선정"
+        self.assertEqual(
+            search_core._normalize_ncs_search_query(f"{subject}에 대한 수행준거를 알려줘")[0],
+            subject,
+        )
+
     def test_normalized_search_recovers_unicode_in_all_text_scopes(self) -> None:
         cases = (
             ("ＡＬＰＨＡ ＢＥＴＡ", "alpha beta"),

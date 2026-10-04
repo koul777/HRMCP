@@ -12,6 +12,7 @@ from ncs_mcp.career_path import career_paths_for_units
 # Public training search must treat a user's % or _ as literal text, the same
 # way ncs_search does, instead of as LIKE wildcards.
 from ncs_mcp.search.core import _escape_ncs_search_like as _escape_like
+from ncs_mcp.search.concept_index import CONCEPT_MASK_TABLE, compatible_concept_masks
 from ncs_mcp.compact_postings import (
     criteria_concept_ids,
     has_compact_criteria_postings,
@@ -2353,17 +2354,30 @@ def resolve_ncs_query_scope(
                 }
             )
     concept_query_key = normalize_concept_key(text)
-    concept_rows = conn.execute(
-        """
+    concept_patterns = (f"%{concept_query_key}%", f"%{text}%")
+    concept_masks = compatible_concept_masks(conn, concept_patterns)
+    if concept_masks is None:
+        concept_sql = """
         SELECT concept_id, concept_name, concept_type, definition_status, review_status
         FROM ontology_concepts
         WHERE normalized_key LIKE ?
            OR concept_name LIKE ?
         ORDER BY concept_id
         LIMIT 2000
-        """,
-        (f"%{concept_query_key}%", f"%{text}%"),
-    ).fetchall()
+        """
+        concept_params = concept_patterns
+    else:
+        mask_sql = " OR ".join("(m.mask & ?) = ?" for _ in concept_masks)
+        concept_sql = f"""
+        SELECT oc.concept_id, oc.concept_name, oc.concept_type, oc.definition_status, oc.review_status
+        FROM {CONCEPT_MASK_TABLE} m
+        CROSS JOIN ontology_concepts oc ON oc.concept_id = m.concept_id
+        WHERE ({mask_sql}) AND (oc.normalized_key LIKE ? OR oc.concept_name LIKE ?)
+        ORDER BY m.concept_id
+        LIMIT 2000
+        """
+        concept_params = (*[value for mask in concept_masks for value in (mask, mask)], *concept_patterns)
+    concept_rows = conn.execute(concept_sql, concept_params).fetchall()
     for row in concept_rows:
         rowd = dict(row)
         score = _candidate_score(rowd.get("concept_name") or "", text, query_key=query_key)

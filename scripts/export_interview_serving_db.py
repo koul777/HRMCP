@@ -58,6 +58,11 @@ from ncs_mcp.search.prefix_index import (  # noqa: E402
     PREFIX_FTS_SCHEMA,
     prefix_fts_document,
 )
+from ncs_mcp.search.concept_index import (  # noqa: E402
+    CONCEPT_MASK_REQUIRED_MANIFEST,
+    CONCEPT_MASK_SCHEMA,
+    create_concept_mask_index,
+)
 from ncs_mcp.builder_authorization import BuilderOperationContext  # noqa: E402
 from ncs_mcp.builder_release import package_guard  # noqa: E402
 
@@ -1565,6 +1570,7 @@ def _export_vercel_ontology_compact(
         empty_compatibility_tables.append("ncs_query_aliases")
     _add_compact_search_normalization_columns(dst)
     prefix_fts_rows = _create_compact_lexical_prefix_fts(dst)
+    concept_mask_rows = create_concept_mask_index(dst)
 
     relation_posting_counts, relation_edge_count = (
         _create_ontology_relation_postings(dst)
@@ -1658,6 +1664,8 @@ def _export_vercel_ontology_compact(
             ),
             *PREFIX_FTS_REQUIRED_MANIFEST.items(),
             ("lexical_prefix_fts_rows", json.dumps(prefix_fts_rows, sort_keys=True)),
+            *CONCEPT_MASK_REQUIRED_MANIFEST.items(),
+            ("concept_mask_rows", str(concept_mask_rows)),
         ),
     )
 
@@ -1768,6 +1776,8 @@ def _export_vercel_ontology_compact(
             "search_normalization_storage": SEARCH_NORMALIZATION_V2_STORAGE,
             "lexical_prefix_fts_schema": PREFIX_FTS_SCHEMA,
             "lexical_prefix_fts_rows": prefix_fts_rows,
+            "concept_mask_schema": CONCEPT_MASK_SCHEMA,
+            "concept_mask_rows": concept_mask_rows,
             "search_normalization_fields": json.loads(
                 _search_normalization_manifest_fields()
             ),
