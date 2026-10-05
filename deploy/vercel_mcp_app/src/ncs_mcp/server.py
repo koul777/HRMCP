@@ -73,6 +73,8 @@ from ncs_mcp.query_router import (
     normalize_search_context_inputs,
     route_fingerprint_for_payload,
     route_ncs_query,
+    strip_job_need_competency_tail,
+    job_need_subject_matches_extracted_scope,
 )
 from ncs_mcp.review_safety import (
     REVIEW_PACKET_EXTENSIONS,
@@ -1662,6 +1664,107 @@ def _direct_job_scope_filter(search_context: dict[str, Any]) -> dict[str, str] |
     return codes or None
 
 
+def _inferred_unresolved_job_scope_is_lexical(
+    *,
+    inferred_from_query: bool,
+    search_context: dict[str, Any],
+    supplied_filter: dict[str, Any] | None = None,
+) -> bool:
+    """Treat inferred 'X 직무에 필요한 역량' as framing when X is not a classification."""
+    if not inferred_from_query or supplied_filter:
+        return False
+    return str(search_context.get("status") or "") == "unresolved"
+
+
+def _ksa_results_for_units(
+    unit_codes: list[str],
+    *,
+    limit: int,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """Return source KSA rows belonging to the given competency units."""
+    codes = [str(code) for code in unit_codes if code]
+    if not codes or limit <= 0:
+        return []
+    placeholders = ",".join("?" for _ in codes)
+    order_cases = " ".join(
+        f"WHEN ce.unit_code = ? THEN {index}" for index in range(len(codes))
+    )
+    with open_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT ki.ksa_id, ki.ksa_type_name, ki.ksa_text_raw,
+                   ce.element_id, ce.element_name_raw, ce.unit_code, cu.unit_name_raw,
+                   c.major_code, c.major_name, c.middle_code, c.middle_name,
+                   c.small_code, c.small_name, c.sub_code, c.sub_name, c.duty_order
+            FROM ksa_items ki
+            JOIN competency_elements ce ON ce.element_id = ki.element_id
+            JOIN competency_units cu ON cu.unit_code = ce.unit_code
+            JOIN classifications c ON c.classification_id = cu.classification_id
+            WHERE ce.unit_code IN ({placeholders})
+            ORDER BY CASE {order_cases} ELSE 99 END, ki.ksa_id
+            LIMIT ? OFFSET ?
+            """,
+            (*codes, *codes, int(limit), max(int(offset), 0)),
+        ).fetchall()
+    results: list[dict[str, Any]] = []
+    for row in rows:
+        path = unit_path(row)
+        path.update(
+            {
+                "unit_code": row["unit_code"],
+                "unit_name": row["unit_name_raw"],
+                "element_id": row["element_id"],
+                "element_name": row["element_name_raw"],
+            }
+        )
+        results.append(
+            {
+                "type": "ksa",
+                "id": row["ksa_id"],
+                "text": row["ksa_text_raw"],
+                "ksa_type": row["ksa_type_name"],
+                "path": path,
+                "match_mode": "unit_anchored",
+            }
+        )
+    return results
+
+
+def _prefer_unit_anchored_ksa(
+    *,
+    query: str,
+    limit: int,
+    offset: int,
+    classification_filter: dict[str, Any] | None,
+    lexical_result: dict[str, Any],
+) -> dict[str, Any]:
+    """Prefer KSA that belong to the units the same prompt already identified."""
+    unit_result = search_ncs(
+        query=query,
+        scope="unit",
+        limit=3,
+        classification_filter=classification_filter,
+    )
+    unit_codes = [
+        str(row.get("id"))
+        for row in (unit_result.get("results") or [])
+        if isinstance(row, dict) and row.get("type") == "unit" and row.get("id")
+    ]
+    if not unit_codes:
+        return lexical_result
+    anchored = _ksa_results_for_units(unit_codes, limit=limit, offset=offset)
+    if not anchored:
+        return lexical_result
+    payload = dict(lexical_result)
+    payload["results"] = anchored
+    payload["returned"] = len(anchored)
+    payload["match_mode"] = "unit_anchored"
+    payload["match_mode_by_type"] = {"ksa": "unit_anchored"}
+    payload["anchor_units"] = unit_codes
+    return payload
+
+
 def _merge_ncs_scope_filters(
     resolved_filter: dict[str, str],
     caller_filter: dict[str, str],
@@ -1890,6 +1993,7 @@ def ncs_search(
         job_scope=job_scope,
     )
     inferred_query_job_scope = False
+    original_query = query
     if query and not normalized_job_scope:
         # Direct calls may omit discovery. Reuse only the bounded grammatical
         # extraction used by the router; bare lexical tasks remain unscoped.
@@ -1908,18 +2012,34 @@ def ncs_search(
                 job_scope=inferred_scope,
             )
             if normalized_job_scope:
-                query = str(inferred_params.get("query") or query)
-                inferred_query_job_scope = True
-                # Preserve query-derived provenance when the direct facade
-                # re-enters search_ncs.  The promoted filter remains the hard
-                # boundary, while search_context can still report that the
-                # scope came from the explicit natural-language request.
-                job_scope = normalized_job_scope
+                stripped_subject = strip_job_need_competency_tail(original_query)
+                if job_need_subject_matches_extracted_scope(
+                    original_query, normalized_job_scope
+                ):
+                    query = stripped_subject
+                    inferred_query_job_scope = True
+                    # Preserve query-derived provenance when the direct facade
+                    # re-enters search_ncs.  The promoted filter remains the hard
+                    # boundary, while search_context can still report that the
+                    # scope came from the explicit natural-language request.
+                    job_scope = normalized_job_scope
+                else:
+                    # The 4-token extractor captured a suffix of a longer
+                    # subject. Search the full framed subject; do not promote
+                    # that suffix as a classification filter.
+                    query = stripped_subject
+                    inferred_query_job_scope = False
+                    job_scope = None
+                    normalized_job_scope = None
     supplied_filter = _effective_ncs_scope_filter(classification_filter)
+    lexical_inferred_scope = False
     if normalized_job_scope:
         # Direct calls do not carry a discovery fingerprint. Resolve the same
         # source-backed exact scope used by the route layer, promote it to a
-        # hard filter, and fail closed for ambiguity/conflict.
+        # hard filter, and fail closed for ambiguity/conflict. Query-inferred
+        # "X 직무에 필요한 역량" is request framing: if X is not an exact
+        # classification or unit name, search X lexically instead of returning
+        # empty. Caller-supplied scopes still fail closed.
         with open_db() as conn:
             direct_context = resolve_ncs_search_context(
                 conn,
@@ -1927,29 +2047,41 @@ def ncs_search(
                 job_scope=normalized_job_scope,
                 classification_filter=supplied_filter or None,
             )
-        if direct_context.get("needs_context"):
-            return error_response(
-                "route_context_required",
-                message=(
-                    "The explicit job scope is unresolved, ambiguous, or conflicts "
-                    "with the caller filter. Clarify the scope before searching."
-                ),
-                search_context=direct_context,
-            )
         promoted_filter = _direct_job_scope_filter(direct_context)
-        if not promoted_filter:
-            return error_response(
-                "route_context_required",
-                message=(
-                    "The explicit job scope could not be safely bound to one "
-                    "exact NCS classification. Clarify the scope before searching."
-                ),
+        if direct_context.get("needs_context") or not promoted_filter:
+            if _inferred_unresolved_job_scope_is_lexical(
+                inferred_from_query=inferred_query_job_scope,
                 search_context=direct_context,
+                supplied_filter=supplied_filter,
+            ):
+                lexical_inferred_scope = True
+                query = strip_job_need_competency_tail(original_query)
+                normalized_job_scope = None
+                job_scope = None
+                classification_filter = supplied_filter or None
+            elif direct_context.get("needs_context"):
+                return error_response(
+                    "route_context_required",
+                    message=(
+                        "The explicit job scope is unresolved, ambiguous, or conflicts "
+                        "with the caller filter. Clarify the scope before searching."
+                    ),
+                    search_context=direct_context,
+                )
+            else:
+                return error_response(
+                    "route_context_required",
+                    message=(
+                        "The explicit job scope could not be safely bound to one "
+                        "exact NCS classification. Clarify the scope before searching."
+                    ),
+                    search_context=direct_context,
+                )
+        else:
+            classification_filter = _merge_ncs_scope_filters(
+                promoted_filter,
+                supplied_filter,
             )
-        classification_filter = _merge_ncs_scope_filters(
-            promoted_filter,
-            supplied_filter,
-        )
     if not query:
         filter_kwargs = {
             key: value
@@ -2014,6 +2146,14 @@ def ncs_search(
         context_text=context_text,
         job_scope=job_scope,
     )
+    if normalized_scope == "ksa":
+        result = _prefer_unit_anchored_ksa(
+            query=query,
+            limit=limit,
+            offset=offset,
+            classification_filter=classification_filter,
+            lexical_result=result,
+        )
     if inferred_query_job_scope:
         # The hard filter was resolved from the explicit query before this
         # handler re-entered the lower-level search function.  Restore that
@@ -2026,8 +2166,16 @@ def ncs_search(
                 query_inference_allowed=True,
                 query_inference_boundary="explicit_job_need_competency_pattern",
                 soft_prior_source="explicit_query_job_scope",
-                hard_filter_source="source_backed_exact_job_scope",
-                rollout_phase="guarded_exact_scope",
+                hard_filter_source=(
+                    None
+                    if lexical_inferred_scope
+                    else "source_backed_exact_job_scope"
+                ),
+                rollout_phase=(
+                    "lexical_subject_fallback"
+                    if lexical_inferred_scope
+                    else "guarded_exact_scope"
+                ),
             )
             search_context["policy"] = policy
     rows = result.get("results", [])
@@ -2466,10 +2614,20 @@ def _route_with_execution_scope(
         job_scope=route_params.get("job_scope"),
     )
     normalized_job_scope = caller_job_scope or routed_job_scope
+    classification_context = dict(route.get("classification_context") or {})
+    if (
+        not caller_job_scope
+        and routed_job_scope
+        and classification_context.get("source") == "explicit_query_job_scope"
+        and not job_need_subject_matches_extracted_scope(query, routed_job_scope)
+    ):
+        routed_job_scope = None
+        normalized_job_scope = None
+        route_params.pop("job_scope", None)
+        route_params["query"] = strip_job_need_competency_tail(query)
     if route.get("tool") == "ncs_search" and (
         normalized_context or normalized_job_scope
     ):
-        classification_context = dict(route.get("classification_context") or {})
         scope_source = classification_context.get("source")
         caller_filter = route_params.get("classification_filter")
         caller_filter = caller_filter if isinstance(caller_filter, dict) else {}
@@ -2512,14 +2670,28 @@ def _route_with_execution_scope(
                         search_context["warnings"] = warnings
                 else:
                     search_context = dict(search_context)
-                    search_context["needs_context"] = True
-                    search_context["promotion_status"] = (
-                        "rejected_not_exact_unique_high_confidence"
-                    )
-                    warnings = list(search_context.get("warnings") or [])
-                    if "explicit_job_scope_not_safely_promotable" not in warnings:
-                        warnings.append("explicit_job_scope_not_safely_promotable")
-                    search_context["warnings"] = warnings
+                    if _inferred_unresolved_job_scope_is_lexical(
+                        inferred_from_query=scope_source == "explicit_query_job_scope",
+                        search_context=search_context,
+                        supplied_filter=caller_filter,
+                    ):
+                        search_context["needs_context"] = False
+                        search_context["promotion_status"] = "lexical_subject_fallback"
+                        warnings = list(search_context.get("warnings") or [])
+                        warnings.append("inferred_job_scope_unresolved_lexical_fallback")
+                        search_context["warnings"] = warnings
+                        normalized_job_scope = None
+                        route_params.pop("job_scope", None)
+                        route_params["query"] = strip_job_need_competency_tail(query)
+                    else:
+                        search_context["needs_context"] = True
+                        search_context["promotion_status"] = (
+                            "rejected_not_exact_unique_high_confidence"
+                        )
+                        warnings = list(search_context.get("warnings") or [])
+                        if "explicit_job_scope_not_safely_promotable" not in warnings:
+                            warnings.append("explicit_job_scope_not_safely_promotable")
+                        search_context["warnings"] = warnings
         effective_filter = (
             _merge_ncs_scope_filters(promoted_filter, caller_filter)
             if promoted_filter
@@ -2527,7 +2699,8 @@ def _route_with_execution_scope(
         )
         if effective_filter:
             route_params["classification_filter"] = effective_filter
-        route_params["job_scope"] = normalized_job_scope
+        if normalized_job_scope:
+            route_params["job_scope"] = normalized_job_scope
         binding_route = route
         if normalized_job_scope and promoted_filter:
             # The effective full path is part of the route binding. Rebuild

@@ -115,7 +115,23 @@ class NcsSearchRecallTests(unittest.TestCase):
                         self.assertEqual(actual["query_tokens"], expected["query_tokens"])
                         public = server.ncs_search(query, scope=scope, limit=5)
                         self.assertTrue(public["ok"], public.get("error"))
-                        self.assertEqual(public["results"], expected["results"])
+                        if scope == "ksa":
+                            public_plain = server.ncs_search(
+                                "데이터분석", scope="ksa", limit=5
+                            )
+                            self.assertEqual(public["results"], public_plain["results"])
+                            self.assertTrue(public["results"])
+                            self.assertEqual(
+                                {row["type"] for row in public["results"]}, {"ksa"}
+                            )
+                            self.assertTrue(
+                                all(
+                                    (row.get("path") or {}).get("unit_code")
+                                    for row in public["results"]
+                                )
+                            )
+                        else:
+                            self.assertEqual(public["results"], expected["results"])
 
     def test_prompt_subject_preserves_exact_codes_and_long_official_names(self) -> None:
         long_name = "장비 진단 측정 결과 보고서 작성"
@@ -1260,6 +1276,220 @@ class NcsSearchRecallTests(unittest.TestCase):
         )
         self.assertIn("C_BOUNDARY", [row["id"] for row in boundary["results"]])
 
+    def _seed_joined_scope_controls(self) -> None:
+        with self._open_db() as conn:
+            conn.execute(
+                "INSERT INTO classifications VALUES "
+                "(97, '97', '시험', '97', '시험', '97', '시험', '97', '시험', '1')"
+            )
+            conn.executemany(
+                "INSERT INTO competency_units VALUES (?, ?, ?, '4', 97)",
+                (
+                    ("R3_TARGET", "경영정보시각화", "자료를 도표로 만든다"),
+                    ("R3_DEFINITION", "재무회계", "경영정보 정보시각화 사례를 다룬다"),
+                    ("R3_W1", "경영 분석", ""),
+                    ("R3_W2", "정보 보안", ""),
+                    ("R3_W3", "시각화 도구", ""),
+                    ("R3_ALIAS", "보고서 작성", ""),
+                ),
+            )
+            conn.execute(
+                "INSERT INTO ncs_query_aliases VALUES "
+                "('R3_ALIAS', '경영정보시각화', '경영정보시각화')"
+            )
+            conn.execute("INSERT INTO competency_elements VALUES (970, '경영정보 정보시각화', 'R3_TARGET')")
+            conn.execute("INSERT INTO performance_criteria VALUES (970, '경영정보 정보시각화', NULL, 970)")
+            conn.execute("INSERT INTO ksa_items VALUES (970, 'knowledge', '경영정보 정보시각화', NULL, 970)")
+            conn.commit()
+
+    def test_joined_scope_definition_cannot_promote_and_tier_or_hide_name(self) -> None:
+        self._seed_joined_scope_controls()
+        for normalized in (False, True):
+            if normalized:
+                with self._open_db() as conn:
+                    self._add_normalized_columns(conn)
+                    conn.commit()
+            params = dict(scope="unit", limit=20, classification_filter={"major_code": "97"})
+            with self.subTest(normalized=normalized):
+                actual = server.search_ncs("정보 시각화 경영", **params)
+                with patch.object(search_core, "_ncs_search_joined_compound_subphrases", return_value={}):
+                    control = server.search_ncs("정보 시각화 경영", **params)
+                self.assertEqual(control["match_mode"], "token_or")
+                self.assertIn("R3_DEFINITION", [row["id"] for row in control["results"]])
+                self.assertEqual(actual["match_mode"], "token_or")
+                self.assertIn("R3_TARGET", [row["id"] for row in actual["results"]])
+                decoy = next(row for row in actual["results"] if row["id"] == "R3_DEFINITION")
+                self.assertEqual(decoy["matched_expansions"], [])
+                self.assertNotIn("시각화", decoy["matched_tokens"])
+
+    def test_joined_scope_name_alias_recovery_metadata_and_pagination(self) -> None:
+        self._seed_joined_scope_controls()
+        for normalized in (False, True):
+            if normalized:
+                with self._open_db() as conn:
+                    self._add_normalized_columns(conn)
+                    conn.commit()
+            with self.subTest(normalized=normalized):
+                params = dict(scope="unit", classification_filter={"major_code": "97"})
+                query = "경영 정보 대시보드 시각화"
+                actual = server.search_ncs(query, limit=20, **params)
+                self.assertEqual(actual["match_mode"], "token_or")
+                for code, field in (("R3_TARGET", "unit_name"), ("R3_ALIAS", "alias")):
+                    row = next(row for row in actual["results"] if row["id"] == code)
+                    self.assertTrue(any(
+                        exp["matched_as"] == "경영정보" and exp["match_fields"] == [field]
+                        for exp in row["matched_expansions"]
+                    ))
+                for row in actual["results"]:
+                    for exp in row["matched_expansions"]:
+                        self.assertTrue(set(exp["match_fields"]) <= {"unit_name", "alias"})
+                        self.assertIn(exp["matched_as"], actual["query_expansions"][exp["token"]])
+                for offset in (0, 1):
+                    page = server.search_ncs(query, limit=2, offset=offset, **params)
+                    self.assertEqual(page["results"], actual["results"][offset:offset + 2])
+
+    def test_joined_scope_classification_and_code_cannot_supply_compound_evidence(self) -> None:
+        self._seed_joined_scope_controls()
+        with self._open_db() as conn:
+            for index, field in enumerate(("major_name", "middle_name", "small_name", "sub_name"), 980):
+                conn.execute(
+                    "INSERT INTO classifications VALUES (?, '97', '시험', '97', '시험', '97', '시험', '97', '시험', '1')",
+                    (index,),
+                )
+                conn.execute(f"UPDATE classifications SET {field} = ? WHERE classification_id = ?",
+                             ("경영정보 정보시각화", index))
+                conn.execute("INSERT INTO competency_units VALUES (?, '분류대조', '', '4', ?)",
+                             (f"R3_CLASS_{field}", index))
+            conn.execute("INSERT INTO competency_units VALUES ('경영정보 정보시각화', '코드대조', '', '4', 97)")
+            conn.commit()
+        for normalized in (False, True):
+            if normalized:
+                with self._open_db() as conn:
+                    self._add_normalized_columns(conn)
+                    conn.commit()
+            with self.subTest(normalized=normalized):
+                actual = server.search_ncs("정보 시각화 경영", scope="unit", limit=30,
+                                           classification_filter={"major_code": "97"})
+                self.assertEqual(actual["match_mode"], "token_or")
+                self.assertIn("R3_TARGET", [row["id"] for row in actual["results"]])
+                for row in actual["results"]:
+                    if row["id"].startswith("R3_CLASS_") or row["id"] == "경영정보 정보시각화":
+                        self.assertEqual(row["matched_expansions"], [])
+                        self.assertNotIn("시각화", row["matched_tokens"])
+
+    def test_joined_scope_requires_hard_filter_and_does_not_change_leaves(self) -> None:
+        self._seed_joined_scope_controls()
+        for normalized in (False, True):
+            if normalized:
+                with self._open_db() as conn:
+                    self._add_normalized_columns(conn)
+                    conn.commit()
+            for scope in ("unit", "element", "criteria", "ksa"):
+                for filter_value in (None, {"unknown_scope": "97"}, {"major_code": "97"}):
+                    if scope == "unit" and filter_value == {"major_code": "97"}:
+                        continue
+                    with self.subTest(normalized=normalized, scope=scope, filter=filter_value):
+                        params = dict(scope=scope, limit=20, classification_filter=filter_value)
+                        actual = server.search_ncs("정보 시각화 경영", **params)
+                        with patch.object(search_core, "_ncs_search_joined_compound_subphrases", return_value={}):
+                            control = server.search_ncs("정보 시각화 경영", **params)
+                        self.assertEqual(actual, control)
+
+    def test_joined_scope_overlap_keeps_general_expansion_provenance(self) -> None:
+        self._seed_joined_scope_controls()
+        for normalized in (False, True):
+            if normalized:
+                with self._open_db() as conn:
+                    self._add_normalized_columns(conn)
+                    conn.commit()
+            with self.subTest(normalized=normalized), patch.object(
+                server, "_validated_ncs_search_token_expansions",
+                return_value={"시각화": ["정보시각화"]},
+            ):
+                result = server.search_ncs("정보 시각화 경영", scope="unit", limit=20,
+                                           classification_filter={"major_code": "97"})
+                self.assertEqual(result["match_mode"], "expanded_token_and")
+                decoy = next(row for row in result["results"] if row["id"] == "R3_DEFINITION")
+                self.assertIn({"token": "시각화", "matched_as": "정보시각화", "match_fields": ["definition"]},
+                              decoy["matched_expansions"])
+                self.assertIn("시각화", decoy["matched_tokens"])
+
+    def test_scoped_expanded_and_reports_only_base_expansions_with_leaf_or(self) -> None:
+        with self._open_db() as conn:
+            conn.execute("INSERT INTO competency_units VALUES "
+                         "('S1_AND', '인사 채용 지원자 인사채용관리', '', '4', 1)")
+            conn.execute("INSERT INTO competency_elements VALUES (9800, '인사 검토', 'S1_AND')")
+            conn.commit()
+        query = "인사 채용관리 지원자"
+        expected = {"채용관리": ["채용", "인력채용"]}
+        for normalized in (False, True):
+            if normalized:
+                with self._open_db() as conn:
+                    self._add_normalized_columns(conn)
+                    conn.commit()
+            for scope in ("unit", "all"):
+                with self.subTest(normalized=normalized, scope=scope):
+                    result = server.search_ncs(query, scope=scope, limit=20,
+                                              classification_filter={"major_code": "02"})
+                    self.assertEqual(result["match_mode_by_type"]["unit"], "expanded_token_and")
+                    if scope == "all":
+                        self.assertEqual(result["match_mode"], "mixed")
+                        self.assertEqual(result["match_mode_by_type"]["element"], "token_or")
+                    self.assertEqual(result["query_expansions"], expected)
+                    row = next(row for row in result["results"] if row["id"] == "S1_AND")
+                    self.assertEqual(row["matched_expansions"], [{
+                        "token": "채용관리", "matched_as": "채용", "match_fields": ["unit_name"],
+                    }])
+
+    def test_scoped_unit_or_and_leaf_expanded_and_union_only_active_maps(self) -> None:
+        with self._open_db() as conn:
+            conn.execute("INSERT INTO competency_units VALUES "
+                         "('S1_OR', '경영성과평가', '', '4', 1)")
+            conn.execute("INSERT INTO competency_elements VALUES (9801, '경영 인사평가 지원자', 'S1_OR')")
+            conn.commit()
+        query = "경영 성과평가 지원자"
+        for normalized in (False, True):
+            if normalized:
+                with self._open_db() as conn:
+                    self._add_normalized_columns(conn)
+                    conn.commit()
+            with self.subTest(normalized=normalized):
+                result = server.search_ncs(query, scope="all", limit=30,
+                                          classification_filter={"major_code": "02"})
+                self.assertEqual(result["match_mode"], "mixed")
+                self.assertEqual(result["match_mode_by_type"]["unit"], "token_or")
+                self.assertEqual(result["match_mode_by_type"]["element"], "expanded_token_and")
+                # Unit search resolves the absent compound to 평가, while
+                # leaf search retains 성과평가 and its general equivalent.
+                self.assertEqual(result["query_expansions"], {
+                    "경영": ["경영평가"], "평가": ["경영평가", "평가지원자"],
+                    "지원자": ["평가지원자"], "성과평가": ["인사평가"],
+                })
+                for row in result["results"]:
+                    if row["type"] != "unit":
+                        self.assertTrue(all(exp["matched_as"] == "인사평가"
+                                            for exp in row["matched_expansions"]))
+
+    def test_compound_metadata_preserves_cross_token_general_provenance(self) -> None:
+        tokens = ["경영", "정보", "시각화"]
+        for mode in ("expanded_token_and", "token_or"):
+            for definition in ("경영정보", "경영 정보 경영정보"):
+                with self.subTest(mode=mode, definition=definition):
+                    row = {"type": "unit", "_search_fields": {
+                        "unit_name": "경영정보", "definition": definition,
+                    }}
+                    search_core._ncs_search_match_metadata(
+                        row, query_tokens=tokens, phrase=" ".join(tokens), match_mode=mode,
+                        token_expansions={"시각화": ["경영정보"]},
+                        compound_subphrase_expansions={"경영": ["경영정보"], "정보": ["경영정보"]},
+                    )
+                    by_token = {entry["token"]: entry["match_fields"]
+                                for entry in row["matched_expansions"]}
+                    expected = {"시각화": ["unit_name", "definition"]}
+                    if mode == "token_or":
+                        expected.update({"경영": ["unit_name"], "정보": ["unit_name"]})
+                    self.assertEqual(by_token, expected)
+
     def test_joined_official_compound_recovers_space_variant_without_extra_sql(self) -> None:
         with self._open_db() as conn:
             conn.executemany(
@@ -1324,6 +1554,18 @@ class NcsSearchRecallTests(unittest.TestCase):
         self.assertTrue(result["results"])
         self.assertEqual({row["type"] for row in result["results"]}, {"ksa"})
 
+    def test_ksa_scope_prefers_ksa_from_identified_units(self) -> None:
+        result = server.ncs_search("채용 운영", scope="ksa", limit=5)
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["match_mode"], "unit_anchored")
+        self.assertEqual({row["type"] for row in result["results"]}, {"ksa"})
+        self.assertTrue(result["results"])
+        self.assertTrue(
+            all(row.get("path", {}).get("unit_code") == "U_HIRE_1" for row in result["results"])
+        )
+        self.assertIn("U_HIRE_1", result.get("anchor_units") or [])
+
     def test_multiword_query_uses_and_then_or_fallback(self) -> None:
         token_and = server.search_ncs("신입사원 채용 면접", scope="all", limit=10)
         token_or = server.search_ncs("데이터 분석가", scope="all", limit=10)
@@ -1347,6 +1589,37 @@ class NcsSearchRecallTests(unittest.TestCase):
             result["results"][0]["matched_expansions"][0]["matched_as"],
             "채용",
         )
+
+    def test_or_fallback_reports_effective_expansions_without_changing_pages(self) -> None:
+        query = "인사 채용관리 미등록단어"
+        for normalized in (False, True):
+            if normalized:
+                with self._open_db() as conn:
+                    self._add_normalized_columns(conn)
+                    conn.commit()
+            with self.subTest(normalized=normalized):
+                whole = server.search_ncs(query, scope="unit", limit=20)
+                self.assertEqual(whole["match_mode"], "token_or")
+                self.assertEqual(whole["query_expansions"]["채용관리"], ["채용", "인력채용"])
+                self.assertTrue(any(row["matched_expansions"] for row in whole["results"]))
+                pages = [server.search_ncs(query, scope="unit", limit=1, offset=i)
+                         for i in range(min(3, whole["returned"]))]
+                self.assertEqual([p["results"][0] for p in pages], whole["results"][:len(pages)])
+                self.assertTrue(all(p["query_expansions"] == whole["query_expansions"] for p in pages))
+                exact = server.search_ncs("인력채용", scope="unit", limit=3)
+                self.assertEqual(exact["query_expansions"], {})
+
+    def test_leaf_expansion_metadata_excludes_disabled_job_scope_reductions(self) -> None:
+        with self._open_db() as conn:
+            conn.execute("INSERT INTO ncs_query_aliases VALUES (?, ?, ?)",
+                         ("U_HIRE_1", "인사", "인사"))
+            conn.execute("INSERT INTO competency_elements VALUES (?, ?, ?)",
+                         (9010, "인사평가", "U_HIRE_1"))
+            conn.commit()
+        result = server.search_ncs("인사업무 성과평가 미등록단어", scope="element", limit=3)
+        self.assertEqual(result["match_mode"], "token_or")
+        self.assertEqual(result["query_expansions"], {"성과평가": ["인사평가"]})
+        self.assertEqual(result["results"][0]["matched_expansions"][0]["matched_as"], "인사평가")
 
     def test_job_scope_compound_expansion_does_not_match_leaf_homograph(self) -> None:
         with self._open_db() as conn:

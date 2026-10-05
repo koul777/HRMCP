@@ -3130,7 +3130,9 @@ def _ncs_search_match_metadata(
         if match_mode in {"expanded_token_and", "token_or"}
         else {}
     )
-    active_compound_expansions = compound_subphrase_expansions or {}
+    active_compound_expansions = (
+        compound_subphrase_expansions or {} if match_mode == "token_or" else {}
+    )
     if match_mode == "morphology_fill":
         active_expansions = _ncs_search_morphology_expansions(query_tokens)
         if item.get("type") == "unit":
@@ -3188,7 +3190,8 @@ def _ncs_search_match_metadata(
                         and matches(field_name, value, normalized_expansion)
                     ]
                     if not expansion_fields or any(
-                        entry.get("matched_as") == expansion
+                        entry.get("token") == token
+                        and entry.get("matched_as") == expansion
                         for entry in matched_expansions
                     ):
                         continue
@@ -3204,18 +3207,31 @@ def _ncs_search_match_metadata(
                         }
                     )
             continue
-        for expansion in active_expansions.get(token, []):
+        alternatives = list(active_expansions.get(token, []))
+        if item.get("type") == "unit" and match_mode == "token_or":
+            alternatives.extend(
+                term for term in active_compound_expansions.get(token, [])
+                if term not in alternatives
+            )
+        for expansion in alternatives:
             normalized_expansion = expansion.casefold()
             compound_base = (
                 match_mode == "morphology_fill"
                 and item.get("type") == "unit"
                 and expansion != active_expansions[token][0]
             )
+            name_only = compound_base or (
+                item.get("type") == "unit"
+                and expansion in active_compound_expansions.get(token, [])
+                # A term can independently have general expansion provenance.
+                # Keep its legitimate definition/classification evidence then.
+                and expansion not in active_expansions.get(token, [])
+            )
             expansion_fields = [
                 field_name
                 for field_name, value in normalized_fields.items()
                 if normalized_expansion
-                and (not compound_base or field_name in {"unit_name", "alias"})
+                and (not name_only or field_name in {"unit_name", "alias"})
                 and matches(field_name, value, normalized_expansion)
             ]
             if not expansion_fields:
@@ -3427,6 +3443,9 @@ def search_ncs(
             if normalized_classification_filter
             else {}
         )
+        # The union is for response metadata only. Joined subphrases have their
+        # own name/alias-only OR predicate and must not enter the general token
+        # groups, which also search definitions and classification labels.
         unit_token_expansions = {
             token: list(alternatives)
             for token, alternatives in unit_base_expansions.items()
@@ -3474,7 +3493,7 @@ def search_ncs(
                 columns,
                 phrase,
                 unit_terms,
-                unit_token_expansions,
+                unit_base_expansions,
                 compound_subphrase_expansions=unit_compound_expansions,
                 weighted_columns=weighted_columns,
                 token_weights=token_weights,
@@ -3816,11 +3835,25 @@ def search_ncs(
     active_match_modes = {
         mode for modes in modes_by_type.values() for mode in modes
     }
-    applied_token_expansions = (
-        {**token_expansions, **unit_base_expansions}
-        if "expanded_token_and" in active_match_modes
-        else {}
-    )
+    # Both fallback tiers consume expansions. Report the effective per-scope
+    # maps, including scoped compounds only for token OR, rather than the input map:
+    # leaf search deliberately disables job-scope reductions. This describes
+    # retrieval alternatives; matched_expansions remains each row's evidence.
+    applied_token_expansions: dict[str, list[str]] = {}
+    for item_type, modes in modes_by_type.items():
+        if not modes.intersection({"expanded_token_and", "token_or"}):
+            continue
+        if item_type == "unit":
+            effective_expansions = (
+                unit_token_expansions if "token_or" in modes else unit_base_expansions
+            )
+        else:
+            effective_expansions = leaf_token_expansions
+        for token, alternatives in effective_expansions.items():
+            applied = applied_token_expansions.setdefault(token, [])
+            for alternative in alternatives:
+                if alternative not in applied:
+                    applied.append(alternative)
     applied_intent_expansions = (
         intent_expansions
         if "intent_alias" in active_match_modes
@@ -3923,7 +3956,7 @@ def search_ncs(
         counts_by_type[item["type"]] += 1
         item.pop("_classification_codes", None)
         item_token_expansions = (
-            unit_token_expansions
+            unit_base_expansions
             if item["type"] == "unit"
             else leaf_token_expansions
         )

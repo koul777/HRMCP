@@ -18,6 +18,8 @@ from ncs_mcp.query_router import (
     aihr_plan_route_evidence,
     route_ncs_query,
     risk_flags_for_query,
+    job_need_subject_matches_extracted_scope,
+    strip_job_need_competency_tail,
 )
 
 
@@ -301,6 +303,29 @@ class NcsQueryRouterTests(unittest.TestCase):
             "job_need_competency",
         )
         self.assertEqual(route["route_fingerprint"], repeated["route_fingerprint"])
+
+    def test_job_need_tail_strip_keeps_full_subject(self) -> None:
+        self.assertEqual(
+            strip_job_need_competency_tail("연봉 협상 직무에 필요한 역량"),
+            "연봉 협상",
+        )
+        self.assertEqual(
+            strip_job_need_competency_tail(
+                "직무 위계와 직군 분류 체계 정비 직무에 필요한 역량"
+            ),
+            "직무 위계와 직군 분류 체계 정비",
+        )
+        self.assertEqual(
+            strip_job_need_competency_tail("NCSMCP로 인사 직무에 필요한 역량을 알려줘."),
+            "인사",
+        )
+        self.assertTrue(job_need_subject_matches_extracted_scope("인사 직무에 필요한 역량", "인사"))
+        self.assertFalse(
+            job_need_subject_matches_extracted_scope(
+                "노사 공동 위원회 회의 결과 사후 관리 직무에 필요한 역량",
+                "회의 결과 사후 관리",
+            )
+        )
 
     def test_optional_mcp_prefix_is_removed_from_job_scope(self) -> None:
         cases = (
@@ -792,6 +817,109 @@ class ExplicitJobScopeServerRoutingTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"]["code"], "route_context_required")
         search.assert_not_called()
+
+    def test_inferred_unresolved_job_scope_falls_back_to_lexical_search(self) -> None:
+        search = Mock(
+            return_value={
+                "ok": True,
+                "results": [
+                    {
+                        "type": "unit",
+                        "id": "0202020108_23v4",
+                        "path": {
+                            "major_code": "02",
+                            "middle_code": "02",
+                            "small_code": "02",
+                            "sub_code": "01",
+                        },
+                    }
+                ],
+            }
+        )
+        with patch.object(
+            self.server,
+            "resolve_ncs_search_context",
+            return_value=self._context(status="unresolved"),
+        ), patch.object(self.server, "search_ncs", search):
+            result = self.server.ncs_search(query="연봉 협상 직무에 필요한 역량")
+
+        self.assertTrue(result["ok"], result)
+        search.assert_called()
+        kwargs = search.call_args.kwargs
+        self.assertEqual(kwargs.get("query"), "연봉 협상")
+        self.assertFalse(kwargs.get("classification_filter"))
+        self.assertFalse(kwargs.get("job_scope"))
+
+    def test_inferred_unresolved_long_query_keeps_full_subject(self) -> None:
+        search = Mock(
+            return_value={
+                "ok": True,
+                "results": [
+                    {
+                        "type": "unit",
+                        "id": "0403010305_16v2",
+                        "path": {
+                            "major_code": "04",
+                            "middle_code": "03",
+                            "small_code": "01",
+                            "sub_code": "03",
+                        },
+                    }
+                ],
+            }
+        )
+        with patch.object(
+            self.server,
+            "resolve_ncs_search_context",
+            return_value=self._context(status="unresolved"),
+        ), patch.object(self.server, "search_ncs", search):
+            result = self.server.ncs_search(
+                query="직무 위계와 직군 분류 체계 정비 직무에 필요한 역량"
+            )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(
+            search.call_args.kwargs.get("query"),
+            "직무 위계와 직군 분류 체계 정비",
+        )
+
+    def test_caller_supplied_unresolved_job_scope_still_fails_closed(self) -> None:
+        search = Mock(return_value={"results": []})
+        with patch.object(
+            self.server,
+            "resolve_ncs_search_context",
+            return_value=self._context(status="unresolved"),
+        ), patch.object(self.server, "search_ncs", search):
+            result = self.server.ncs_search(
+                query="연봉 협상",
+                job_scope="연봉 협상",
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "route_context_required")
+        search.assert_not_called()
+
+    def test_inferred_unresolved_job_scope_stays_executable(self) -> None:
+        with patch.object(
+            self.server,
+            "resolve_ncs_search_context",
+            return_value=self._context(status="unresolved"),
+        ):
+            route = self.server.ncs_discover_tools(
+                "연봉 협상 직무에 필요한 역량"
+            )["query_route"]
+
+        self.assertEqual(route["params"]["query"], "연봉 협상")
+        self.assertNotIn("job_scope", route["params"])
+        self.assertNotIn("classification_filter", route["params"])
+        self.assertFalse(route["search_context"]["needs_context"])
+        self.assertEqual(
+            route["search_context"]["promotion_status"],
+            "lexical_subject_fallback",
+        )
+        self.assertTrue(
+            route["route_contract"]["execution_policy"]["meta_executable"]
+        )
 
     def test_direct_job_scope_with_context_still_binds_a_hard_filter(self) -> None:
         expected_filter = {

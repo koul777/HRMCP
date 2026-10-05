@@ -1198,6 +1198,39 @@ _EXPLICIT_JOB_SCOPE_REQUEST_RE = re.compile(
 _EXPLICIT_JOB_SCOPE_QUOTED_TARGET_RE = re.compile(
     r"^\s*(?:의|중|에서)?\s*['\"“‘](?P<target>[^'\"”’\r\n]{1,50})['\"”’]"
 )
+_JOB_NEED_COMPETENCY_TAIL_RE = re.compile(
+    r"\s*(?:직무|업무)\s*"
+    r"(?:(?:에서|에|의)\s*)?(?:필요(?:한)?|요구(?:되는)?)?\s*"
+    r"(?:역량|능력|KSA)"
+    r"(?:으로|을|를|의|에|과|와|은|는|이|가|로)?"
+    r"(?:\s*(?:알려|보여|찾아|검색해|조회해|설명해|정리해)\s*(?:줘요?|주세요|주십시오))?"
+    r"[.!?。！？\s]*$",
+    flags=re.IGNORECASE,
+)
+
+
+def strip_job_need_competency_tail(query: Any) -> str:
+    """Keep the full subject when 'X 직무에 필요한 역량' is only request framing."""
+    text = unicodedata.normalize("NFKC", str(query or "")).strip()
+    stripped_prefix = _strip_ncs_standard_request_prefix(text)
+    stripped_prefix = re.sub(
+        r"^(?:@?NCS\s*MCP(?:로|에서|를|에게)?\s*)",
+        "",
+        stripped_prefix,
+        count=1,
+        flags=re.IGNORECASE,
+    ).strip()
+    stripped = _JOB_NEED_COMPETENCY_TAIL_RE.sub("", stripped_prefix).strip()
+    stripped = re.sub(r"[\s,:]+$", "", stripped).strip()
+    return stripped if len(stripped) >= 2 else text
+
+
+def job_need_subject_matches_extracted_scope(query: Any, job_scope: Any) -> bool:
+    """True only when the framed subject is the extracted job scope itself."""
+    subject = " ".join(strip_job_need_competency_tail(query).split()).casefold()
+    scope = " ".join(str(job_scope or "").strip().split()).casefold()
+    return bool(subject) and subject == scope
+
 
 
 def _extract_explicit_job_scope_request(query: Any) -> dict[str, Any] | None:

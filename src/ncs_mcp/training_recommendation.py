@@ -34,6 +34,8 @@ from ncs_mcp.constants import (
     SCORE_WEIGHTS,
 )
 from ncs_mcp.db import (
+    _is_ksa_definition_boilerplate,
+    _strip_leading_concept_name_from_meaning_text,
     clamp_limit,
     normalize_concept_key,
     normalize_spaces,
@@ -94,6 +96,17 @@ DEFINITION_TRUST_WEIGHT = {
     "candidate": 0.5,
     "missing": 0.3,
 }
+# Template sources such as ksa_meaning_candidates.term_definition_template never
+# carry a written definition, whatever the status columns say.
+GENERATED_DEFINITION_SOURCE_SUFFIXES = ("_template", "_placeholder")
+# Generated bodies served alongside the canonical prefixes, e.g.
+# "...사례를 이해하는 지식." and "...과업을 수행하는 기술.".
+GENERATED_DEFINITION_BODY_STEMS = (
+    "업무 판단과 문제 해결에 필요한 관련 원리, 기준, 절차, 사례",
+    "업무 상황에서 관련 절차나 도구를 활용해 과업을 수행하는",
+    "업무 수행 과정에서 품질, 협업, 책임성을 유지하기 위한",
+    "업무 수행 과정에서 해당 행동 기준을 일관되게 실천하려는",
+)
 SHORT_KSA_PENALTY = 0.6
 DUPLICATE_KSA_PENALTY = 0.6
 BROAD_GENERIC_KSA_PENALTY = 0.8
@@ -254,26 +267,34 @@ def _normalize_text_list(value: Any) -> list[str]:
 
 
 def _split_training_methods(value: Any) -> list[str]:
+    """Split known method labels in source order without dropping unknown text."""
     text = _clean(value)
     if not text:
         return []
-    methods = []
-    for token in ("원격훈련", "집체훈련", "현장견학", "현장실습", "Practice", "Classroom"):
-        if token.lower() in text.lower():
-            methods.append(token)
-    return methods or [text]
-
-
-def _split_training_methods(value: Any) -> list[str]:
-    text = _clean(value)
-    if not text:
-        return []
-    known_tokens = ("?먭꺽?덈젴", "吏묒껜?덈젴", "?꾩옣寃ы븰", "?꾩옣?ㅼ뒿", "Practice", "Classroom")
+    known_tokens = ("원격훈련", "집체훈련", "현장견학", "현장실습", "Practice", "Classroom")
+    canonical = {token.lower(): token for token in known_tokens}
+    token_pattern = "|".join(re.escape(token) for token in known_tokens)
+    # English labels may be concatenated with each other, but must not be
+    # extracted from an unrelated word such as "malpractice" or "Classroomish".
+    pattern = re.compile(
+        r"원격훈련|집체훈련|현장견학|현장실습|(?<![A-Za-z])(?:Practice|Classroom)+(?![A-Za-z])",
+        re.IGNORECASE,
+    )
     methods: list[str] = []
-    parts = _split_list_value(text) or [text]
-    for part in parts:
-        matches = [token for token in known_tokens if token.lower() in part.lower()]
-        methods.extend(matches or [part])
+    for part in _split_list_value(text):
+        cursor = 0
+        for match in pattern.finditer(part):
+            fragment = _clean(part[cursor:match.start()])
+            if fragment:
+                methods.append(fragment)
+            methods.extend(
+                canonical[token.lower()]
+                for token in re.findall(token_pattern, match.group(), re.IGNORECASE)
+            )
+            cursor = match.end()
+        fragment = _clean(part[cursor:])
+        if fragment:
+            methods.append(fragment)
     return list(dict.fromkeys(methods))
 
 
@@ -353,33 +374,91 @@ def _review_weight(row: sqlite3.Row | dict[str, Any]) -> float:
     return USABLE_REVIEW_STATUS_WEIGHTS.get(_clean(_row_dict(row).get("review_status")), 0.8)
 
 
-def _definition_trust_status(concept: dict[str, Any]) -> str:
+def _definition_content_state(concept: dict[str, Any]) -> str:
+    """Classify the definition text itself; a status never vouches for empty or template text."""
+    definition = _clean(concept.get("definition"))
+    if not definition:
+        return "empty"
+    concept_name = _clean(concept.get("concept_name"))
+    source = _clean(concept.get("definition_source")).rsplit(".", 1)[-1]
+    body = _strip_leading_concept_name_from_meaning_text(definition, concept_name)
+    if (
+        source.endswith(GENERATED_DEFINITION_SOURCE_SUFFIXES)
+        or _is_ksa_definition_boilerplate(_clean(concept.get("concept_type")), concept_name, definition)
+        or body.startswith(GENERATED_DEFINITION_BODY_STEMS)
+    ):
+        return "boilerplate"
+    return "substantive"
+
+
+def _declared_definition_trust_status(concept: dict[str, Any]) -> str:
+    """Trust level claimed by status columns alone, before the text is checked."""
     review_status = _clean(concept.get("review_status"))
-    if review_status in DEFINITION_TRUST_WEIGHT:
-        return review_status
     definition_status = _clean(concept.get("definition_status"))
-    if definition_status in DEFINITION_TRUST_WEIGHT:
+    if definition_status == "missing":
+        return "missing"
+    if review_status in TRUSTED_TRANSITION_REVIEW_STATUSES:
+        # Human trust needs both a written definition and a human review decision.
+        if definition_status == "defined":
+            return "human_reviewed"
+    elif review_status in DEFINITION_TRUST_WEIGHT:
+        return review_status
+    if definition_status in DEFINITION_TRUST_WEIGHT and definition_status != "human_reviewed":
         return definition_status
     return "missing"
 
 
-def _definition_trust_profile(concepts: list[dict[str, Any]]) -> dict[str, Any]:
-    weighted_concepts = [concept for concept in concepts if int(concept.get("concept_id") or 0)]
-    if not weighted_concepts:
+def _definition_trust_profile(
+    concepts: list[dict[str, Any]],
+    *,
+    requested_concept_ids: set[int] | None = None,
+) -> dict[str, Any]:
+    weighted_concepts: list[dict[str, Any]] = []
+    seen_ids: set[int] = set()
+    for concept in concepts:
+        concept_id = _concept_key(concept)
+        if not concept_id or concept_id in seen_ids:
+            continue
+        seen_ids.add(concept_id)
+        weighted_concepts.append(concept)
+    requested_ids = {int(value) for value in (requested_concept_ids or set()) if int(value or 0)}
+    unresolved_count = len(requested_ids - seen_ids)
+    if not weighted_concepts and not unresolved_count:
+        # No matched KSA concept means the definition basis is unknown, not trusted.
         return {
-            "weight": 1.0,
+            "weight": DEFINITION_TRUST_WEIGHT["missing"],
+            "basis": "no_matched_concepts",
+            "concept_count": 0,
+            "unresolved_concept_count": 0,
             "status_counts": {},
-            "applied": False,
+            "declared_status_counts": {},
+            "content_state_counts": {},
+            "content_downgraded_count": 0,
+            "applied": True,
         }
-    statuses = [_definition_trust_status(concept) for concept in weighted_concepts]
-    status_counts = Counter(statuses)
+    declared_statuses = [_declared_definition_trust_status(concept) for concept in weighted_concepts]
+    content_states = [_definition_content_state(concept) for concept in weighted_concepts]
+    statuses = [
+        declared if content_state == "substantive" else "missing"
+        for declared, content_state in zip(declared_statuses, content_states)
+    ]
+    # Matched IDs without a concept row stay in the denominator as unknown evidence.
+    statuses.extend(["unknown"] * unresolved_count)
     weight = sum(
         DEFINITION_TRUST_WEIGHT.get(status, DEFINITION_TRUST_WEIGHT["missing"])
         for status in statuses
     ) / len(statuses)
     return {
         "weight": round(weight, 4),
-        "status_counts": dict(sorted(status_counts.items())),
+        "basis": "unique_matched_concepts",
+        "concept_count": len(weighted_concepts),
+        "unresolved_concept_count": unresolved_count,
+        "status_counts": dict(sorted(Counter(statuses).items())),
+        "declared_status_counts": dict(sorted(Counter(declared_statuses).items())),
+        "content_state_counts": dict(sorted(Counter(content_states).items())),
+        "content_downgraded_count": sum(
+            1 for declared, status in zip(declared_statuses, statuses) if declared != status
+        ),
         "applied": True,
     }
 
@@ -1487,21 +1566,47 @@ def _course_delivery_relations(course: sqlite3.Row | dict[str, Any]) -> list[dic
 
 
 def _delivery_mode_profile(delivery_relations: list[sqlite3.Row] | list[dict[str, Any]]) -> dict[str, Any]:
-    values = [_clean(_row_dict(row).get("relation_value")) for row in delivery_relations]
-    methods = [
-        value
-        for value in values
-        if _row_dict({"relation_value": value})
-        and any(value.lower() in aliases or alias in value.lower() for aliases in METHOD_GROUP_ALIASES.values() for alias in aliases)
-    ]
-    facilities = [value for value in values if value and value not in methods and not re.fullmatch(r"\d+(?:\.\d+)?", value)]
-    text = " ".join(values).lower()
+    methods: list[str] = []
+    facilities: list[str] = []
+    unknown: list[str] = []
+    for raw in delivery_relations:
+        row = _row_dict(raw)
+        value = _clean(row.get("relation_value"))
+        if not value:
+            continue
+        relation_type = _clean(row.get("relation_type"))
+        if relation_type == "delivered_by":
+            methods.append(value)
+        elif relation_type == "uses_facility":
+            facilities.append(value)
+        elif relation_type in {"has_level", "requires_time"}:
+            continue
+        elif not relation_type:
+            # Compatibility for legacy value-only inputs: retain recognized
+            # method/facility hints, but never label arbitrary text a facility.
+            lower = value.lower()
+            if any(alias in lower for aliases in METHOD_GROUP_ALIASES.values() for alias in aliases):
+                methods.append(value)
+            elif re.search(r"\b(?:lab|center)\b|실습실|실습장|센터|교육장", lower):
+                facilities.append(value)
+            else:
+                unknown.append(value)
+        else:
+            unknown.append(value)
+    method_text = " ".join(methods).lower()
+    facility_text = " ".join(facilities).lower()
+    method_groups = [_method_groups([value]) for value in methods]
     return {
         "methods": sorted(set(methods)),
         "facilities": sorted(set(facilities)),
-        "practical_method": any(token in text for token in ("practice", "실습", "현장")),
-        "practical_facility": any(token in text for token in ("lab", "center", "실습", "센터")),
-        "remote_only": bool(values) and all("원격" in value or "online" in value.lower() for value in values),
+        "unknown_values": sorted(set(unknown)),
+        "review_required": bool(unknown),
+        "practical_method": any(token in method_text for token in ("practice", "실습", "현장")),
+        "practical_facility": any(token in facility_text for token in ("lab", "center", "실습", "센터")),
+        "remote_only": bool(methods) and not unknown and all(
+            "remote" in groups and not groups.intersection({"practice", "classroom"})
+            for groups in method_groups
+        ),
     }
 
 
@@ -4389,15 +4494,26 @@ def recommend_training_for_task(
         hit_source = _filter_concepts(source_concepts, set(match.get("source_hit_ids") or []), limit=20)
         hit_gap = _filter_concepts(source_concepts, set(match.get("gap_hit_ids") or []), limit=20)
         hit_goal = _filter_concepts(source_concepts, set(match.get("goal_hit_ids") or []), limit=20)
+        # Counts and trust use every matched concept once; the display lists above are
+        # truncated to 20 samples and overlap each other.
+        hit_ids_by_role = {
+            role: {int(value) for value in (match.get(f"{role}_hit_ids") or []) if int(value or 0)}
+            for role in ("source", "gap", "goal")
+        }
         coverage_counts = {
-            "source_ksa": len(hit_source),
-            "gap_ksa": len(hit_gap),
-            "goal_ksa": len(hit_goal),
+            "source_ksa": len(hit_ids_by_role["source"]),
+            "gap_ksa": len(hit_ids_by_role["gap"]),
+            "goal_ksa": len(hit_ids_by_role["goal"]),
             "elements": len(payload["element_links"]),
         }
-        definition_trust = _definition_trust_profile(hit_source + hit_gap + hit_goal)
+        trust_concept_ids = set().union(*hit_ids_by_role.values())
+        definition_trust = _definition_trust_profile(
+            _filter_concepts(source_concepts, trust_concept_ids, limit=len(source_concepts)),
+            requested_concept_ids=trust_concept_ids,
+        )
         match["definition_trust"] = definition_trust
-        definition_trust_weight = float(definition_trust.get("weight") or 1.0)
+        trust_weight_value = definition_trust.get("weight")
+        definition_trust_weight = float(DEFINITION_TRUST_WEIGHT["missing"] if trust_weight_value is None else trust_weight_value)
         confidence_score = round(max(0.0, min(1.0, score * definition_trust_weight)), 3)
         preference_fit = match.get("preference_fit") or {}
         delivery_evidence = {
@@ -4553,6 +4669,10 @@ def recommend_training_for_task(
             "score_weights": SCORE_WEIGHTS,
             "match_basis_weights": MATCH_BASIS_WEIGHTS,
             "definition_trust_weight": DEFINITION_TRUST_WEIGHT,
+            "definition_trust_policy": (
+                "unique matched concepts; empty or generated boilerplate definitions weigh as missing "
+                "regardless of status; confidence_score is a heuristic display weight, not a calibrated probability"
+            ),
             "generic_ksa_unit_threshold": GENERIC_KSA_UNIT_THRESHOLD,
             "max_same_sub_code_in_top_k": MAX_SAME_SUB_CODE_IN_TOP_K,
         },
@@ -4618,11 +4738,16 @@ def _course_explanation(
         lines.append("훈련목표 KSA: " + ", ".join(_concept_names(goal_hits[:5])))
     definition_trust = match.get("definition_trust") or {}
     if definition_trust.get("applied"):
-        lines.append(
+        line = (
             "KSA 정의 신뢰 가중치: "
             f"{float(definition_trust.get('weight') or 0.0):.2f} "
             f"({definition_trust.get('status_counts')})"
         )
+        if definition_trust.get("content_state_counts"):
+            line += f", 정의 본문 상태 {definition_trust.get('content_state_counts')}"
+        if definition_trust.get("basis") == "no_matched_concepts":
+            line += ", 매칭된 KSA 개념 없음"
+        lines.append(line)
     if match.get("reasons"):
         lines.append("근거 방식: " + ", ".join(match["reasons"][:8]))
     return lines
@@ -5361,6 +5486,27 @@ def _training_system_fit(
     }
 
 
+def _definition_trust_explanation(match: dict[str, Any]) -> str:
+    """Explain the existing trust profile without inferring absent definition text."""
+    trust = match.get("definition_trust") or {}
+    if not trust.get("applied"):
+        return ""
+    states = trust.get("content_state_counts") or {}
+    details = []
+    for state, label in (("empty", "정의 본문 없음"), ("boilerplate", "정형 정의")):
+        count = int(states.get(state) or 0)
+        if count:
+            details.append(f"{label} {count}개")
+    unresolved = int(trust.get("unresolved_concept_count") or 0)
+    if unresolved:
+        details.append(f"개념 정보 미확인 {unresolved}개")
+    if trust.get("basis") == "no_matched_concepts":
+        details.append("연결된 KSA 개념이 없어 정의 근거 미확인")
+    if not details:
+        details.append("정의와 검토 상태 확인 필요")
+    return "KSA 정의 신뢰도: " + ", ".join(details) + ". 과정 근거와 별도로 정의 검토가 필요합니다."
+
+
 def _compact_course_card(
     raw: dict[str, Any],
     *,
@@ -5380,8 +5526,15 @@ def _compact_course_card(
     if tier == "supplemental" and score < 0.35:
         tier = "adjacent_reference"
     rationale = item.get("rationale") or (item.get("recommendation_tier") or {}).get("rationale") or ""
+    definition_explanation = _definition_trust_explanation(match)
     if tier == "adjacent_reference":
-        rationale = "참고 과정입니다. 직접 근거가 약하므로 검토용으로만 사용하세요."
+        directness = _evidence_directness(match, item.get("coverage_counts") or {})
+        if directness["code"] == "weak":
+            rationale = "참고 과정입니다. 직접 근거가 약하므로 검토용으로만 사용하세요."
+        else:
+            rationale = f"참고 과정입니다. {directness['label']}는 있으나 종합 신뢰도와 범위 적합성을 검토하세요."
+        if definition_explanation:
+            rationale += " " + definition_explanation
     highlights = dict(item.get("evidence_highlights") or _evidence_highlights(item))
     coverage_counts = {
         "source_ksa": 0,
@@ -5421,6 +5574,8 @@ def _compact_course_card(
         if not basis and item.get("evidence_strength"):
             basis.append(str((item.get("evidence_strength") or {}).get("label") or "evidence"))
         why.append("근거 방식: " + ", ".join(basis))
+    if definition_explanation:
+        why.append(definition_explanation)
     quality_penalty = _quality_issue_penalty_summary(match)
     if quality_penalty:
         if not quality_penalty.get("affected_concepts"):

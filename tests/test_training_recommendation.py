@@ -25,6 +25,8 @@ if str(SCRIPTS) not in sys.path:
 from ksa_label_codex_judge import evaluate_candidate
 
 from ncs_mcp.db import (
+    KSA_DEFINITION_BOILERPLATE_PREFIXES,
+    _term_definition_text_for_concept,
     build_ksa_label_candidates,
     build_ksa_meaning_candidates,
     compact_ksa_representative_label,
@@ -54,6 +56,7 @@ from ncs_mcp.training_course_api import parse_training_course_xml, upsert_traini
 from ncs_mcp.training_recommendation import (
     BROAD_GENERIC_KSA_MIN_MAJOR_COUNT,
     BROAD_GENERIC_KSA_PENALTY,
+    DEFINITION_TRUST_WEIGHT,
     DIRECT_UNIT_DIVERSITY_BYPASS_SCORE,
     DUPLICATE_KSA_PENALTY,
     SHORT_KSA_PENALTY,
@@ -66,6 +69,9 @@ from ncs_mcp.training_recommendation import (
     _course_candidate_sort_key,
     _score_course,
     _course_delivery_relations,
+    _compact_course_card,
+    _delivery_mode_profile,
+    _definition_trust_profile,
     _diversify_top_k_candidates,
     _is_distant_scope_concept_only_candidate,
     _preferred_course_candidates_for_top_k,
@@ -75,6 +81,7 @@ from ncs_mcp.training_recommendation import (
     _recommendation_tier,
     _resolution_classification_filters,
     _significant_tokens,
+    _split_training_methods,
     _task_concepts,
     _transition_case_course_evidence,
     _training_system_guide_trace,
@@ -423,6 +430,339 @@ class TrainingRecommendationTests(unittest.TestCase):
             round(before_item["score_components"]["final_score"] * SHORT_KSA_PENALTY, 4),
         )
         self.assertLess(after_item["confidence_score"], before_item["confidence_score"])
+
+    def test_definition_trust_does_not_trust_boilerplate_from_status_alone(self) -> None:
+        boilerplate = {
+            "concept_id": 1,
+            "concept_name": "인사기획",
+            "concept_type": "knowledge",
+            "definition": f"인사기획: {KSA_DEFINITION_BOILERPLATE_PREFIXES['knowledge']}",
+            "definition_status": "defined",
+            "review_status": "human_reviewed",
+        }
+        generated = {
+            "concept_id": 2,
+            "concept_name": "관리회계",
+            "concept_type": "knowledge",
+            "definition": _term_definition_text_for_concept({"concept_name": "관리회계", "concept_type": "knowledge"}),
+            "definition_status": "candidate",
+            "review_status": "llm_reviewed",
+        }
+        name_only = {
+            "concept_id": 3,
+            "concept_name": "직무분석",
+            "concept_type": "skill",
+            "definition": "직무분석:",
+            "definition_status": "candidate",
+            "review_status": "model_preprocessed",
+        }
+
+        profile = _definition_trust_profile([boilerplate, generated, name_only])
+
+        self.assertEqual(profile["status_counts"], {"missing": 3})
+        self.assertEqual(
+            profile["declared_status_counts"],
+            {"candidate": 1, "human_reviewed": 1, "llm_reviewed": 1},
+        )
+        self.assertEqual(profile["content_state_counts"], {"boilerplate": 3})
+        self.assertEqual(profile["content_downgraded_count"], 3)
+        self.assertEqual(profile["weight"], DEFINITION_TRUST_WEIGHT["missing"])
+
+    def test_definition_trust_catches_served_template_variants(self) -> None:
+        # Variants served from ksa_meaning_candidates.term_definition_template that the
+        # canonical prefix list does not spell out.
+        knowledge_variant = {
+            "concept_id": 1,
+            "concept_name": "관리회계",
+            "concept_type": "knowledge",
+            "definition": "관리회계: 업무 판단과 문제 해결에 필요한 관련 원리, 기준, 절차, 사례를 이해하는 지식.",
+            "definition_status": "candidate",
+            "review_status": "model_preprocessed",
+        }
+        skill_variant = {
+            "concept_id": 2,
+            "concept_name": "인사전략 작성 기술",
+            "concept_type": "skill",
+            "definition": "인사전략 작성 기술: 업무 상황에서 관련 절차나 도구를 활용해 과업을 수행하는 기술.",
+            "definition_status": "candidate",
+            "review_status": "model_preprocessed",
+        }
+        template_source = {
+            "concept_id": 3,
+            "concept_name": "직무분석",
+            "concept_type": "skill",
+            "definition": "직무분석: 직무 정보를 수집하고 구조화하는 능력.",
+            "definition_source": "ksa_meaning_candidates.term_definition_template",
+            "definition_status": "candidate",
+            "review_status": "model_preprocessed",
+        }
+        written = dict(template_source, concept_id=4, definition_source="operator_review")
+
+        profile = _definition_trust_profile([knowledge_variant, skill_variant, template_source, written])
+
+        self.assertEqual(profile["content_state_counts"], {"boilerplate": 3, "substantive": 1})
+        self.assertEqual(profile["status_counts"], {"candidate": 1, "missing": 3})
+        self.assertEqual(profile["declared_status_counts"], {"candidate": 4})
+
+    def test_definition_trust_requires_text_and_human_decision_for_full_weight(self) -> None:
+        def concept(concept_id: int, **fields: str | None) -> dict[str, object]:
+            return {
+                "concept_id": concept_id,
+                "concept_name": "workforce planning",
+                "concept_type": "knowledge",
+                "definition": "Workforce planning matches staffing levels to business demand.",
+                "definition_status": "defined",
+                "review_status": "human_reviewed",
+                **fields,
+            }
+
+        for review_status in TRUSTED_TRANSITION_REVIEW_STATUSES:
+            with self.subTest(review_status=review_status):
+                profile = _definition_trust_profile([concept(1, review_status=review_status)])
+                self.assertEqual(profile["status_counts"], {"human_reviewed": 1})
+                self.assertEqual(profile["weight"], DEFINITION_TRUST_WEIGHT["human_reviewed"])
+                self.assertEqual(profile["content_downgraded_count"], 0)
+
+        # A human review status on a candidate or missing definition is not a reviewed definition.
+        candidate = _definition_trust_profile([concept(2, definition_status="candidate")])
+        self.assertEqual(candidate["status_counts"], {"candidate": 1})
+        self.assertEqual(candidate["weight"], DEFINITION_TRUST_WEIGHT["candidate"])
+        declared_missing = _definition_trust_profile([concept(3, definition_status="missing")])
+        self.assertEqual(declared_missing["status_counts"], {"missing": 1})
+
+        for empty in (None, "", "   "):
+            with self.subTest(definition=empty):
+                profile = _definition_trust_profile(
+                    [concept(4, definition=empty, review_status="llm_reviewed", definition_status="candidate")]
+                )
+                self.assertEqual(profile["content_state_counts"], {"empty": 1})
+                self.assertEqual(profile["declared_status_counts"], {"llm_reviewed": 1})
+                self.assertEqual(profile["status_counts"], {"missing": 1})
+                self.assertEqual(profile["weight"], DEFINITION_TRUST_WEIGHT["missing"])
+
+    def test_definition_trust_counts_each_concept_once_and_unknown_basis_is_not_trusted(self) -> None:
+        reviewed = {
+            "concept_id": 10,
+            "concept_name": "workforce planning",
+            "concept_type": "knowledge",
+            "definition": "Workforce planning matches staffing levels to business demand.",
+            "definition_status": "defined",
+            "review_status": "human_reviewed",
+        }
+        missing = {
+            "concept_id": 11,
+            "concept_name": "workforce analysis",
+            "concept_type": "skill",
+            "definition": None,
+            "definition_status": "missing",
+            "review_status": "raw",
+        }
+
+        profile = _definition_trust_profile(
+            [reviewed, reviewed, reviewed, missing],
+            requested_concept_ids={10, 11, 99},
+        )
+
+        self.assertEqual(profile["concept_count"], 2)
+        self.assertEqual(profile["unresolved_concept_count"], 1)
+        # The unresolved ID stays in the denominator as unknown evidence.
+        self.assertEqual(profile["status_counts"], {"human_reviewed": 1, "missing": 1, "unknown": 1})
+        self.assertAlmostEqual(
+            profile["weight"],
+            round(
+                (DEFINITION_TRUST_WEIGHT["human_reviewed"] + 2 * DEFINITION_TRUST_WEIGHT["missing"]) / 3,
+                4,
+            ),
+        )
+
+        unresolved_only = _definition_trust_profile([], requested_concept_ids={99})
+        self.assertEqual(unresolved_only["status_counts"], {"unknown": 1})
+        self.assertEqual(unresolved_only["unresolved_concept_count"], 1)
+        self.assertEqual(unresolved_only["weight"], DEFINITION_TRUST_WEIGHT["missing"])
+
+        empty = _definition_trust_profile([])
+        self.assertEqual(empty["basis"], "no_matched_concepts")
+        self.assertTrue(empty["applied"])
+        self.assertEqual(empty["weight"], DEFINITION_TRUST_WEIGHT["missing"])
+
+    def test_coverage_counts_and_trust_use_all_hits_beyond_display_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "ncs.db")
+            try:
+                initialize_database(conn)
+                fixture = seed_task_ontology(conn)
+                timestamp = now_utc()
+                element_id = conn.execute(
+                    "SELECT element_id FROM competency_elements WHERE unit_code = ?",
+                    (fixture["unit_code"],),
+                ).fetchone()["element_id"]
+                # ksa_concept_links is unique per KSA, so each synthetic concept gets its
+                # own synthetic KSA row in this temporary fixture DB.
+                for index in range(25):
+                    concept_name = f"workforce topic {index:02d}"
+                    ksa_id = conn.execute(
+                        """
+                        INSERT INTO ksa_items(element_id, ksa_type_code, ksa_type_name, ksa_no, ksa_text_raw)
+                        VALUES (?, '01', 'knowledge', ?, ?)
+                        """,
+                        (element_id, str(index + 10), concept_name),
+                    ).lastrowid
+                    concept_id = conn.execute(
+                        """
+                        INSERT INTO ontology_concepts(
+                            concept_name, normalized_key, concept_type, definition_status,
+                            relation_status, review_status, created_at, updated_at
+                        ) VALUES (?, ?, 'knowledge', 'missing', 'unlinked', 'raw', ?, ?)
+                        """,
+                        (concept_name, f"workforcetopic{index:02d}", timestamp, timestamp),
+                    ).lastrowid
+                    conn.execute(
+                        "INSERT INTO ksa_concept_links(ksa_id, concept_id, link_status, created_at) VALUES (?, ?, 'raw', ?)",
+                        (ksa_id, concept_id, timestamp),
+                    )
+                upsert_training_courses(
+                    conn,
+                    [
+                        {
+                            "ncs_lclas_cd": "02",
+                            "ncs_lclas_cdnm": "Business",
+                            "ncs_mclas_cd": "02",
+                            "ncs_mclas_cdnm": "HR",
+                            "ncs_sclas_cd": "02",
+                            "ncs_sclas_cdnm": "HRM",
+                            "ncs_subd_cd": "01",
+                            "ncs_subd_cdnm": "HR planning",
+                            "ncs_cl_cd": fixture["unit_code"],
+                            "compe_unit_name": "HR planning",
+                            "compe_unit_level": "5",
+                            "train_goal": "Learn workforce planning practice.",
+                            "train_time": "16",
+                            "fac_name": "HR center",
+                            "meth_name": "Practice",
+                        }
+                    ],
+                )
+                build_training_course_ontology_links(conn)
+                result = recommend_training_for_task(
+                    conn,
+                    criteria_id=int(fixture["criteria_id"]),
+                    query="workforce",
+                    limit=1,
+                    save=False,
+                )
+            finally:
+                conn.close()
+
+        self.assertTrue(result["ok"])
+        item = result["recommendations"][0]
+        source_ids = set(item["match"]["source_hit_ids"])
+        all_ids = source_ids | set(item["match"]["gap_hit_ids"]) | set(item["match"]["goal_hit_ids"])
+        self.assertGreater(len(source_ids), 20)
+        self.assertEqual(len(item["matched_source_ksa_concepts"]), 20)
+        self.assertEqual(item["coverage_counts"]["source_ksa"], len(source_ids))
+        self.assertEqual(item["coverage_counts"]["goal_ksa"], len(set(item["match"]["goal_hit_ids"])))
+        trust = item["match"]["definition_trust"]
+        self.assertEqual(trust["concept_count"], len(all_ids))
+        self.assertEqual(sum(trust["status_counts"].values()), len(all_ids))
+        self.assertEqual(trust["unresolved_concept_count"], 0)
+
+    def test_boilerplate_definitions_lower_confidence_without_changing_ranking(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "ncs.db")
+            try:
+                initialize_database(conn)
+                fixture = seed_task_ontology(conn)
+                upsert_training_courses(
+                    conn,
+                    [
+                        {
+                            "ncs_lclas_cd": "02",
+                            "ncs_lclas_cdnm": "Business",
+                            "ncs_mclas_cd": "02",
+                            "ncs_mclas_cdnm": "HR",
+                            "ncs_sclas_cd": "02",
+                            "ncs_sclas_cdnm": "HRM",
+                            "ncs_subd_cd": "01",
+                            "ncs_subd_cdnm": "HR planning",
+                            "ncs_cl_cd": fixture["unit_code"],
+                            "compe_unit_name": "HR planning",
+                            "compe_unit_level": "5",
+                            "train_goal": "Learn workforce planning practice.",
+                            "train_time": "16",
+                            "fac_name": "HR center",
+                            "meth_name": "Practice",
+                        }
+                    ],
+                )
+                build_training_course_ontology_links(conn)
+                before = recommend_training_for_task(
+                    conn,
+                    criteria_id=int(fixture["criteria_id"]),
+                    query="workforce",
+                    limit=3,
+                    save=False,
+                )
+                # Contradictory fixture state: trusted status columns over generated template text.
+                for row in conn.execute("SELECT concept_id, concept_name, concept_type FROM ontology_concepts").fetchall():
+                    conn.execute(
+                        """
+                        UPDATE ontology_concepts
+                        SET definition = ?, definition_status = 'defined', review_status = 'human_reviewed'
+                        WHERE concept_id = ?
+                        """,
+                        (
+                            f"{row['concept_name']}: {KSA_DEFINITION_BOILERPLATE_PREFIXES[row['concept_type']]}"
+                            if row["concept_type"] in KSA_DEFINITION_BOILERPLATE_PREFIXES
+                            else _term_definition_text_for_concept(row),
+                            row["concept_id"],
+                        ),
+                    )
+                after = recommend_training_for_task(
+                    conn,
+                    criteria_id=int(fixture["criteria_id"]),
+                    query="workforce",
+                    limit=3,
+                    save=False,
+                )
+            finally:
+                conn.close()
+
+        self.assertTrue(before["ok"])
+        self.assertTrue(after["ok"])
+        self.assertEqual(
+            [item["training_course"]["training_course_id"] for item in before["recommendations"]],
+            [item["training_course"]["training_course_id"] for item in after["recommendations"]],
+        )
+        before_item = before["recommendations"][0]
+        after_item = after["recommendations"][0]
+        hit_ids = {
+            int(value)
+            for key in ("source_hit_ids", "gap_hit_ids", "goal_hit_ids")
+            for value in before_item["match"].get(key) or []
+        }
+        self.assertTrue(hit_ids)
+        before_trust = before_item["match"]["definition_trust"]
+        self.assertEqual(before_trust["concept_count"], len(hit_ids))
+        self.assertEqual(sum(before_trust["status_counts"].values()), len(hit_ids))
+        self.assertEqual(before_trust["content_downgraded_count"], 0)
+        self.assertEqual(before_trust["status_counts"], {"candidate": len(hit_ids)})
+
+        after_trust = after_item["match"]["definition_trust"]
+        self.assertEqual(after_trust["declared_status_counts"], {"human_reviewed": len(hit_ids)})
+        self.assertEqual(after_trust["content_state_counts"], {"boilerplate": len(hit_ids)})
+        self.assertEqual(after_trust["status_counts"], {"missing": len(hit_ids)})
+        self.assertEqual(after_trust["weight"], DEFINITION_TRUST_WEIGHT["missing"])
+        self.assertEqual(
+            after_item["score_components"]["final_score"],
+            before_item["score_components"]["final_score"],
+        )
+        self.assertAlmostEqual(
+            after_item["confidence_score"],
+            after_item["score_components"]["final_score"] * DEFINITION_TRUST_WEIGHT["missing"],
+            places=2,
+        )
+        self.assertLess(after_item["confidence_score"], before_item["confidence_score"])
+        self.assertTrue(any("정의 본문 상태" in line for line in after_item["explanation"]))
 
     def test_same_as_noncanonical_concept_penalizes_recommendation_score(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2619,6 +2959,195 @@ class TrainingRecommendationTests(unittest.TestCase):
             if relation["relation_type"] == "delivered_by"
         ]
         self.assertEqual(methods, ["Lecture", "Practice"])
+
+    def test_split_training_methods_separates_korean_tokens_in_source_order(self) -> None:
+        self.assertEqual(
+            _split_training_methods("현장실습원격훈련 집체훈련현장견학현장실습"),
+            ["현장실습", "원격훈련", "집체훈련", "현장견학"],
+        )
+
+    def test_split_training_methods_preserves_delimiters_unknown_fragments_and_empty(self) -> None:
+        self.assertEqual(
+            _split_training_methods("토론원격훈련맞춤워크숍/현장실습;질의응답,집체훈련;토론"),
+            ["토론", "원격훈련", "맞춤워크숍", "현장실습", "질의응답", "집체훈련"],
+        )
+        for empty in (None, "", " \t\n", ",;/"):
+            with self.subTest(empty=empty):
+                self.assertEqual(_split_training_methods(empty), [])
+        self.assertEqual(_split_training_methods("맞춤형 워크숍"), ["맞춤형 워크숍"])
+
+    def test_split_training_methods_normalizes_english_case_without_partial_word_matches(self) -> None:
+        self.assertEqual(
+            _split_training_methods("classroomPRACTICE/Practice;CLASSROOM,원격훈련practice"),
+            ["Classroom", "Practice", "원격훈련"],
+        )
+        self.assertEqual(
+            _split_training_methods("malpractice;Classroomish/Practitioner"),
+            ["malpractice", "Classroomish", "Practitioner"],
+        )
+
+    def test_delivery_profile_exposes_separate_korean_methods_and_preserves_evidence(self) -> None:
+        raw = "원격훈련집체훈련현장실습"
+        relations = _course_delivery_relations({"meth_name": raw})
+        self.assertEqual(
+            [row["relation_value"] for row in relations],
+            ["원격훈련", "집체훈련", "현장실습"],
+        )
+        self.assertTrue(all(row["relation_type"] == "delivered_by" for row in relations))
+        self.assertTrue(all(row["evidence_text"] == raw for row in relations))
+        profile = _delivery_mode_profile(relations)
+        self.assertEqual(set(profile["methods"]), {"원격훈련", "집체훈련", "현장실습"})
+        self.assertTrue(profile["practical_method"])
+        self.assertFalse(profile["remote_only"])
+        self.assertEqual(profile["facilities"], [])
+
+    def test_recommendation_preserves_unknown_method_and_matches_requested_method(self) -> None:
+        raw = "원격훈련토론현장실습"
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "ncs.db")
+            try:
+                initialize_database(conn)
+                fixture = seed_task_ontology(conn)
+                upsert_training_courses(conn, [{
+                    "ncs_cl_cd": fixture["unit_code"],
+                    "compe_unit_name": "HR planning",
+                    "compe_unit_level": "5",
+                    "train_goal": "Learn workforce planning practice.",
+                    "train_time": "16", "meth_name": raw,
+                }])
+                build_training_course_ontology_links(conn)
+                result = recommend_training_for_task(
+                    conn, criteria_id=int(fixture["criteria_id"]), query="workforce",
+                    preferred_methods=["토론"], limit=1, save=False,
+                )
+                stored = conn.execute("SELECT meth_name FROM ncs_training_courses").fetchone()["meth_name"]
+                self.assertEqual(stored, raw)
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM education_recommendation_runs").fetchone()[0], 0)
+            finally:
+                conn.close()
+        self.assertTrue(result["ok"])
+        item = result["recommendations"][0]
+        methods = [row["relation_value"] for row in item["delivery_evidence"]["relations"] if row["relation_type"] == "delivered_by"]
+        self.assertEqual(methods, ["원격훈련", "토론", "현장실습"])
+        self.assertIn("토론", item["delivery_evidence"]["profile"]["methods"])
+        self.assertNotIn("토론", item["delivery_evidence"]["profile"]["facilities"])
+        self.assertTrue(item["preference_fit"]["method_fit"])
+        self.assertIn("토론", item["preference_fit"]["matched_method_groups"])
+        self.assertIn("preferred_method_fit", item["match"]["reasons"])
+
+    def test_delivery_profile_prefers_typed_evidence_and_keeps_unknown_values_for_review(self) -> None:
+        profile = _delivery_mode_profile([
+            {"relation_type": "delivered_by", "relation_value": "토론"},
+            {"relation_type": "uses_facility", "relation_value": "Practice lab"},
+            {"relation_type": "requires_time", "relation_value": "16 시간"},
+            {"relation_type": "has_level", "relation_value": "5"},
+            {"relation_type": "unrecognized", "relation_value": "Classroom"},
+            {"relation_value": "미상"},
+        ])
+        self.assertEqual(profile["methods"], ["토론"])
+        self.assertEqual(profile["facilities"], ["Practice lab"])
+        self.assertEqual(profile["unknown_values"], ["Classroom", "미상"])
+        self.assertTrue(profile["review_required"])
+        self.assertFalse(profile["practical_method"])
+        self.assertTrue(profile["practical_facility"])
+
+    def test_delivery_profile_remote_only_uses_methods_not_hours_or_facilities(self) -> None:
+        profile = _delivery_mode_profile([
+            {"relation_type": "delivered_by", "relation_value": "원격훈련"},
+            {"relation_type": "requires_time", "relation_value": "16 시간"},
+            {"relation_type": "has_level", "relation_value": "5"},
+            {"relation_type": "uses_facility", "relation_value": "Practice lab"},
+        ])
+        self.assertTrue(profile["remote_only"])
+        self.assertFalse(profile["practical_method"])
+        self.assertTrue(profile["practical_facility"])
+        self.assertEqual(profile["facilities"], ["Practice lab"])
+        self.assertFalse(profile["review_required"])
+        self.assertFalse(_delivery_mode_profile([])["remote_only"])
+
+    def test_delivery_profile_legacy_values_keep_known_fallback_without_guessing_unknown_facilities(self) -> None:
+        profile = _delivery_mode_profile([
+            {"relation_value": "Practice"}, {"relation_value": "HR center"},
+            {"relation_value": "맞춤활동"}, {"relation_value": "16"},
+        ])
+        self.assertEqual(profile["methods"], ["Practice"])
+        self.assertEqual(profile["facilities"], ["HR center"])
+        self.assertEqual(profile["unknown_values"], ["16", "맞춤활동"])
+        self.assertTrue(profile["review_required"])
+
+    def test_compact_facility_fit_does_not_promote_unknown_methods_to_conflicting_facilities(self) -> None:
+        raw = {"course_name": "HR planning", "training_course_id": 1,
+               "tier": "primary", "confidence_score": 0.3, "confidence_grade": "low"}
+        method = {"relation_type": "delivered_by", "relation_value": "토론"}
+        for relations, expected in (([method], "unknown"),
+                                    ([method, {"relation_type": "uses_facility", "relation_value": "Office"}], "mismatch")):
+            with self.subTest(expected=expected):
+                item = {**raw, "delivery_evidence": {"relations": relations, "profile": _delivery_mode_profile(relations)}}
+                card = _compact_course_card(item, preferred_facilities=["Lab"])
+                self.assertEqual(card["facility_constraint_fit"]["status"], expected)
+                self.assertEqual(card["confidence_score"], raw["confidence_score"])
+                self.assertFalse(card["human_review"]["status_update_allowed"])
+        item = {**raw, "delivery_evidence": {"relations": [method], "profile": _delivery_mode_profile([method])}}
+        self.assertEqual(_compact_course_card(item)["facility_constraint_fit"]["status"], "not_requested")
+
+    def test_compact_card_keeps_confidence_threshold_and_primary_tier(self) -> None:
+        for confidence in (0.349, 0.35, 0.351):
+            for tier in ("supplemental", "primary"):
+                with self.subTest(confidence=confidence, tier=tier):
+                    card = _compact_course_card({
+                        "course_name": "HR planning", "training_course_id": 1,
+                        "tier": tier, "confidence_score": confidence, "confidence_grade": "low",
+                    })
+                    expected = "adjacent_reference" if tier == "supplemental" and confidence < 0.35 else tier
+                    self.assertEqual(card["tier"], expected)
+                    self.assertEqual(card["confidence_score"], confidence)
+                    if tier == "primary":
+                        self.assertEqual(card["tier_label"], "우선 검토")
+
+    def test_compact_definition_trust_explains_direct_course_without_changing_policy(self) -> None:
+        trust = _definition_trust_profile([
+            {"concept_id": 1, "concept_name": "planning", "definition": ""},
+        ])
+        raw = {"rank": 2, "course_name": "Direct planning", "tier": "supplemental",
+               "confidence_score": 0.28, "confidence_grade": "low",
+               "match": {"goal_direct_concept_hits": 1, "definition_trust": trust}}
+        card = _compact_course_card(raw)
+        self.assertEqual(card["tier"], "adjacent_reference")
+        self.assertEqual(card["rank"], 2)
+        self.assertEqual(card["confidence_score"], 0.28)
+        self.assertIn("훈련목표 직접 KSA 근거", card["rationale"])
+        self.assertIn("정의 본문 없음 1개", card["rationale"])
+        self.assertNotIn("직접 근거가 약하므로", card["rationale"])
+        self.assertTrue(any("정의 본문 없음" in reason for reason in card["why_recommended"]))
+        self.assertFalse(any("가중치" in reason for reason in card["why_recommended"]))
+        self.assertFalse(card["human_review"]["approval_claim"])
+        primary = _compact_course_card({**raw, "tier": "primary"})
+        self.assertEqual(primary["tier_label"], "우선 검토")
+        self.assertTrue(any("정의 본문 없음" in reason for reason in primary["why_recommended"]))
+
+    def test_compact_weak_course_keeps_weak_basis_and_distinguishes_boilerplate(self) -> None:
+        trust = _definition_trust_profile([{
+            "concept_id": 1, "concept_name": "planning", "concept_type": "knowledge",
+            "definition": "planning: 업무 판단과 문제 해결에 필요한 관련 원리, 기준, 절차, 사례에 대한 지식.",
+        }])
+        card = _compact_course_card({
+            "course_name": "Weak course", "tier": "supplemental", "confidence_score": 0.1,
+            "match": {"definition_trust": trust},
+        })
+        self.assertIn("직접 근거가 약하므로", card["rationale"])
+        self.assertIn("정형 정의 1개", card["rationale"])
+        self.assertNotIn("정의 본문 없음", card["rationale"])
+
+    def test_compact_unknown_concept_basis_does_not_claim_empty_definitions(self) -> None:
+        for trust in (_definition_trust_profile([]),
+                      _definition_trust_profile([], requested_concept_ids={99})):
+            with self.subTest(basis=trust["basis"]):
+                card = _compact_course_card({
+                    "course_name": "Unknown basis", "tier": "supplemental", "confidence_score": 0.2,
+                    "match": {"definition_trust": trust},
+                })
+                self.assertIn("미확인", card["rationale"])
+                self.assertNotIn("정의 본문 없음", card["rationale"])
 
     def test_task_recommendation_requires_task_locator(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
