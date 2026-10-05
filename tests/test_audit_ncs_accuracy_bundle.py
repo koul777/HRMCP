@@ -297,7 +297,11 @@ class AccuracyBundleTests(unittest.TestCase):
                 bundle.validate_outputs(db, [src], base)
             with self.assertRaises(ValueError):
                 bundle.validate_outputs(db, [src], src / "reports")
-            self.assertEqual(bundle.validate_outputs(db, [src], base / "reports"), base / "reports")
+            # Windows TEMP can use an 8.3 alias; validate_outputs returns a resolved path.
+            self.assertEqual(
+                bundle.validate_outputs(db, [src], base / "reports"),
+                (base / "reports").resolve(),
+            )
 
     def test_hardlink_output_does_not_overwrite_db(self):
         with tempfile.TemporaryDirectory() as tmp:
