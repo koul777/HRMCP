@@ -42,9 +42,9 @@ so a new blind holdout remains unmeasured.
 
 ## PC validation
 
-The imported search workflow's checks plus deployment preflight and the
-additional audit test ran 401 tests: 399 passed and the same two preexisting
-real-DB routing failures remained. Those failures were also independently
+The initial imported search workflow's checks plus deployment preflight and
+the additional audit test ran 401 tests: 399 passed and two preexisting
+real-DB routing tests failed. Those failures were also independently
 reproduced on unchanged `7ee69be` during the earlier PC validation:
 
 - `test_direct_unknown_explicit_job_request_fails_closed`: unresolved query
@@ -54,6 +54,7 @@ reproduced on unchanged `7ee69be` during the earlier PC validation:
   existing fallback removes `params.job_scope` and the test raises `KeyError`.
 
 The router and facade implementation were not changed by this import.
+The stale real-DB expectations were corrected in the follow-up below.
 An additional 31 deployment source-boundary/preview tests passed, as did
 repository lint and isolated smoke. Local command logs and JUnit evidence
 are under `.state/search-bundle-import-20261010/`.
@@ -94,9 +95,37 @@ The frozen baseline copy was also verified against all 108 tracked Python
 source files from `7ee69be`. No further runtime tuning followed the same-DB
 measurements. Subsequent commits record completed validation only.
 
-The synthetic CI environment skips the real-DB routing checks above, so CI
-success does not resolve those two local baseline failures. The fresh blind
-holdout and remaining category MRR limitations still apply.
+The synthetic CI environment skips the real-DB routing checks above. Their
+initial failures were investigated with the actual local DB in the follow-up
+below. The fresh blind holdout and remaining category MRR limitations still apply.
+
+## Follow-up search and deployment checks
+
+The requested PC rerun initially reproduced the two failures: 386 passed and
+2 failed across the search workflow's 18 modules. Deployment runtime, source
+sync, preflight, source boundary, and preview verification passed all 43 tests.
+
+Commit `3ab44b5`, already present before baseline `7ee69be`, intentionally
+introduced lexical fallback for unresolved subjects inferred from job-style
+query framing. Its mocked facade and discovery tests cover that behavior, but
+the two older real-DB tests still expected every inferred unresolved subject
+to fail closed. The runtime already distinguishes query-inferred framing from
+caller-supplied job scope and classification filters.
+
+The two real-DB tests now check the established contract with stronger boundary
+assertions: an inferred unknown subject returns the same ordered source IDs as
+its bare lexical query, carries fallback provenance, and claims no hard scope.
+An explicit unresolved `job_scope` still fails before the search handler. The
+hospitality discovery/meta-execution test checks lexical fallback and blocks
+both an explicit unresolved job scope and a caller classification filter.
+No search, router, facade, or deployment runtime code was changed.
+
+After the test correction, all 7 real-DB routing tests passed. The full 18-module
+search rerun passed 388 tests with no failures, errors, or skips; the PC has the
+canonical DB that is absent in CI. The 43 deployment checks also passed, as did
+repository lint and isolated smoke. JUnit artifacts are under
+`.state/search-bundle-import-20261010/step4/`; the companion JSON records this
+follow-up separately from the historical initial-import failure evidence.
 
 No source DB writes, human-review status changes, production deployment, or
 credential output are part of this import.

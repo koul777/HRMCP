@@ -806,7 +806,8 @@
       "warnings": 0,
       "issues": []
     },
-    "smoke_passed": true
+    "smoke_passed": true,
+    "historical_before_step4": true
   },
   "source_sha256": {
     "src/ncs_mcp/search/core.py": "44380124446a7871cff406fd99c3786b5ade06fc91f4e0062213ff59116ee8fc",
@@ -964,5 +965,63 @@
     "exit_code": 0,
     "applied": false,
     "log": ".state/search-bundle-import-20261010/workspace_hygiene_after.json"
+  },
+  "latest_local_validation": "step4_validation",
+  "step4_validation": {
+    "generated_at": "2026-10-10T14:33:38.062796+00:00",
+    "search_before": {
+      "tests": 388,
+      "failures": 2,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 386,
+      "artifact": ".state/search-bundle-import-20261010/step4/search-before.xml",
+      "sha256": "7ea78b5d57343e8ffa047597a7d58f834c49a283f8352dba2ce7789f8da70ea6"
+    },
+    "search_after": {
+      "tests": 388,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 388,
+      "artifact": ".state/search-bundle-import-20261010/step4/search-after.xml",
+      "sha256": "41cd53c232dc36f0c0d3b89dbad0a1ee6b9dbbd6dca5eace4571520b3603a362"
+    },
+    "deployment": {
+      "tests": 43,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 43,
+      "artifact": ".state/search-bundle-import-20261010/step4/deploy-before.xml",
+      "sha256": "bb3a24bd67f6be52f5427683f8cba7cabd63b1fd9a83e452495c8ebd3c2f59d3"
+    },
+    "real_db_router_after": {
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 7,
+      "artifact": ".state/search-bundle-import-20261010/step4/router-real-db-after.xml",
+      "sha256": "290503f854a54045db09ea3771b0ec293bf77b65d8eb325e4098febc506c740f"
+    },
+    "resolution": "Correct two stale real-DB test expectations to the existing query-inferred lexical fallback contract; retain caller-scope and classification-filter fail-closed checks.",
+    "contract_origin_commit": "3ab44b589df0e6c4e40d2f7ac99d060c4997f44d",
+    "contract_origin_precedes_bundle_baseline": true,
+    "search_runtime_changes": false,
+    "router_or_facade_changes": false,
+    "regression_test_count_unchanged": true,
+    "lint": {
+      "ok": true,
+      "errors": 0,
+      "warnings": 0
+    },
+    "isolated_smoke_passed": true,
+    "db_writes": false,
+    "human_approval_claim": false,
+    "test_changes": [
+      "test_direct_unresolved_subject_is_lexical_but_caller_scope_fails_closed",
+      "test_unresolved_hospitality_subject_keeps_caller_scope_and_filter_guards"
+    ]
   }
 }

@@ -122,6 +122,12 @@ can use `--surface public` to exercise `ncs_search` routing and scope guards as
 well as the search core; validation errors count as misses. The router treats
 the standard name 국가직무능력표준 as a standard reference, not a job named 국가.
 An actual request such as `인사 직무에 필요한 역량` still binds its job scope.
+If a job-like subject inferred only from the query cannot resolve to an exact
+NCS scope and no caller classification filter is present, the facade searches
+the stripped subject lexically. Discovery records `lexical_subject_fallback`
+without promoting a hard scope. Caller-supplied `job_scope` and classification
+filters retain the fail-closed scope checks; unresolved explicit constraints
+cannot execute an unrestricted search.
 Reports
 include per-template and per-major results, source identifiers, and runtime/DB
 stability. These synthetic request-framing checks do not establish independent

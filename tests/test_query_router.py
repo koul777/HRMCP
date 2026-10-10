@@ -1540,17 +1540,38 @@ class ExplicitJobScopeRealDbRegressionTests(unittest.TestCase):
             result,
         )
 
-    def test_direct_unknown_explicit_job_request_fails_closed(self) -> None:
+    def test_direct_unresolved_subject_is_lexical_but_caller_scope_fails_closed(self) -> None:
         from ncs_mcp import server
 
+        subject = "Unknown Synthetic Function"
         result = server.ncs_search(
-            query="Unknown Synthetic Function \uC9C1\uBB34\uC5D0 \uD544\uC694\uD55C \uC5ED\uB7C9",
+            query=f"{subject} \uC9C1\uBB34\uC5D0 \uD544\uC694\uD55C \uC5ED\uB7C9",
             scope="all",
             limit=30,
         )
+        lexical_result = server.ncs_search(query=subject, scope="all", limit=30)
 
-        self.assertFalse(result["ok"], result)
-        self.assertEqual(result["error"]["code"], "route_context_required")
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["query"], subject)
+        self.assertFalse(result["classification_filter_applied"], result)
+        self.assertEqual(
+            [(row["type"], row["id"]) for row in result["results"]],
+            [(row["type"], row["id"]) for row in lexical_result["results"]],
+        )
+        context = result["search_context"]
+        self.assertFalse(context["hard_filter_applied"])
+        self.assertIsNone(context["policy"]["hard_filter_source"])
+        self.assertEqual(context["policy"]["rollout_phase"], "lexical_subject_fallback")
+        self.assertEqual(context["policy"]["soft_prior_source"], "explicit_query_job_scope")
+
+        search = Mock(return_value={"results": []})
+        with patch.object(server, "search_ncs", search):
+            scoped_result = server.ncs_search(
+                query=subject, job_scope=subject, scope="all", limit=30,
+            )
+        self.assertFalse(scoped_result["ok"], scoped_result)
+        self.assertEqual(scoped_result["error"]["code"], "route_context_required")
+        search.assert_not_called()
 
     def test_hospitality_scope_still_returns_its_target_element(self) -> None:
         from ncs_mcp import server
@@ -1573,7 +1594,7 @@ class ExplicitJobScopeRealDbRegressionTests(unittest.TestCase):
             result,
         )
 
-    def test_nonexact_hospitality_scope_cannot_run_unfiltered_mixed_search(self) -> None:
+    def test_unresolved_hospitality_subject_keeps_caller_scope_and_filter_guards(self) -> None:
         from ncs_mcp import server
 
         query = "접객 직무 필요역량"
@@ -1593,20 +1614,48 @@ class ExplicitJobScopeRealDbRegressionTests(unittest.TestCase):
             )
 
         self.assertEqual(route["params"]["query"], "접객")
-        self.assertEqual(route["params"]["job_scope"], "접객")
+        self.assertNotIn("job_scope", route["params"])
         self.assertNotIn("classification_filter", route["params"])
+        self.assertEqual(route["classification_context"]["requested"]["job_scope"], "접객")
         self.assertEqual(route["search_context"]["status"], "unresolved")
-        self.assertTrue(route["search_context"]["needs_context"])
+        self.assertFalse(route["search_context"]["needs_context"])
+        self.assertFalse(route["search_context"]["hard_filter_applied"])
         self.assertEqual(
             route["search_context"]["promotion_status"],
-            "rejected_not_exact_unique_high_confidence",
+            "lexical_subject_fallback",
         )
-        self.assertFalse(
+        self.assertIn(
+            "inferred_job_scope_unresolved_lexical_fallback",
+            route["search_context"]["warnings"],
+        )
+        self.assertTrue(
             route["route_contract"]["execution_policy"]["meta_executable"]
         )
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["error"]["code"], "route_context_required")
-        handler.assert_not_called()
+        self.assertTrue(result["ok"], result)
+        handler.assert_called_once_with(query="접객", scope="all", limit=20)
+
+        for caller_constraints in (
+            {"job_scope": "접객"},
+            {"classification_filter": {"major_code": "13"}},
+        ):
+            with self.subTest(caller_constraints=caller_constraints):
+                scoped_route = server.ncs_discover_tools(query, **caller_constraints)["query_route"]
+                handler.reset_mock()
+                with patch.dict(server.NCS_EXECUTABLE_TOOL_HANDLERS, {"ncs_search": handler}):
+                    scoped_result = server.ncs_execute_tool(
+                        "ncs_search",
+                        {
+                            **scoped_route["params"],
+                            "_route_query": query,
+                            "_route_fingerprint": scoped_route["route_fingerprint"],
+                        },
+                    )
+                self.assertEqual(scoped_route["params"]["job_scope"], "접객")
+                self.assertTrue(scoped_route["search_context"]["needs_context"])
+                self.assertFalse(scoped_route["route_contract"]["execution_policy"]["meta_executable"])
+                self.assertFalse(scoped_result["ok"], scoped_result)
+                self.assertEqual(scoped_result["error"]["code"], "route_context_required")
+                handler.assert_not_called()
 
 
 class PlannerMetaRouteLineageTests(unittest.TestCase):
