@@ -37,6 +37,7 @@ from .normalization import (
     SEARCH_NORMALIZATION_V2_REQUIRED_MANIFEST,
     normalize_search_text,
 )
+from .typo import UnitNameTypoIndex
 
 
 _OPEN_DB_FACTORY: Any = None
@@ -228,6 +229,10 @@ _NCS_SEARCH_DEFINITION_WEIGHT = 2.0
 # It is deliberately below the unit-name/definition weights so that broad
 # evidence cannot override an exact or token-AND match.
 _NCS_SEARCH_TASK_KSA_WEIGHT = 0.5
+# Joint task evidence may rescue one overlooked token-OR candidate into third
+# place. The existing top two stay fixed, and repeated/generic tokens cannot
+# create joint evidence. Exact and stronger lexical tiers stay put.
+_NCS_SEARCH_TASK_KSA_JOINT_WEIGHT = _NCS_SEARCH_DEFINITION_WEIGHT
 # Rerank a fixed lexical prefix before slicing pages. Using the requested page
 # size here makes limit=3 discard evidence that limit=50 would rank first.
 _NCS_SEARCH_UNIT_RERANK_WINDOW = 50
@@ -666,7 +671,7 @@ class _NcsUnitLexicon:
     they rank specificity and never decide a match by themselves.
     """
 
-    __slots__ = ("total", "_name_words", "_name_counts", "_any_words", "_any_counts")
+    __slots__ = ("total", "_name_words", "_name_counts", "_any_words", "_any_counts", "typo_index")
 
     def __init__(self, rows: list[Any]) -> None:
         name_df: Counter[str] = Counter()
@@ -681,6 +686,7 @@ class _NcsUnitLexicon:
         self._name_counts = [name_df[word] for word in self._name_words]
         self._any_words = sorted(any_df)
         self._any_counts = [any_df[word] for word in self._any_words]
+        self.typo_index = UnitNameTypoIndex(self._name_words)
 
     @staticmethod
     def _prefix_count(words: list[str], counts: list[int], term: str, cap: int) -> int:
@@ -820,6 +826,119 @@ def _ncs_search_idf(total: int, frequency: int) -> float:
     )
 
 
+def _ncs_search_unit_typo_terms(
+    conn: Any,
+    words: list[str],
+    stems_by_word: dict[str, list[str]],
+    classification_filter: dict[str, str],
+    *,
+    normalized: bool | str,
+    context_words: list[str] | None = None,
+) -> dict[str, str]:
+    """Offer only unique official-name spellings for absent query words.
+
+    Valid words and prefixes anywhere in the source corpus stay unchanged,
+    including definitions outside an explicitly selected scope. Suggestions
+    remain candidate terms and must exist inside the active hard scope.
+    """
+    if not words:
+        return {}
+    lexicon = _ncs_search_unit_lexicon(conn)
+    hints: dict[str, str] = {}
+    # Normal requests need only a few unknown words. Bound typo work even when
+    # a caller supplies a very long sentence of unrelated unknown strings.
+    for word in words[:2 * _NCS_SEARCH_UNIT_TERM_LIMIT]:
+        variants = (*stems_by_word[word], word)
+        if any(lexicon.counts(variant)[1] for variant in variants):
+            continue
+        suggestions = {
+            suggestion
+            for variant in variants
+            for suggestion in lexicon.typo_index.suggest(variant)
+        }
+        if len(suggestions) == 1:
+            hints[word] = next(iter(suggestions))
+    if not hints:
+        return {}
+    _, name_counts, _ = _ncs_search_unit_term_counts(
+        conn, list(hints.values()), classification_filter, normalized=normalized,
+    )
+    valid: dict[str, str] = {}
+    for word, term in hints.items():
+        if not name_counts.get(term, 0):
+            continue
+        anchors: dict[str, int] = {}
+        for other in (context_words if context_words is not None else words):
+            if other == word:
+                continue
+            for variant in (*stems_by_word[other], other):
+                if (variant.casefold() in _NCS_SEARCH_GENERIC_TOKENS
+                        or variant.casefold() in _NCS_SEARCH_LONG_QUERY_STOPWORDS):
+                    continue
+                frequency = lexicon.counts(variant)[1]
+                if frequency:
+                    anchors.setdefault(variant, frequency)
+                    break
+        # A single misspelled subject needs no other term. In a task sentence,
+        # a corpus-absent valid noun can also be one edit from another noun;
+        # require the rarest retained context term on the same source unit.
+        anchor = min(anchors, key=anchors.__getitem__) if anchors else None
+        if anchor is None or _ncs_search_unit_typo_context_matches(
+            conn, term, anchor, classification_filter, normalized=normalized,
+        ):
+            valid[word] = term
+    return valid
+
+
+def _ncs_search_unit_typo_context_matches(
+    conn: Any,
+    term: str,
+    anchor: str,
+    classification_filter: dict[str, str],
+    *,
+    normalized: bool | str,
+) -> bool:
+    """Check one spelling hint against bounded, same-unit source evidence."""
+    scope_clause, scope_params = _ncs_classification_filter_sql(
+        classification_filter, normalized=normalized,
+    )
+    params: dict[str, Any] = {"token_typo": term, "token_typo_context": anchor}
+    name_match = _ncs_search_boundary_any(
+        ("cu.unit_name_raw",), "token_typo", normalized=normalized,
+    )
+    direct_match = _ncs_search_boundary_any(
+        ("cu.unit_name_raw", "cu.api_definition"), "token_typo_context", normalized=normalized,
+    )
+    if normalized:
+        params = _normalized_ncs_search_params(params)
+    params.update(scope_params)
+    rows = conn.execute(
+        "SELECT cu.unit_code, " + direct_match + " AS context_match "
+        "FROM competency_units cu JOIN classifications c "
+        "ON c.classification_id=cu.classification_id WHERE " + name_match
+        + (" AND " + scope_clause if scope_clause else "")
+        + " LIMIT :typo_context_limit",
+        {**params, "typo_context_limit": _NCS_SEARCH_UNIT_RERANK_WINDOW + 1},
+    ).fetchall()
+    if not rows or len(rows) > _NCS_SEARCH_UNIT_RERANK_WINDOW:
+        return False
+    if any(row["context_match"] for row in rows):
+        return True
+    codes: dict[str, str] = {
+        f"typo_unit_{index}": str(row["unit_code"])
+        for index, row in enumerate(rows)
+    }
+    marks = ", ".join(f":{key}" for key in codes)
+    element_match = _ncs_search_boundary_any(
+        ("ce.element_name_raw",), "token_typo_context", normalized=normalized,
+    )
+    return conn.execute(
+        f"SELECT 1 FROM competency_elements ce WHERE ce.unit_code IN ({marks}) "
+        f"AND {element_match} LIMIT 1",
+        {**params, **codes},
+    ).fetchone() is not None
+
+
 def _select_ncs_search_unit_terms(
     conn: Any,
     phrase: str,
@@ -873,6 +992,15 @@ def _select_ncs_search_unit_terms(
         conn, probe_terms, classification_filter, normalized=normalized,
     )
     if total <= 1:
+        corrections = _ncs_search_unit_typo_terms(
+            conn, words, stems_by_word, classification_filter, normalized=normalized,
+        ) if total else {}
+        if corrections:
+            bound = _NCS_SEARCH_UNIT_TERM_LIMIT if long_query else _NCS_SEARCH_FALLBACK_TOKEN_BOUND
+            corrected = list(dict.fromkeys(corrections.get(word, word) for word in words))[:bound]
+            return corrected, {
+                word: term for word, term in corrections.items() if term in corrected
+            }, []
         return [], {}, []
 
     resolved: list[tuple[str, str]] = []
@@ -908,6 +1036,13 @@ def _select_ncs_search_unit_terms(
             continue
         resolved.append((word, term))
 
+    if unresolved:
+        corrections = _ncs_search_unit_typo_terms(
+            conn, unresolved, stems_by_word, classification_filter, normalized=normalized,
+            context_words=words,
+        )
+        resolved.extend(corrections.items())
+        unresolved = [word for word in unresolved if word not in corrections]
     if unresolved:
         base_by_word = {
             word: (stems_by_word[word][0] if stems_by_word[word] else word)
@@ -2356,6 +2491,9 @@ def _ncs_search_unit_task_ksa_scores(
     token_weights: dict[str, float] | None = None,
     *,
     normalized: bool | str | None = None,
+    joint_tokens: list[str] | None = None,
+    joint_scores: dict[str, float] | None = None,
+    joint_matches: dict[str, set[str]] | None = None,
 ) -> dict[str, float]:
     """Score task/KSA evidence for an already retrieved unit candidate set.
 
@@ -2444,10 +2582,23 @@ def _ncs_search_unit_task_ksa_scores(
             str(row["evidence_match_text" if normalized else "evidence_text"] or "")
         )
     weights = token_weights or {}
+    joint_terms = {
+        normalize_search_text(token)
+        for token in (joint_tokens if joint_tokens is not None else tokens)
+        if token and normalize_search_text(token) not in _NCS_SEARCH_GENERIC_TOKENS
+    }
+    # Prefix-related terms can describe one source word (alpha/alphabet,
+    # 급여/급여명세서). Keep its most specific form for joint evidence, while
+    # retaining every token's original supporting score below.
+    joint_terms = {
+        term for term in joint_terms
+        if not any(other != term and other.startswith(term) for other in joint_terms)
+    }
     scores: dict[str, float] = {}
     for code, evidence_rows in evidence_by_unit.items():
         score = 0.0
         matched_token_count = 0
+        joint_matched: set[str] = set()
         for token in tokens:
             if any(
                 (
@@ -2458,6 +2609,9 @@ def _ncs_search_unit_task_ksa_scores(
                 for evidence in evidence_rows
             ):
                 matched_token_count += 1
+                joint_token = normalize_search_text(token)
+                if joint_token in joint_terms:
+                    joint_matched.add(joint_token)
                 token_factor = weights.get(
                     token,
                     _NCS_SEARCH_GENERIC_TOKEN_FACTOR
@@ -2467,6 +2621,13 @@ def _ncs_search_unit_task_ksa_scores(
                 score += _NCS_SEARCH_TASK_KSA_WEIGHT * token_factor
         # One generic task/KSA word is too weak to overturn a lexical result;
         # require two independent query tokens before enabling the boost.
+        if joint_scores is not None:
+            joint_scores[code] = (
+                _NCS_SEARCH_TASK_KSA_JOINT_WEIGHT * (len(joint_matched) - 1)
+                if len(joint_matched) >= 2 else 0.0
+            )
+        if joint_matches is not None:
+            joint_matches[code] = set(joint_matched)
         scores[code] = score if matched_token_count >= 2 else 0.0
     return scores
 
@@ -2546,6 +2707,8 @@ def _rerank_ncs_unit_task_ksa_candidates(
     compound_subphrase_expansions: dict[str, list[str]] | None = None,
     *,
     normalized: bool | str = False,
+    joint_scores: dict[str, float] | None = None,
+    joint_matches: dict[str, set[str]] | None = None,
 ) -> list[dict[str, Any]]:
     """Apply supporting task/KSA evidence only within the OR fallback tier."""
     if not candidates or not task_ksa_scores:
@@ -2568,10 +2731,85 @@ def _rerank_ncs_unit_task_ksa_candidates(
                 item,
             )
         )
-    return [
+    ranked = [
         item
         for _, _, item in sorted(scored, key=lambda row: (-row[0], -row[1]))
     ]
+    if not joint_scores or not joint_matches or len(ranked) <= 3:
+        return ranked
+    base_scores = {str(item.get("id") or ""): score for score, _, item in scored}
+
+    def joint_score(item: dict[str, Any]) -> float:
+        code = str(item.get("id") or "")
+        return base_scores[code] + joint_scores.get(code, 0.0)
+
+    third = ranked[2]
+    third_covered = set(joint_matches.get(str(third.get("id") or ""), ()))
+    third_fields = third.get("_search_fields") or {}
+    third_direct = {
+        "_search_fields": {
+            field: third_fields.get(field)
+            for field in ("unit_name", "alias", "definition")
+        }
+    }
+    joint_terms = set().union(*joint_matches.values())
+    for term in joint_terms:
+        expansions = {
+            term: [
+                alternative
+                for token, alternatives in (token_expansions or {}).items()
+                if normalize_search_text(token) == term
+                for alternative in alternatives
+            ]
+        }
+        compounds = {
+            term: [
+                alternative
+                for token, alternatives in (compound_subphrase_expansions or {}).items()
+                if normalize_search_text(token) == term
+                for alternative in alternatives
+            ]
+        }
+        # Reuse the lexical scorer's synonym and name-only compound rules:
+        # source evidence already covered through an expansion is not novel.
+        if _ncs_search_unit_fallback_score(
+            third_direct, [term], expansions, {}, compounds, normalized=normalized,
+        ) > 0:
+            third_covered.add(term)
+    # Repeating task words already present in the third result's direct
+    # definition is weaker evidence, not a new answer. Require an additional
+    # independent task term; classification labels cannot supply that proof.
+    leading_major = (ranked[0].get("_classification_codes") or {}).get("major_code")
+    shared_scope_term = bool(leading_major) and (
+        (ranked[1].get("_classification_codes") or {}).get("major_code") == leading_major
+    ) and any(
+        token.casefold() not in _NCS_SEARCH_GENERIC_TOKENS
+        and all(
+            _ncs_search_boundary_match(
+                (item.get("_search_fields") or {}).get("classification"), token
+            ) == 1
+            for item in ranked[:2]
+        )
+        for token in fallback_tokens
+    )
+    eligible = [
+        index for index in range(3, len(ranked))
+        if joint_matches.get(str(ranked[index].get("id") or ""), set()) - third_covered
+        and (
+            not shared_scope_term
+            or (ranked[index].get("_classification_codes") or {}).get("major_code") == leading_major
+        )
+    ]
+    if not eligible:
+        return ranked
+    best = max(eligible, key=lambda index: joint_score(ranked[index]))
+    if joint_scores.get(str(ranked[best].get("id") or ""), 0.0) <= 0:
+        return ranked
+    if joint_score(ranked[best]) <= joint_score(ranked[2]):
+        return ranked
+    # Rescue only one additional answer; existing top-two source matches and
+    # the relative order of every other row remain stable before pagination.
+    return ranked[:2] + [ranked[best]] + ranked[2:best] + ranked[best + 1:]
 
 
 def _ncs_search_unit_nongeneric_coverage(
@@ -3384,6 +3622,8 @@ def search_ncs(
         item_type: [] for item_type in requested_types
     }
     unit_task_ksa_scores: dict[str, float] = {}
+    unit_task_ksa_joint_scores: dict[str, float] = {}
+    unit_task_ksa_joint_matches: dict[str, set[str]] = {}
     search_context: dict[str, Any]
     with _required_runtime_helper("open_db", _OPEN_DB_FACTORY)() as conn:
         _register_ncs_search_udfs(conn)
@@ -3641,6 +3881,9 @@ def search_ncs(
                     [*unit_terms, *unit_evidence_words],
                     token_weights,
                     normalized=normalized_search,
+                    joint_tokens=unit_terms,
+                    joint_scores=unit_task_ksa_joint_scores,
+                    joint_matches=unit_task_ksa_joint_matches,
                 )
 
         if "element" in requested_types:
@@ -3877,6 +4120,8 @@ def search_ncs(
             token_weights,
             compound_subphrase_expansions=unit_compound_expansions,
             normalized=normalized_search,
+            joint_scores=unit_task_ksa_joint_scores,
+            joint_matches=unit_task_ksa_joint_matches,
         ) + unit_or_candidates[_NCS_SEARCH_UNIT_RERANK_WINDOW:] + [
             item for item in candidates_by_type["unit"] if item["_match_tier"] == 4
         ]
