@@ -86,3 +86,24 @@ The fresh blind holdout remains unmeasured: the operator-frozen
 requires operator review and freezing; no human review or freeze was inferred
 from the request. Neither the development gains nor the synthetic typo audit
 establish fresh semantic generalization.
+
+## Completed GitHub validation
+
+The search implementation commit `50173aa5cc50d1f8cacbab539796a6c51ad7c69e`
+was pushed to `koul777/HRMCP` on `main` with PC Git authentication.
+GitHub's `main` versions of `search/core.py` and `search/spelling.py` were
+also checked through the GitHub API: their Git object IDs match the local
+commit. The token was never printed.
+
+[GitHub CI run 38053877631](https://github.com/koul777/HRMCP/actions/runs/38053877631)
+completed successfully at `2026-10-10T13:20:22Z`. All five jobs passed:
+the three unit-test shards, Tests and MCP smoke, and Docker build.
+The final committed code ran 2,782 unit tests (838 / 787 / 1,157), with
+25 skips and no failures or errors in CI.
+
+CI uses its generated smoke DB. Its full-DB natural-language quality gate
+was warning-only and returned `hit_at_3=null`; it did not measure the
+production corpus. The local same-DB search measurements above remain
+the quality evidence. CI success does not resolve the two independently
+reproduced local real-DB baseline routing failures or supply a fresh blind
+holdout result. Subsequent commits update validation documentation only.
