@@ -63,5 +63,14 @@ search regression and deployment parity on Windows Python 3.11 and 3.12.
 Remote CI results will be added after the merge commit is pushed and tested.
 CI uses synthetic databases and cannot replace the real-snapshot measurements.
 
+The first imported workflow failed validation before starting its tests.
+`actionlint 1.7.12` reproduced the exact error at line 71: `context "runner"
+is not allowed here`. `runner.temp` was used in job-level `env`, where that
+context is unavailable according to the
+[GitHub context availability contract](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability).
+The smoke DB path is now set in step-level `env` and exported through
+`GITHUB_ENV` for subsequent steps. Search runtime files retain the original
+bundle contents. The corrected workflow passes actionlint.
+
 No source DB writes, human-review status changes, production deployment, or
 credential output are part of this import.

@@ -819,5 +819,20 @@
   },
   "db_writes": false,
   "human_approval_claim": false,
-  "production_deployment_claim": false
+  "production_deployment_claim": false,
+  "merge_commit": "89a8cdf73cc729c672b6c334c5faa35751b1e296",
+  "git_push": {
+    "command": "git push origin HEAD:main",
+    "exit_code": 0,
+    "remote_head_verified": true
+  },
+  "workflow_fix": {
+    "initial_failed_run": "https://github.com/koul777/HRMCP/actions/runs/38056418313",
+    "actionlint_version": "1.7.12",
+    "original_error": "context \"runner\" is not allowed here",
+    "original_error_line": 71,
+    "fix": "Set runner.temp at step env and persist NCS_DB_PATH via GITHUB_ENV.",
+    "actionlint_after_exit_code": 0,
+    "runtime_changed": false
+  }
 }
