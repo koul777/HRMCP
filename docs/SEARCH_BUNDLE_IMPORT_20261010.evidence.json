@@ -1,0 +1,823 @@
+{
+  "schema": "ncs_search_bundle_import_evidence_v1",
+  "generated_at": "2026-10-10T13:36:20.470377+00:00",
+  "repository": "koul777/HRMCP",
+  "baseline_commit": "7ee69becbc66af5966bb9a371143719a9dfa7ea0",
+  "bundle": {
+    "path": "C:/workspace/aside/.tmp/ncs-search-accuracy-d7a57e6.bundle",
+    "sha256": "4694e0e6c1883e1842255652763226f6b3b1e69a17799f83756d716404cff9f2",
+    "verified": true,
+    "imported_commit": "d7a57e61ff89cb202c9530e20dce99aecbe5a13a"
+  },
+  "original_runtime_preserved": true,
+  "earlier_absence_claim_corrected": true,
+  "pc_spelling_runtime_removed": true,
+  "db": {
+    "path": "tmp/ncs_ontology_compact_fts_v2_nocol_20260929.db",
+    "bytes": 472154112,
+    "sha256": "4bff4b6924ab1c2850c5a003638b71b9ed277d41de0e1badcc2686312d7391e4",
+    "unchanged": true,
+    "read_only": true
+  },
+  "quality": {
+    "ncs_search_eval_nl": {
+      "before": {
+        "case_count": 40,
+        "search_error_count": 0,
+        "hit_at_1": 0.9,
+        "hit_at_1_count": 36,
+        "hit_at_3": 1.0,
+        "hit_at_3_count": 40,
+        "mrr": 0.9458
+      },
+      "after": {
+        "case_count": 40,
+        "search_error_count": 0,
+        "hit_at_1": 0.9,
+        "hit_at_1_count": 36,
+        "hit_at_3": 1.0,
+        "hit_at_3_count": 40,
+        "mrr": 0.9458
+      },
+      "before_by_category": {
+        "인사": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.875,
+          "hit_at_1_count": 7,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 8,
+          "mrr": 0.9167
+        },
+        "노무": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.875,
+          "hit_at_1_count": 7,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 8,
+          "mrr": 0.9375
+        },
+        "교육": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 1.0,
+          "hit_at_1_count": 8,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 8,
+          "mrr": 1.0
+        },
+        "총무": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.875,
+          "hit_at_1_count": 7,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 8,
+          "mrr": 0.9375
+        },
+        "회계": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.875,
+          "hit_at_1_count": 7,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 8,
+          "mrr": 0.9375
+        }
+      },
+      "after_by_category": {
+        "인사": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.875,
+          "hit_at_1_count": 7,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 8,
+          "mrr": 0.9167
+        },
+        "노무": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.875,
+          "hit_at_1_count": 7,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 8,
+          "mrr": 0.9375
+        },
+        "교육": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 1.0,
+          "hit_at_1_count": 8,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 8,
+          "mrr": 1.0
+        },
+        "총무": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.875,
+          "hit_at_1_count": 7,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 8,
+          "mrr": 0.9375
+        },
+        "회계": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.875,
+          "hit_at_1_count": 7,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 8,
+          "mrr": 0.9375
+        }
+      },
+      "fixture_sha256": "33ee0226c4186c0fe339ee0c5872eaadbf6618ef76a5dffc3265c90175eb661f",
+      "expected_rank_changes": 0
+    },
+    "ncs_search_eval_nl_dev": {
+      "before": {
+        "case_count": 90,
+        "search_error_count": 0,
+        "hit_at_1": 0.8556,
+        "hit_at_1_count": 77,
+        "hit_at_3": 0.9778,
+        "hit_at_3_count": 88,
+        "mrr": 0.9102
+      },
+      "after": {
+        "case_count": 90,
+        "search_error_count": 0,
+        "hit_at_1": 0.8556,
+        "hit_at_1_count": 77,
+        "hit_at_3": 0.9778,
+        "hit_at_3_count": 88,
+        "mrr": 0.9102
+      },
+      "before_by_category": {
+        "인사": {
+          "case_count": 9,
+          "search_error_count": 0,
+          "hit_at_1": 0.7778,
+          "hit_at_1_count": 7,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 9,
+          "mrr": 0.8704
+        },
+        "노무": {
+          "case_count": 9,
+          "search_error_count": 0,
+          "hit_at_1": 1.0,
+          "hit_at_1_count": 9,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 9,
+          "mrr": 1.0
+        },
+        "교육": {
+          "case_count": 9,
+          "search_error_count": 0,
+          "hit_at_1": 0.8889,
+          "hit_at_1_count": 8,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 9,
+          "mrr": 0.9259
+        },
+        "총무": {
+          "case_count": 9,
+          "search_error_count": 0,
+          "hit_at_1": 0.7778,
+          "hit_at_1_count": 7,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 9,
+          "mrr": 0.8889
+        },
+        "회계": {
+          "case_count": 9,
+          "search_error_count": 0,
+          "hit_at_1": 1.0,
+          "hit_at_1_count": 9,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 9,
+          "mrr": 1.0
+        },
+        "비HR": {
+          "case_count": 45,
+          "search_error_count": 0,
+          "hit_at_1": 0.8222,
+          "hit_at_1_count": 37,
+          "hit_at_3": 0.9556,
+          "hit_at_3_count": 43,
+          "mrr": 0.8833
+        }
+      },
+      "after_by_category": {
+        "인사": {
+          "case_count": 9,
+          "search_error_count": 0,
+          "hit_at_1": 0.7778,
+          "hit_at_1_count": 7,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 9,
+          "mrr": 0.8704
+        },
+        "노무": {
+          "case_count": 9,
+          "search_error_count": 0,
+          "hit_at_1": 1.0,
+          "hit_at_1_count": 9,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 9,
+          "mrr": 1.0
+        },
+        "교육": {
+          "case_count": 9,
+          "search_error_count": 0,
+          "hit_at_1": 0.8889,
+          "hit_at_1_count": 8,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 9,
+          "mrr": 0.9259
+        },
+        "총무": {
+          "case_count": 9,
+          "search_error_count": 0,
+          "hit_at_1": 0.7778,
+          "hit_at_1_count": 7,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 9,
+          "mrr": 0.8889
+        },
+        "회계": {
+          "case_count": 9,
+          "search_error_count": 0,
+          "hit_at_1": 1.0,
+          "hit_at_1_count": 9,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 9,
+          "mrr": 1.0
+        },
+        "비HR": {
+          "case_count": 45,
+          "search_error_count": 0,
+          "hit_at_1": 0.8222,
+          "hit_at_1_count": 37,
+          "hit_at_3": 0.9556,
+          "hit_at_3_count": 43,
+          "mrr": 0.8833
+        }
+      },
+      "fixture_sha256": "92aa46b38795ceafef93568fb44527992e4ae1019b52388755988b2ef343c54d",
+      "expected_rank_changes": 0
+    },
+    "ncs_search_eval_nl_dev_long": {
+      "before": {
+        "case_count": 50,
+        "search_error_count": 0,
+        "hit_at_1": 0.42,
+        "hit_at_1_count": 21,
+        "hit_at_3": 0.52,
+        "hit_at_3_count": 26,
+        "mrr": 0.5071
+      },
+      "after": {
+        "case_count": 50,
+        "search_error_count": 0,
+        "hit_at_1": 0.42,
+        "hit_at_1_count": 21,
+        "hit_at_3": 0.58,
+        "hit_at_3_count": 29,
+        "mrr": 0.5137
+      },
+      "before_by_category": {
+        "인사": {
+          "case_count": 10,
+          "search_error_count": 0,
+          "hit_at_1": 0.1,
+          "hit_at_1_count": 1,
+          "hit_at_3": 0.1,
+          "hit_at_3_count": 1,
+          "mrr": 0.1786
+        },
+        "노무": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.625,
+          "hit_at_1_count": 5,
+          "hit_at_3": 0.75,
+          "hit_at_3_count": 6,
+          "mrr": 0.7188
+        },
+        "교육": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.5,
+          "hit_at_1_count": 4,
+          "hit_at_3": 0.5,
+          "hit_at_3_count": 4,
+          "mrr": 0.5625
+        },
+        "총무": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.125,
+          "hit_at_1_count": 1,
+          "hit_at_3": 0.25,
+          "hit_at_3_count": 2,
+          "mrr": 0.2326
+        },
+        "회계": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.5,
+          "hit_at_1_count": 4,
+          "hit_at_3": 0.625,
+          "hit_at_3_count": 5,
+          "mrr": 0.5781
+        },
+        "비HR": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.75,
+          "hit_at_1_count": 6,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 8,
+          "mrr": 0.8542
+        }
+      },
+      "after_by_category": {
+        "인사": {
+          "case_count": 10,
+          "search_error_count": 0,
+          "hit_at_1": 0.1,
+          "hit_at_1_count": 1,
+          "hit_at_3": 0.4,
+          "hit_at_3_count": 4,
+          "mrr": 0.22
+        },
+        "노무": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.625,
+          "hit_at_1_count": 5,
+          "hit_at_3": 0.75,
+          "hit_at_3_count": 6,
+          "mrr": 0.7125
+        },
+        "교육": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.5,
+          "hit_at_1_count": 4,
+          "hit_at_3": 0.5,
+          "hit_at_3_count": 4,
+          "mrr": 0.5583
+        },
+        "총무": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.125,
+          "hit_at_1_count": 1,
+          "hit_at_3": 0.25,
+          "hit_at_3_count": 2,
+          "mrr": 0.2326
+        },
+        "회계": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.5,
+          "hit_at_1_count": 4,
+          "hit_at_3": 0.625,
+          "hit_at_3_count": 5,
+          "mrr": 0.5781
+        },
+        "비HR": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.75,
+          "hit_at_1_count": 6,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 8,
+          "mrr": 0.8542
+        }
+      },
+      "fixture_sha256": "9fc8e2e1459c194f262346c9a4d052b33ff6640805886a2e57e858fb1dda2174",
+      "expected_rank_changes": 6
+    }
+  },
+  "synthetic_typos": {
+    "before": {
+      "cases": 120,
+      "hit_at_1": 0.36666666666666664,
+      "hit_at_3": 0.5666666666666667,
+      "mrr": 0.4527777777777778
+    },
+    "after": {
+      "cases": 120,
+      "hit_at_1": 0.8166666666666667,
+      "hit_at_3": 0.9666666666666667,
+      "mrr": 0.8875
+    },
+    "before_by_major": {
+      "01": {
+        "cases": 5,
+        "hit_at_1": 0.2,
+        "hit_at_3": 0.8,
+        "mrr": 0.4333333333333333
+      },
+      "02": {
+        "cases": 5,
+        "hit_at_1": 0.2,
+        "hit_at_3": 0.2,
+        "mrr": 0.2
+      },
+      "03": {
+        "cases": 5,
+        "hit_at_1": 0.4,
+        "hit_at_3": 0.6,
+        "mrr": 0.5
+      },
+      "04": {
+        "cases": 5,
+        "hit_at_1": 0.4,
+        "hit_at_3": 0.8,
+        "mrr": 0.5666666666666667
+      },
+      "05": {
+        "cases": 5,
+        "hit_at_1": 0.6,
+        "hit_at_3": 0.6,
+        "mrr": 0.6
+      },
+      "06": {
+        "cases": 5,
+        "hit_at_1": 0.0,
+        "hit_at_3": 0.0,
+        "mrr": 0.0
+      },
+      "07": {
+        "cases": 5,
+        "hit_at_1": 0.2,
+        "hit_at_3": 0.4,
+        "mrr": 0.3
+      },
+      "08": {
+        "cases": 5,
+        "hit_at_1": 0.2,
+        "hit_at_3": 0.6,
+        "mrr": 0.3333333333333333
+      },
+      "09": {
+        "cases": 5,
+        "hit_at_1": 0.2,
+        "hit_at_3": 0.6,
+        "mrr": 0.4
+      },
+      "10": {
+        "cases": 5,
+        "hit_at_1": 0.4,
+        "hit_at_3": 0.8,
+        "mrr": 0.5333333333333333
+      },
+      "11": {
+        "cases": 5,
+        "hit_at_1": 0.2,
+        "hit_at_3": 0.2,
+        "mrr": 0.2
+      },
+      "12": {
+        "cases": 5,
+        "hit_at_1": 0.2,
+        "hit_at_3": 0.4,
+        "mrr": 0.3
+      },
+      "13": {
+        "cases": 5,
+        "hit_at_1": 0.6,
+        "hit_at_3": 0.6,
+        "mrr": 0.6
+      },
+      "14": {
+        "cases": 5,
+        "hit_at_1": 0.2,
+        "hit_at_3": 0.2,
+        "mrr": 0.2
+      },
+      "15": {
+        "cases": 5,
+        "hit_at_1": 0.2,
+        "hit_at_3": 0.4,
+        "mrr": 0.3
+      },
+      "16": {
+        "cases": 5,
+        "hit_at_1": 0.4,
+        "hit_at_3": 0.6,
+        "mrr": 0.4666666666666667
+      },
+      "17": {
+        "cases": 5,
+        "hit_at_1": 1.0,
+        "hit_at_3": 1.0,
+        "mrr": 1.0
+      },
+      "18": {
+        "cases": 5,
+        "hit_at_1": 0.6,
+        "hit_at_3": 0.8,
+        "mrr": 0.7
+      },
+      "19": {
+        "cases": 5,
+        "hit_at_1": 0.2,
+        "hit_at_3": 0.4,
+        "mrr": 0.26666666666666666
+      },
+      "20": {
+        "cases": 5,
+        "hit_at_1": 0.8,
+        "hit_at_3": 1.0,
+        "mrr": 0.9
+      },
+      "21": {
+        "cases": 5,
+        "hit_at_1": 0.6,
+        "hit_at_3": 0.6,
+        "mrr": 0.6
+      },
+      "22": {
+        "cases": 5,
+        "hit_at_1": 0.4,
+        "hit_at_3": 0.6,
+        "mrr": 0.5
+      },
+      "23": {
+        "cases": 5,
+        "hit_at_1": 0.4,
+        "hit_at_3": 0.6,
+        "mrr": 0.5
+      },
+      "24": {
+        "cases": 5,
+        "hit_at_1": 0.2,
+        "hit_at_3": 0.8,
+        "mrr": 0.4666666666666667
+      }
+    },
+    "after_by_major": {
+      "01": {
+        "cases": 5,
+        "hit_at_1": 1.0,
+        "hit_at_3": 1.0,
+        "mrr": 1.0
+      },
+      "02": {
+        "cases": 5,
+        "hit_at_1": 0.8,
+        "hit_at_3": 1.0,
+        "mrr": 0.9
+      },
+      "03": {
+        "cases": 5,
+        "hit_at_1": 1.0,
+        "hit_at_3": 1.0,
+        "mrr": 1.0
+      },
+      "04": {
+        "cases": 5,
+        "hit_at_1": 0.8,
+        "hit_at_3": 1.0,
+        "mrr": 0.9
+      },
+      "05": {
+        "cases": 5,
+        "hit_at_1": 1.0,
+        "hit_at_3": 1.0,
+        "mrr": 1.0
+      },
+      "06": {
+        "cases": 5,
+        "hit_at_1": 0.8,
+        "hit_at_3": 0.8,
+        "mrr": 0.8
+      },
+      "07": {
+        "cases": 5,
+        "hit_at_1": 0.6,
+        "hit_at_3": 0.8,
+        "mrr": 0.7
+      },
+      "08": {
+        "cases": 5,
+        "hit_at_1": 0.8,
+        "hit_at_3": 1.0,
+        "mrr": 0.8666666666666666
+      },
+      "09": {
+        "cases": 5,
+        "hit_at_1": 0.6,
+        "hit_at_3": 1.0,
+        "mrr": 0.8
+      },
+      "10": {
+        "cases": 5,
+        "hit_at_1": 0.8,
+        "hit_at_3": 1.0,
+        "mrr": 0.8666666666666666
+      },
+      "11": {
+        "cases": 5,
+        "hit_at_1": 0.8,
+        "hit_at_3": 1.0,
+        "mrr": 0.9
+      },
+      "12": {
+        "cases": 5,
+        "hit_at_1": 1.0,
+        "hit_at_3": 1.0,
+        "mrr": 1.0
+      },
+      "13": {
+        "cases": 5,
+        "hit_at_1": 1.0,
+        "hit_at_3": 1.0,
+        "mrr": 1.0
+      },
+      "14": {
+        "cases": 5,
+        "hit_at_1": 0.4,
+        "hit_at_3": 0.8,
+        "mrr": 0.6
+      },
+      "15": {
+        "cases": 5,
+        "hit_at_1": 0.8,
+        "hit_at_3": 1.0,
+        "mrr": 0.8666666666666666
+      },
+      "16": {
+        "cases": 5,
+        "hit_at_1": 0.8,
+        "hit_at_3": 1.0,
+        "mrr": 0.9
+      },
+      "17": {
+        "cases": 5,
+        "hit_at_1": 1.0,
+        "hit_at_3": 1.0,
+        "mrr": 1.0
+      },
+      "18": {
+        "cases": 5,
+        "hit_at_1": 1.0,
+        "hit_at_3": 1.0,
+        "mrr": 1.0
+      },
+      "19": {
+        "cases": 5,
+        "hit_at_1": 0.8,
+        "hit_at_3": 1.0,
+        "mrr": 0.9
+      },
+      "20": {
+        "cases": 5,
+        "hit_at_1": 1.0,
+        "hit_at_3": 1.0,
+        "mrr": 1.0
+      },
+      "21": {
+        "cases": 5,
+        "hit_at_1": 0.8,
+        "hit_at_3": 1.0,
+        "mrr": 0.9
+      },
+      "22": {
+        "cases": 5,
+        "hit_at_1": 0.6,
+        "hit_at_3": 0.8,
+        "mrr": 0.7
+      },
+      "23": {
+        "cases": 5,
+        "hit_at_1": 0.8,
+        "hit_at_3": 1.0,
+        "mrr": 0.9
+      },
+      "24": {
+        "cases": 5,
+        "hit_at_1": 0.6,
+        "hit_at_3": 1.0,
+        "mrr": 0.8
+      }
+    },
+    "identical_input_sha256": "2d7ff667e1c42bdcd4f0f40823b5dbe5ced1574abd1402c1b92f446f659b8ff2",
+    "majors": 24,
+    "interpretation": "Source transposition self-retrieval, not semantic gold."
+  },
+  "exact_names": {
+    "cases": 240,
+    "hit_at_1": 1.0,
+    "hit_at_3": 1.0,
+    "mrr": 1.0
+  },
+  "exact_codes": {
+    "cases": 240,
+    "hit_at_1": 1.0,
+    "hit_at_3": 1.0,
+    "mrr": 1.0
+  },
+  "previously_exposed_holdout_v2": {
+    "overall": {
+      "case_count": 40,
+      "search_error_count": 0,
+      "hit_at_1": 0.95,
+      "hit_at_1_count": 38,
+      "hit_at_3": 1.0,
+      "hit_at_3_count": 40,
+      "mrr": 0.975
+    },
+    "by_category": {
+      "인사": {
+        "case_count": 8,
+        "search_error_count": 0,
+        "hit_at_1": 1.0,
+        "hit_at_1_count": 8,
+        "hit_at_3": 1.0,
+        "hit_at_3_count": 8,
+        "mrr": 1.0
+      },
+      "노무": {
+        "case_count": 8,
+        "search_error_count": 0,
+        "hit_at_1": 0.75,
+        "hit_at_1_count": 6,
+        "hit_at_3": 1.0,
+        "hit_at_3_count": 8,
+        "mrr": 0.875
+      },
+      "교육": {
+        "case_count": 8,
+        "search_error_count": 0,
+        "hit_at_1": 1.0,
+        "hit_at_1_count": 8,
+        "hit_at_3": 1.0,
+        "hit_at_3_count": 8,
+        "mrr": 1.0
+      },
+      "총무": {
+        "case_count": 8,
+        "search_error_count": 0,
+        "hit_at_1": 1.0,
+        "hit_at_1_count": 8,
+        "hit_at_3": 1.0,
+        "hit_at_3_count": 8,
+        "mrr": 1.0
+      },
+      "회계": {
+        "case_count": 8,
+        "search_error_count": 0,
+        "hit_at_1": 1.0,
+        "hit_at_1_count": 8,
+        "hit_at_3": 1.0,
+        "hit_at_3_count": 8,
+        "mrr": 1.0
+      }
+    },
+    "fresh_blind_estimate": false
+  },
+  "fresh_blind_holdout": {
+    "measured": false,
+    "reason": "operator_frozen_v3_fixture_absent"
+  },
+  "local_checks": {
+    "tests": 401,
+    "failures": 2,
+    "errors": 0,
+    "skipped": 0,
+    "passed": 399,
+    "preexisting_real_db_failures": [
+      "test_query_router.ExplicitJobScopeRealDbRegressionTests.test_direct_unknown_explicit_job_request_fails_closed",
+      "test_query_router.ExplicitJobScopeRealDbRegressionTests.test_nonexact_hospitality_scope_cannot_run_unfiltered_mixed_search"
+    ],
+    "deployment_preview_passed": 31,
+    "lint": {
+      "ok": true,
+      "errors": 0,
+      "warnings": 0,
+      "issues": []
+    },
+    "smoke_passed": true
+  },
+  "source_sha256": {
+    "src/ncs_mcp/search/core.py": "44380124446a7871cff406fd99c3786b5ade06fc91f4e0062213ff59116ee8fc",
+    "src/ncs_mcp/search/typo.py": "df5581144b5b100f0a7fa2e6b4382cd62f03ff7f68e7d19b1d5a51b1d74947fe",
+    "deploy/vercel_mcp_app/src/ncs_mcp/search/core.py": "44380124446a7871cff406fd99c3786b5ade06fc91f4e0062213ff59116ee8fc",
+    "deploy/vercel_mcp_app/src/ncs_mcp/search/typo.py": "df5581144b5b100f0a7fa2e6b4382cd62f03ff7f68e7d19b1d5a51b1d74947fe"
+  },
+  "github_ci": {
+    "status": "pending"
+  },
+  "db_writes": false,
+  "human_approval_claim": false,
+  "production_deployment_claim": false
+}

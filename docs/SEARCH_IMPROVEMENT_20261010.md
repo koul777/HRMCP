@@ -1,5 +1,12 @@
 # HRMCP search continuation — 2026-10-10
 
+> Historical PC implementation evidence. Superseded by the original search
+> implementation imported from `ncs-search-accuracy-d7a57e6.bundle`.
+> The earlier absence claim below was incorrect: the bundle was outside this
+> checkout at `C:/workspace/aside/.tmp/`. These measurements describe the
+> earlier PC implementation only. See `SEARCH_BUNDLE_IMPORT_20261010.md`
+> for the active runtime and its validation.
+
 The PC continuation starts from `7ee69be`. The web environment's unpushed
 change files and original typo fixture were absent from this checkout and
 GitHub. This is a separately implemented and measured continuation, not a

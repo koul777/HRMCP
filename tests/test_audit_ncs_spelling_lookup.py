@@ -9,7 +9,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "src"))
 
 from audit_ncs_spelling_lookup import build_typo_cases
-from ncs_mcp.search.spelling import name_key, one_edit_apart
+from ncs_mcp.search.typo import _one_edit
 
 
 class SpellingLookupAuditTests(unittest.TestCase):
@@ -22,7 +22,9 @@ class SpellingLookupAuditTests(unittest.TestCase):
         self.assertEqual({major for c in cases for major in c["majors"]}, {"02", "14"})
         self.assertEqual(cases, build_typo_cases(list(reversed(rows)), per_major_limit=1))
         for case in cases:
-            self.assertTrue(one_edit_apart(name_key(case["query"]), name_key(case["source_query"])))
+            self.assertTrue(_one_edit(
+                "".join(case["query"].split()), "".join(case["source_query"].split())
+            ))
         hr = next(case for case in cases if case["majors"] == ["02"])
         self.assertEqual(hr["expected"], ["U1", "U2"])
 

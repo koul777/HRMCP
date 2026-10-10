@@ -1,0 +1,143 @@
+name: NCS search accuracy regression
+
+on:
+  push:
+    paths:
+      - "src/ncs_mcp/**"
+      - "deploy/vercel_mcp_app/src/ncs_mcp/**"
+      - "api/**"
+      - "deploy/vercel_mcp_app/api/**"
+      - "scripts/*search*.py"
+      - "scripts/audit_ncs_exact_lookup.py"
+      - "scripts/ncs_harness.py"
+      - "tests/*search*.py"
+      - "tests/test_audit_ncs_exact_lookup.py"
+      - "tests/test_ncs_query_candidate_recall.py"
+      - "tests/test_query_router.py"
+      - "tests/test_lexical_prefix_index.py"
+      - "tests/test_deploy_runtime_parity.py"
+      - "tests/test_vercel_deploy_source_sync.py"
+      - "tests/fixtures/ncs_search*"
+      - "tests/fixtures/search_baselines/**"
+      - "pyproject.toml"
+      - "requirements*.txt"
+      - ".github/workflows/search-accuracy.yml"
+      - "docs/SEARCH_ACCURACY.md"
+  pull_request:
+    paths:
+      - "src/ncs_mcp/**"
+      - "deploy/vercel_mcp_app/src/ncs_mcp/**"
+      - "api/**"
+      - "deploy/vercel_mcp_app/api/**"
+      - "scripts/*search*.py"
+      - "scripts/audit_ncs_exact_lookup.py"
+      - "scripts/ncs_harness.py"
+      - "tests/*search*.py"
+      - "tests/test_audit_ncs_exact_lookup.py"
+      - "tests/test_ncs_query_candidate_recall.py"
+      - "tests/test_query_router.py"
+      - "tests/test_lexical_prefix_index.py"
+      - "tests/test_deploy_runtime_parity.py"
+      - "tests/test_vercel_deploy_source_sync.py"
+      - "tests/fixtures/ncs_search*"
+      - "tests/fixtures/search_baselines/**"
+      - "pyproject.toml"
+      - "requirements*.txt"
+      - ".github/workflows/search-accuracy.yml"
+      - "docs/SEARCH_ACCURACY.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: search-accuracy-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  search-regression:
+    name: Search regression (Python ${{ matrix.python }})
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12"]
+    env:
+      GIT_LFS_SKIP_SMUDGE: "1"
+      PYTHONUTF8: "1"
+      NCS_MCP_READ_ONLY: "1"
+      NCS_MCP_ENABLE_OPERATOR_TOOLS: "0"
+      NCS_DB_PATH: ${{ runner.temp }}/ncs-search-regression/smoke.db
+    steps:
+      - name: Check out source with Git LFS downloads disabled
+        uses: actions/checkout@v4
+        with:
+          lfs: false
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: "pip"
+
+      - name: Install package and test dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -e ".[dev]"
+          python -m pip check
+
+      - name: Prepare isolated synthetic smoke database
+        run: python -m ncs_mcp.smoke_data --out "$env:NCS_DB_PATH"
+
+      - name: Run search behavior and evaluation regression tests
+        shell: pwsh
+        run: |
+          $testFiles = @(
+            "tests/test_ncs_search_typo.py",
+            "tests/test_ncs_query_candidate_recall.py",
+            "tests/test_ncs_search_recall.py",
+            "tests/test_ncs_search_unit_terms.py",
+            "tests/test_ncs_search_eval_nl.py",
+            "tests/test_search_semantic_rescue.py",
+            "tests/test_query_router.py",
+            "tests/test_lexical_prefix_index.py",
+            "tests/test_audit_ncs_exact_lookup.py",
+            "tests/test_audit_ncs_search_precision.py",
+            "tests/test_build_ncs_search_eval_pack.py",
+            "tests/test_build_ncs_search_relevance_review_pack.py",
+            "tests/test_benchmark_ncs_search.py",
+            "tests/test_benchmark_ncs_search_normalization.py",
+            "tests/test_benchmark_ncs_search_strategies.py",
+            "tests/test_benchmark_ncs_single_pass_search.py",
+            "tests/test_profile_ncs_search_sql.py",
+            "tests/test_profile_task_ksa_search_rerank.py"
+          )
+          python -m pytest -q @testFiles --junitxml=ci-artifacts/search-regression.xml
+
+      - name: Check deploy runtime matches canonical source
+        if: ${{ !cancelled() }}
+        run: python -m pytest -q tests/test_deploy_runtime_parity.py tests/test_vercel_deploy_source_sync.py --junitxml=ci-artifacts/search-runtime-parity.xml
+
+      - name: Record evaluation boundary
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          @'
+          ## NCS search regression evidence
+          These checks use synthetic temporary databases and checked-in behavior tests.
+          A pass does not measure production natural-language retrieval accuracy.
+          No production database is downloaded, refreshed, or deployed.
+          Run same-snapshot development and frozen holdout evaluation separately;
+          see docs/SEARCH_ACCURACY.md.
+          '@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+      - name: Upload test evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ncs-search-regression-py${{ matrix.python }}
+          path: ci-artifacts/*.xml
+          if-no-files-found: warn
+          retention-days: 14

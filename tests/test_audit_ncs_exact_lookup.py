@@ -58,6 +58,28 @@ class ExactLookupAuditTests(unittest.TestCase):
         self.assertEqual(metrics["hit_at_3"], 0.5)
         self.assertAlmostEqual(metrics["mrr"], 1 / 6)
 
+    def test_spelling_variant_preserves_source_labels_and_is_order_independent(self):
+        rows = [("A", "인력채용", "02"), ("B", "재무제표 작성", "03"), ("C", "인력채용", "24")]
+        cases = audit.build_cases(rows, variant="single_typo")
+        self.assertEqual(cases, audit.build_cases(reversed(rows), variant="single_typo"))
+        by_source = {case["source_query"]: case for case in cases}
+        self.assertEqual(by_source["인력채용"]["query"], "인력용채")
+        self.assertEqual(by_source["인력채용"]["expected"], ["A", "C"])
+        self.assertEqual(by_source["인력채용"]["majors"], ["02", "24"])
+        self.assertEqual(by_source["재무제표 작성"]["expected"], ["B"])
+        self.assertNotEqual(by_source["재무제표 작성"]["query"], "재무제표 작성")
+
+    def test_spelling_audit_does_not_perturb_codes_or_short_names(self):
+        with self.assertRaisesRegex(ValueError, "never source codes"):
+            audit.build_cases([("CODE", "인력채용", "02")], kind="code", variant="single_typo")
+        self.assertEqual(audit.build_cases([("SHORT", "문서 작성", "02")], variant="single_typo"), [])
+
+    def test_spelling_sample_does_not_depend_on_search_accepting_a_suggestion(self):
+        rows = [(f"{major}_{i}", f"문서관리 {major} {i}", major) for major in ("01", "12", "24") for i in range(5)]
+        cases = audit.build_cases(rows, variant="single_typo", per_major_limit=2)
+        self.assertEqual(len(cases), 6)
+        self.assertEqual({m for case in cases for m in case["majors"]}, {"01", "12", "24"})
+
     def test_public_scope_error_is_a_miss_not_a_success_or_a_crash(self):
         cases = audit.build_cases([("A", "name", "01")])
         results = audit.evaluate(cases, lambda *a, **kw: {

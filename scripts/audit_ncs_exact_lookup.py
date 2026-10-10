@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import sys
 import time
@@ -38,6 +39,8 @@ def validate_output_path(output: Path, db: Path) -> Path:
 
 def build_cases(rows, *, kind="name", variant="raw", per_major_limit=0):
     """Group identical names so alternate units with the same name are valid."""
+    if kind == "code" and variant == "single_typo":
+        raise ValueError("Spelling perturbations apply to names, never source codes.")
     grouped = {}
     for code, name, major in rows:
         query = str(code if kind == "code" else name or "").strip()
@@ -50,15 +53,35 @@ def build_cases(rows, *, kind="name", variant="raw", per_major_limit=0):
     counts = defaultdict(int)
     # Stable hashing samples across the complete vocabulary, not its first codes.
     for query, case in sorted(grouped.items(), key=lambda pair: hashlib.sha256(pair[0].encode()).hexdigest()):
+        typo_query = single_typo_query(query) if variant == "single_typo" else None
+        if variant == "single_typo" and typo_query is None:
+            continue
         if per_major_limit and all(counts[m] >= per_major_limit for m in case["majors"]):
             continue
         for major in case["majors"]:
             counts[major] += 1
         case["majors"] = sorted(case["majors"])
         case["expected"] = sorted(set(case["expected"]))
-        case["query"] = unicodedata.normalize("NFD", query) if variant == "nfd" else query
+        case["query"] = unicodedata.normalize("NFD", query) if variant == "nfd" else (typo_query or query)
+        if variant == "single_typo":
+            case["source_query"] = query
         cases.append(case)
     return cases
+
+
+def single_typo_query(query):
+    """Transpose one adjacent letter pair, independently of search suggestions.
+
+    Only source names with an eligible word are sampled. Existing NCS codes
+    remain the labels; this synthetic recovery check is not relevance gold.
+    """
+    for match in reversed(list(re.finditer(r"[A-Za-z가-힣]{3,}", query))):
+        word = match.group()
+        for index in range(len(word) - 2, -1, -1):
+            if word[index] != word[index + 1]:
+                swapped = word[:index] + word[index + 1] + word[index] + word[index + 2:]
+                return query[:match.start()] + swapped + query[match.end():]
+    return None
 
 
 def evaluate(cases, search, *, limit=3):
@@ -112,7 +135,7 @@ def main():
     parser.add_argument("--surface", choices=("core", "public"), default="core",
                         help="Public also exercises routing, job-scope inference, and the tool guard")
     parser.add_argument("--kind", choices=("name", "code"), default="name")
-    parser.add_argument("--variant", choices=("raw", "nfd"), default="raw")
+    parser.add_argument("--variant", choices=("raw", "nfd", "single_typo"), default="raw")
     parser.add_argument("--per-major-limit", type=int, default=0, help="0 audits every distinct source query")
     parser.add_argument("--limit", type=int, default=3)
     parser.add_argument("--fail-on-miss", action="store_true")
@@ -121,6 +144,8 @@ def main():
     args = parser.parse_args()
     if args.per_major_limit < 0 or not 3 <= args.limit <= 100:
         parser.error("per-major-limit must be nonnegative and limit must be 3..100")
+    if args.kind == "code" and args.variant == "single_typo":
+        parser.error("single_typo applies to source names, not codes")
     db = args.db.resolve(strict=True)
     try:
         args.out = validate_output_path(args.out, db)
@@ -163,7 +188,8 @@ def main():
     runtime_unchanged = (hashlib.sha256(core_path.read_bytes()).hexdigest() == core_before
                          and hashlib.sha256(router_path.read_bytes()).hexdigest() == router_before)
     report = {"schema": "ncs_exact_lookup_audit_v1", "generated_at": datetime.now(UTC).isoformat(),
-              "evidence_kind": ("synthetic_source_request_framing_not_semantic_gold" if templates
+              "evidence_kind": ("synthetic_source_typo_not_semantic_gold" if args.variant == "single_typo" else
+                                "synthetic_source_request_framing_not_semantic_gold" if templates
                                 else "source_self_retrieval_not_semantic_gold"), "db_writes": False,
               "human_approval_claim": False, "source": {"db": str(db), "units": len(rows),
               "db_bytes": db_before[0], "db_mtime_ns": db_before[1], "db_unchanged_during_run": unchanged,

@@ -61,20 +61,28 @@ until the database file changes.
 
 ### Official-name spelling recovery
 
-Unit search also indexes official Hangul unit names for a single insertion,
-deletion, substitution, or adjacent transposition. A unique neighbour with
-3–40 syllables can recover a short misspelled query. Ambiguous neighbours,
-codes, two-syllable queries, existing names, and existing lexical prefixes
-keep the ordinary search path. The original query and official source text
-remain intact; `unit_query_terms.resolved_from` records the correction.
-Classification filters still apply to the corrected lookup. Leaf searches
-keep their original query terms. This index adds a one-time corpus read to
-cold scoped searches and shares the unit lexicon's cache invalidation.
+Unit search indexes official-name words and prefixes for a single insertion,
+deletion, substitution, or adjacent transposition. A unique 3–32 character
+suggestion must exist inside the active classification scope. Sentence
+queries also require retained context evidence on the same source unit.
+Ambiguous neighbours, codes, short queries, valid words and existing lexical
+prefixes keep the ordinary search path. The original query and official
+source text remain intact; `unit_query_terms.resolved_from` records hints.
+Leaf searches keep their original query terms. The index shares the unit
+lexicon's cache invalidation.
 
-Long sentences keep resolved terms beyond the six-term retrieval cap as
-candidate-only task/KSA evidence. In their token-OR tier, the supporting
-task/KSA weight is 1.0 rather than the short-query weight of 0.5. The existing
-two-token evidence threshold and 50-candidate window still apply.
+Task/KSA supporting scores retain their 0.5 weight. Joint independent task
+evidence may rescue one token-OR candidate from the fixed 50-candidate window
+into third place, preserving the top two and stronger lexical tiers.
+Existing direct, synonym and compound evidence cannot supply duplicate proof.
+
+The bundle's original source-transposition audit is available with:
+
+```powershell
+python scripts\audit_ncs_exact_lookup.py --db <snapshot.db> --variant single_typo --per-major-limit 5 --out reports\ncs_source_typos.json
+```
+
+An additional deterministic four-edit-family audit remains available:
 
 ```powershell
 python scripts\audit_ncs_spelling_lookup.py --db <snapshot.db> --out reports\ncs_spelling_lookup.json
@@ -85,8 +93,9 @@ The audit deterministically samples five names per NCS major and rotates four
 edit families before calling search. It groups duplicate official names by
 source identifiers, opens the database read-only, and records runtime identity
 and file stability. Its results are synthetic self-retrieval, not independent
-natural-language relevance. See `docs/SEARCH_IMPROVEMENT_20261010.md` for the
-PC continuation's results and remaining validation limits.
+natural-language relevance. This pool differs from the bundle's original
+transposition pool. See `docs/SEARCH_ACCURACY.md` for the active implementation
+and `docs/SEARCH_BUNDLE_IMPORT_20261010.md` for PC import verification.
 
 ### Conversational request framing
 

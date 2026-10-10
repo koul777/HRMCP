@@ -19,8 +19,8 @@ except ModuleNotFoundError:  # pragma: no cover - package-style test import
 
 REQUIRED_SOURCE_MIRROR_PAIRS = (
     (
-        "src/ncs_mcp/search/spelling.py",
-        "deploy/vercel_mcp_app/src/ncs_mcp/search/spelling.py",
+        "src/ncs_mcp/search/typo.py",
+        "deploy/vercel_mcp_app/src/ncs_mcp/search/typo.py",
     ),
     (
         "src/ncs_mcp/search/normalization.py",
