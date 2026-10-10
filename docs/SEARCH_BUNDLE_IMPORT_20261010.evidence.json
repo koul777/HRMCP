@@ -1022,6 +1022,106 @@
     "test_changes": [
       "test_direct_unresolved_subject_is_lexical_but_caller_scope_fails_closed",
       "test_unresolved_hospitality_subject_keeps_caller_scope_and_filter_guards"
-    ]
+    ],
+    "functional_commit": "ab8c11c14dffbdff2a074ecd404ff4b3459f57a2",
+    "git_push": {
+      "repository": "koul777/HRMCP",
+      "branch": "main",
+      "ok": true,
+      "remote_head_verified": "ab8c11c14dffbdff2a074ecd404ff4b3459f57a2"
+    },
+    "github_ci": {
+      "checked_at": "2026-10-10T15:04:29.646201+00:00",
+      "tested_commit": "ab8c11c14dffbdff2a074ecd404ff4b3459f57a2",
+      "search": {
+        "run_id": 38060207092,
+        "url": "https://github.com/koul777/HRMCP/actions/runs/38060207092",
+        "conclusion": "success",
+        "per_python_passed": 384,
+        "per_python_skipped": 7,
+        "artifacts": [
+          {
+            "artifact": ".state/search-bundle-import-20261010/step4/github-search-artifacts/ncs-search-regression-py3.11/search-regression.xml",
+            "sha256": "f609ab0bf85273c9e0e1c3ad00856e218462c3db2f5a7f1eb51385e825a4e691",
+            "tests": 388,
+            "failures": 0,
+            "errors": 0,
+            "skipped": 7,
+            "passed": 381
+          },
+          {
+            "artifact": ".state/search-bundle-import-20261010/step4/github-search-artifacts/ncs-search-regression-py3.11/search-runtime-parity.xml",
+            "sha256": "24170f3ad694b92bba60b8b277d90b86ca04b8ae6ec1bfd8a5e5788f509dcdf4",
+            "tests": 3,
+            "failures": 0,
+            "errors": 0,
+            "skipped": 0,
+            "passed": 3
+          },
+          {
+            "artifact": ".state/search-bundle-import-20261010/step4/github-search-artifacts/ncs-search-regression-py3.12/search-regression.xml",
+            "sha256": "e99e8359500f56495995fbdd04f961addf34897bc12c0a2418b55f496c491c00",
+            "tests": 388,
+            "failures": 0,
+            "errors": 0,
+            "skipped": 7,
+            "passed": 381
+          },
+          {
+            "artifact": ".state/search-bundle-import-20261010/step4/github-search-artifacts/ncs-search-regression-py3.12/search-runtime-parity.xml",
+            "sha256": "1b73028749074050a90463d7e2bc5318b7bc1b33e18690c35cc979d4fe6384a8",
+            "tests": 3,
+            "failures": 0,
+            "errors": 0,
+            "skipped": 0,
+            "passed": 3
+          }
+        ]
+      },
+      "full": {
+        "run_id": 38060207043,
+        "url": "https://github.com/koul777/HRMCP/actions/runs/38060207043",
+        "conclusion": "success",
+        "jobs_passed": 5,
+        "tests": 2805,
+        "passed": 2780,
+        "skipped": 25,
+        "failures": 0,
+        "errors": 0,
+        "shards": [
+          {
+            "job_id": 114236755468,
+            "shard": 0,
+            "tests": 851,
+            "passed": 840,
+            "skipped": 11,
+            "failures": 0,
+            "errors": 0,
+            "seconds": 959.185
+          },
+          {
+            "job_id": 114236755512,
+            "shard": 1,
+            "tests": 828,
+            "passed": 817,
+            "skipped": 11,
+            "failures": 0,
+            "errors": 0,
+            "seconds": 1534.415
+          },
+          {
+            "job_id": 114236755532,
+            "shard": 2,
+            "tests": 1126,
+            "passed": 1123,
+            "skipped": 3,
+            "failures": 0,
+            "errors": 0,
+            "seconds": 964.452
+          }
+        ]
+      },
+      "documentation_only_completion_update": true
+    }
   }
 }

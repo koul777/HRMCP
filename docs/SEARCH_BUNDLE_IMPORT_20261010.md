@@ -127,5 +127,19 @@ repository lint and isolated smoke. JUnit artifacts are under
 `.state/search-bundle-import-20261010/step4/`; the companion JSON records this
 follow-up separately from the historical initial-import failure evidence.
 
+The follow-up was committed and pushed as
+`ab8c11c14dffbdff2a074ecd404ff4b3459f57a2`.
+[Search CI 38060207092](https://github.com/koul777/HRMCP/actions/runs/38060207092)
+passed on Python 3.11 and 3.12, with 384 passed and 7 skipped per version.
+Downloaded JUnit artifacts confirmed both counts. The real-DB tests skipped in
+CI all passed on the PC as recorded above.
+
+[Full CI 38060207043](https://github.com/koul777/HRMCP/actions/runs/38060207043)
+also completed successfully: all five jobs passed, including all three
+unittest shards, MCP smoke, and Docker build. The shards ran 851 / 828 / 1,126
+tests, totaling 2,805: 2,780 passed and 25 skipped, with no failures or errors.
+The final completion update records only documentation and evidence; tested
+runtime and test files remain identical to `ab8c11c`.
+
 No source DB writes, human-review status changes, production deployment, or
 credential output are part of this import.
