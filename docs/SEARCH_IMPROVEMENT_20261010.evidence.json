@@ -733,9 +733,54 @@
     ]
   },
   "full_suite": {
-    "status": "running",
-    "shards": 3,
-    "logs": ".state/search-improvement-20261010/unittest_shard_*.log"
+    "status": "completed_with_triaged_failures",
+    "initial_run_began_before_final_source_and_mirror_changes": true,
+    "shards": [
+      {
+        "index": 0,
+        "command": "python scripts/run_test_shard.py --index 0 --count 3",
+        "tests": 763,
+        "elapsed_seconds": 915.148,
+        "exit_code": 1,
+        "failures": 2,
+        "errors": 1,
+        "skipped": 0,
+        "log": ".state\\search-improvement-20261010\\unittest_shard_0.log"
+      },
+      {
+        "index": 1,
+        "command": "python scripts/run_test_shard.py --index 1 --count 3",
+        "tests": 736,
+        "elapsed_seconds": 932.824,
+        "exit_code": 1,
+        "failures": 1,
+        "errors": 0,
+        "skipped": 4,
+        "log": ".state\\search-improvement-20261010\\unittest_shard_1.log"
+      },
+      {
+        "index": 2,
+        "command": "python scripts/run_test_shard.py --index 2 --count 3",
+        "tests": 1281,
+        "elapsed_seconds": 1136.234,
+        "exit_code": 1,
+        "failures": 1,
+        "errors": 0,
+        "skipped": 1,
+        "log": ".state\\search-improvement-20261010\\unittest_shard_2.log"
+      }
+    ],
+    "total_tests": 2780,
+    "initial_failures": 4,
+    "initial_errors": 1,
+    "skipped": 5,
+    "fixed_and_rechecked": [
+      "test_deploy_runtime_parity.DeployRuntimeParityTests.test_compact_runtime_files_match_the_canonical_sources",
+      "test_check_ncs_deployment_preflight.DeploymentPreflightTests.test_required_source_mirrors_exist_and_match",
+      "test_ncs_search_recall.NcsSearchHybridRecallTests.test_v2_joined_compound_uses_normalized_name_only_with_guards"
+    ],
+    "remaining_preexisting_failure_count": 2,
+    "all_checks_passed_claim": false
   },
   "fresh_blind_holdout": {
     "measured": false,
