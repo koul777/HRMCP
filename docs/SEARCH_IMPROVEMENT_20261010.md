@@ -47,11 +47,24 @@ unchanged. Development has no rank regressions and one rank improvement.
 Long-query MRR still dips slightly in 노무 (0.7188 → 0.7125) and 교육
 (0.5625 → 0.5563); the global gain does not erase those category limits.
 
+Previously exposed holdout v2 was measured once on the final candidate:
+40 cases, Hit@1 97.5%, Hit@3 100.0%, MRR 0.9875. This is a check against an
+existing fixture, not a fresh blind generalization estimate.
+
 ## Validation and limits
 
 Lint and smoke passed. The final search/deployment checks and complete
 unittest shard results are recorded in the companion evidence JSON and
 `.state/search-improvement-20261010/` command logs.
+The final targeted run passed all 381 checks, with the two independently
+reproduced baseline routing failures tracked separately.
+
+The broad unittest run completed without a timeout: 2,780 tests across three
+shards (763 / 736 / 1,281), with 5 skips. It began before final source/mirror
+synchronization and initially recorded 4 failures and 1 error. Three checks
+(runtime parity, deployment preflight parity, and the cold-versus-warm SQL
+comparison) were fixed and passed in the final 381-check run. The two baseline
+routing failures below remain. This is not an all-green full-suite claim.
 
 Two existing real-DB routing tests also fail on the unchanged `7ee69be`
 source copy:

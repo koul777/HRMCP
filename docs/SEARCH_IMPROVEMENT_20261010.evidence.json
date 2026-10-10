@@ -748,5 +748,71 @@
     "src/ncs_mcp/search/core.py": "ab5fb7cd9cb82ffc0bd06383afe0b7899d04a6cfe68ecf4413448e31e3e1dc6b",
     "src/ncs_mcp/search/spelling.py": "20e729ecce984676a97bcdc267371e7135aa0cfae09b3e62a7fc42b621567bb6",
     "scripts/audit_ncs_spelling_lookup.py": "37cf323727c5841978213ea9b03a5c37ebbde22a7232d625e6a949beae95a200"
-  }
+  },
+  "previously_exposed_holdout_v2": {
+    "overall": {
+      "case_count": 40,
+      "search_error_count": 0,
+      "hit_at_1": 0.975,
+      "hit_at_1_count": 39,
+      "hit_at_3": 1.0,
+      "hit_at_3_count": 40,
+      "mrr": 0.9875
+    },
+    "by_category": {
+      "인사": {
+        "case_count": 8,
+        "search_error_count": 0,
+        "hit_at_1": 1.0,
+        "hit_at_1_count": 8,
+        "hit_at_3": 1.0,
+        "hit_at_3_count": 8,
+        "mrr": 1.0
+      },
+      "노무": {
+        "case_count": 8,
+        "search_error_count": 0,
+        "hit_at_1": 0.875,
+        "hit_at_1_count": 7,
+        "hit_at_3": 1.0,
+        "hit_at_3_count": 8,
+        "mrr": 0.9375
+      },
+      "교육": {
+        "case_count": 8,
+        "search_error_count": 0,
+        "hit_at_1": 1.0,
+        "hit_at_1_count": 8,
+        "hit_at_3": 1.0,
+        "hit_at_3_count": 8,
+        "mrr": 1.0
+      },
+      "총무": {
+        "case_count": 8,
+        "search_error_count": 0,
+        "hit_at_1": 1.0,
+        "hit_at_1_count": 8,
+        "hit_at_3": 1.0,
+        "hit_at_3_count": 8,
+        "mrr": 1.0
+      },
+      "회계": {
+        "case_count": 8,
+        "search_error_count": 0,
+        "hit_at_1": 1.0,
+        "hit_at_1_count": 8,
+        "hit_at_3": 1.0,
+        "hit_at_3_count": 8,
+        "mrr": 1.0
+      }
+    },
+    "fresh_blind_estimate": false
+  },
+  "git_push": {
+    "command": "git push origin HEAD:main",
+    "exit_code": 0,
+    "commit": "50173aa5cc50d1f8cacbab539796a6c51ad7c69e",
+    "remote_head_verified": true
+  },
+  "ci_run": "https://github.com/koul777/HRMCP/actions/runs/38053877631"
 }
