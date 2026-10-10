@@ -177,6 +177,45 @@ class NcsSearchUnitTermTests(unittest.TestCase):
         self.assertEqual(result["results"][0]["id"], "HR_PLAN")
         self.assertNotIn("unit_query_terms", result)
 
+    def test_single_edit_name_recovery_preserves_input_and_source_name(self) -> None:
+        for query in ("인샤기획", "인기획", "인사기획획", "인기사획"):
+            with self.subTest(query=query):
+                result = server.search_ncs(query, scope="unit", limit=3)
+                self.assertEqual(result["results"][0]["id"], "HR_PLAN")
+                self.assertEqual(result["results"][0]["text"], "인사기획")
+                self.assertEqual(result["query"], query)
+                self.assertEqual(result["normalized_query"], query)
+                self.assertEqual(result["unit_query_terms"]["resolved_from"], {query: "인사기획"})
+
+    def test_spelling_correction_respects_hard_scope(self) -> None:
+        result = server.search_ncs(
+            "인샤기획", scope="unit", classification_filter={"major_code": "05"}
+        )
+        self.assertEqual(result["results"], [])
+
+    def test_present_name_prefix_is_not_corrected(self) -> None:
+        # 인사기 is a prefix of the official name but also a deletion typo;
+        # preserve the ordinary prefix lookup and its response metadata.
+        result = server.search_ncs("인사기", scope="unit", limit=3)
+        self.assertEqual(result["results"][0]["id"], "HR_PLAN")
+        self.assertNotIn("unit_query_terms", result)
+
+    def test_terms_beyond_retrieval_cap_remain_candidate_evidence(self) -> None:
+        nouns = ["용접", "회계", "채용", "급여", "면접", "복지", "원가"]
+        with self._open_db() as conn:
+            conn.executemany(
+                "INSERT INTO competency_units VALUES (?, ?, ?, '5', 1)",
+                [(f"EXTRA_{index}", noun, noun) for index, noun in enumerate(nouns)],
+            )
+            conn.commit()
+            search_core._register_ncs_search_udfs(conn)
+            terms, trace, evidence = search_core._select_ncs_search_unit_terms(
+                conn, "올해 " + " ".join(nouns), ["올해", *nouns[:3]], {}, normalized=False,
+            )
+        self.assertEqual(len(terms), search_core._NCS_SEARCH_UNIT_TERM_LIMIT)
+        self.assertEqual(set(terms) | set(evidence), set(nouns))
+        self.assertEqual(set(trace.values()), set(terms))
+
     def test_compound_pieces_use_lexical_boundaries(self) -> None:
         # 계도 occurs inside 설계도 but never starts a word, so it is not a
         # usable head; the long query falls back to the leading piece.

@@ -28,6 +28,7 @@ from .semantic_rescue import (
     SemanticSimilarityProvider,
     rescue_order,
 )
+from .spelling import UnitNameSpellingIndex
 from .normalization import (
     SEARCH_NORMALIZATION_FIELDS,
     SEARCH_NORMALIZATION_REQUIRED_MANIFEST,
@@ -228,6 +229,9 @@ _NCS_SEARCH_DEFINITION_WEIGHT = 2.0
 # It is deliberately below the unit-name/definition weights so that broad
 # evidence cannot override an exact or token-AND match.
 _NCS_SEARCH_TASK_KSA_WEIGHT = 0.5
+# Full sentences carry more independent task evidence than short lookup
+# phrases. Supporting evidence still stays below name/definition weights.
+_NCS_SEARCH_LONG_QUERY_TASK_KSA_FACTOR = 2.0
 # Rerank a fixed lexical prefix before slicing pages. Using the requested page
 # size here makes limit=3 discard evidence that limit=50 would rank first.
 _NCS_SEARCH_UNIT_RERANK_WINDOW = 50
@@ -666,7 +670,7 @@ class _NcsUnitLexicon:
     they rank specificity and never decide a match by themselves.
     """
 
-    __slots__ = ("total", "_name_words", "_name_counts", "_any_words", "_any_counts")
+    __slots__ = ("total", "_name_words", "_name_counts", "_any_words", "_any_counts", "spelling")
 
     def __init__(self, rows: list[Any]) -> None:
         name_df: Counter[str] = Counter()
@@ -681,6 +685,7 @@ class _NcsUnitLexicon:
         self._name_counts = [name_df[word] for word in self._name_words]
         self._any_words = sorted(any_df)
         self._any_counts = [any_df[word] for word in self._any_words]
+        self.spelling = UnitNameSpellingIndex(str(name or "") for name, _ in rows)
 
     @staticmethod
     def _prefix_count(words: list[str], counts: list[int], term: str, cap: int) -> int:
@@ -863,6 +868,17 @@ def _select_ncs_search_unit_terms(
     words = list(dict.fromkeys(words))
     if not words:
         return [], {}, []
+    # Recover only a unique single-edit official name, before compound
+    # truncation can turn 인샤기획 into the much broader 기획. The raw phrase
+    # and all stronger lexical tiers stay intact, and scoped candidates still
+    # have to pass the existing classification filter.
+    if not long_query and not any(char.isdigit() for char in phrase):
+        lexicon = _ncs_search_unit_lexicon(conn)
+        correction = lexicon.spelling.correction(phrase)
+        if correction:
+            # An existing lexical name/prefix is not a misspelling.
+            if not lexicon.counts(phrase)[0]:
+                return correction.split(), {phrase: correction}, []
     stems_by_word = {word: _ncs_search_term_stems(word) for word in words}
     probe_terms = [
         term
@@ -977,6 +993,7 @@ def _select_ncs_search_unit_terms(
         if len(specific) >= 2:
             terms = specific
             trace = {word: term for word, term in trace.items() if term in terms}
+    unbounded_terms = list(terms)
     if long_query and len(terms) > _NCS_SEARCH_UNIT_TERM_LIMIT:
         uncounted = [term for term in terms if term not in any_counts]
         if uncounted:
@@ -1006,6 +1023,9 @@ def _select_ncs_search_unit_terms(
         stems_by_word[word][0] if stems_by_word[word] else word
         for word in unresolved
     ]
+    # The six-term retrieval cap must not erase a resolved subject from the
+    # candidate-only evidence pass (e.g. a definition-only seventh noun).
+    evidence_words.extend(term for term in unbounded_terms if term not in terms)
     evidence_words = [
         word for word in dict.fromkeys(evidence_words)
         if word not in terms and len(word) > 1
@@ -3417,6 +3437,7 @@ def search_ncs(
         # words, and absent closed compounds fall back to their head noun.
         # Element, criterion, and KSA search keep the original tokens.
         unit_terms = list(fallback_tokens)
+        unit_phrase = phrase
         unit_term_trace: dict[str, str] = {}
         unit_evidence_words: list[str] = []
         if "unit" in requested_types:
@@ -3429,6 +3450,14 @@ def search_ncs(
             )
             if selected_terms:
                 unit_terms = selected_terms
+                if unit_term_trace.get(phrase):
+                    correction = _ncs_search_unit_lexicon(conn).spelling.correction(phrase)
+                    if correction == unit_term_trace[phrase]:
+                        # Use the unique official name for the unit phrase
+                        # tier as well as its tokens. Otherwise a matching
+                        # classification or definition can bury the name.
+                        unit_phrase = correction
+                        intent_expansions = []
         unit_base_expansions = (
             token_expansions
             if unit_terms == fallback_tokens
@@ -3491,7 +3520,7 @@ def search_ncs(
             )
             tiers = _active_tier_predicates()(
                 columns,
-                phrase,
+                unit_phrase,
                 unit_terms,
                 unit_base_expansions,
                 compound_subphrase_expansions=unit_compound_expansions,
@@ -3503,7 +3532,7 @@ def search_ncs(
                 tiers,
                 columns=columns,
                 weighted_columns=weighted_columns,
-                phrase=phrase,
+                phrase=unit_phrase,
                 intent_expansions=intent_expansions,
                 normalized=normalized_search,
             )
@@ -3523,7 +3552,7 @@ def search_ncs(
                 for field in ("major_name", "middle_name", "small_name", "sub_name")
             )
             order_phrase = (
-                normalize_search_text(phrase) if normalized_search else phrase
+                normalize_search_text(unit_phrase) if normalized_search else unit_phrase
             )
             order_joined_compound = (
                 normalize_search_text(joined_compound)
@@ -3642,6 +3671,11 @@ def search_ncs(
                     token_weights,
                     normalized=normalized_search,
                 )
+                if len(phrase.split()) > _NCS_SEARCH_FALLBACK_TOKEN_BOUND:
+                    unit_task_ksa_scores = {
+                        code: score * _NCS_SEARCH_LONG_QUERY_TASK_KSA_FACTOR
+                        for code, score in unit_task_ksa_scores.items()
+                    }
 
         if "element" in requested_types:
             columns = ("ce.element_name_raw",)
@@ -3963,7 +3997,7 @@ def search_ncs(
         _ncs_search_match_metadata(
             item,
             query_tokens=unit_terms if item["type"] == "unit" else query_tokens,
-            phrase=phrase,
+            phrase=unit_phrase if item["type"] == "unit" else phrase,
             match_mode=_NCS_SEARCH_MATCH_MODES[item["_match_tier"]],
             token_expansions=item_token_expansions,
             compound_subphrase_expansions=(

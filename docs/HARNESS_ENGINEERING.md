@@ -59,6 +59,35 @@ The first unit search in a process builds an in-memory word index of unit
 names and definitions (about 0.3 s for 13,435 units); later searches reuse it
 until the database file changes.
 
+### Official-name spelling recovery
+
+Unit search also indexes official Hangul unit names for a single insertion,
+deletion, substitution, or adjacent transposition. A unique neighbour with
+3–40 syllables can recover a short misspelled query. Ambiguous neighbours,
+codes, two-syllable queries, existing names, and existing lexical prefixes
+keep the ordinary search path. The original query and official source text
+remain intact; `unit_query_terms.resolved_from` records the correction.
+Classification filters still apply to the corrected lookup. Leaf searches
+keep their original query terms. This index adds a one-time corpus read to
+cold scoped searches and shares the unit lexicon's cache invalidation.
+
+Long sentences keep resolved terms beyond the six-term retrieval cap as
+candidate-only task/KSA evidence. In their token-OR tier, the supporting
+task/KSA weight is 1.0 rather than the short-query weight of 0.5. The existing
+two-token evidence threshold and 50-candidate window still apply.
+
+```powershell
+python scripts\audit_ncs_spelling_lookup.py --db <snapshot.db> --out reports\ncs_spelling_lookup.json
+python scripts\audit_ncs_spelling_lookup.py --db <snapshot.db> --source-root <frozen-src> --out reports\ncs_spelling_lookup_before.json
+```
+
+The audit deterministically samples five names per NCS major and rotates four
+edit families before calling search. It groups duplicate official names by
+source identifiers, opens the database read-only, and records runtime identity
+and file stability. Its results are synthetic self-retrieval, not independent
+natural-language relevance. See `docs/SEARCH_IMPROVEMENT_20261010.md` for the
+PC continuation's results and remaining validation limits.
+
 ### Conversational request framing
 
 Search recognizes complete Korean lookup requests such as

@@ -2415,7 +2415,7 @@ class NcsSearchRecallTests(unittest.TestCase):
                 )
                 self.assertEqual(local_module.read_bytes(), vercel_module.read_bytes())
 
-        for relative in ("search/__init__.py", "search/core.py", "search/normalization.py"):
+        for relative in ("search/__init__.py", "search/core.py", "search/normalization.py", "search/spelling.py"):
             with self.subTest(relative=relative):
                 local_search = ROOT / "src" / "ncs_mcp" / relative
                 vercel_search = (
@@ -2773,6 +2773,10 @@ class NcsSearchHybridRecallTests(NcsSearchRecallTests):
 
         query = "급여 지급"
         classification_filter = {"major_code": "02"}
+        # The shared spelling/name lexicon has a one-time corpus read. Compare
+        # the joined-compound paths after that cache is warm in both calls.
+        with self._open_db() as conn:
+            search_core._ncs_search_unit_lexicon(conn)
         self.sql_statements.clear()
         with patch.object(
             search_core, "_ncs_search_joined_compound_phrase", return_value=""

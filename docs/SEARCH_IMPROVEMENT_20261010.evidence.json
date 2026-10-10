@@ -1,0 +1,752 @@
+{
+  "schema": "ncs_search_pc_continuation_evidence_v1",
+  "date": "2026-10-10",
+  "baseline_commit": "7ee69be",
+  "web_change_transferred": false,
+  "web_fixture_reproduced": false,
+  "db": {
+    "artifact": "tmp/ncs_ontology_compact_fts_v2_nocol_20260929.db",
+    "bytes": 472154112,
+    "units": 13435,
+    "read_only": true
+  },
+  "quality": {
+    "ncs_search_eval_nl": {
+      "before": {
+        "case_count": 40,
+        "search_error_count": 0,
+        "hit_at_1": 0.9,
+        "hit_at_1_count": 36,
+        "hit_at_3": 1.0,
+        "hit_at_3_count": 40,
+        "mrr": 0.9458
+      },
+      "after": {
+        "case_count": 40,
+        "search_error_count": 0,
+        "hit_at_1": 0.9,
+        "hit_at_1_count": 36,
+        "hit_at_3": 1.0,
+        "hit_at_3_count": 40,
+        "mrr": 0.9458
+      },
+      "before_by_category": {
+        "인사": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.875,
+          "hit_at_1_count": 7,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 8,
+          "mrr": 0.9167
+        },
+        "노무": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.875,
+          "hit_at_1_count": 7,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 8,
+          "mrr": 0.9375
+        },
+        "교육": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 1.0,
+          "hit_at_1_count": 8,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 8,
+          "mrr": 1.0
+        },
+        "총무": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.875,
+          "hit_at_1_count": 7,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 8,
+          "mrr": 0.9375
+        },
+        "회계": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.875,
+          "hit_at_1_count": 7,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 8,
+          "mrr": 0.9375
+        }
+      },
+      "after_by_category": {
+        "인사": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.875,
+          "hit_at_1_count": 7,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 8,
+          "mrr": 0.9167
+        },
+        "노무": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.875,
+          "hit_at_1_count": 7,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 8,
+          "mrr": 0.9375
+        },
+        "교육": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 1.0,
+          "hit_at_1_count": 8,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 8,
+          "mrr": 1.0
+        },
+        "총무": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.875,
+          "hit_at_1_count": 7,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 8,
+          "mrr": 0.9375
+        },
+        "회계": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.875,
+          "hit_at_1_count": 7,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 8,
+          "mrr": 0.9375
+        }
+      }
+    },
+    "ncs_search_eval_nl_dev": {
+      "before": {
+        "case_count": 90,
+        "search_error_count": 0,
+        "hit_at_1": 0.8556,
+        "hit_at_1_count": 77,
+        "hit_at_3": 0.9778,
+        "hit_at_3_count": 88,
+        "mrr": 0.9102
+      },
+      "after": {
+        "case_count": 90,
+        "search_error_count": 0,
+        "hit_at_1": 0.8667,
+        "hit_at_1_count": 78,
+        "hit_at_3": 0.9778,
+        "hit_at_3_count": 88,
+        "mrr": 0.9157
+      },
+      "before_by_category": {
+        "인사": {
+          "case_count": 9,
+          "search_error_count": 0,
+          "hit_at_1": 0.7778,
+          "hit_at_1_count": 7,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 9,
+          "mrr": 0.8704
+        },
+        "노무": {
+          "case_count": 9,
+          "search_error_count": 0,
+          "hit_at_1": 1.0,
+          "hit_at_1_count": 9,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 9,
+          "mrr": 1.0
+        },
+        "교육": {
+          "case_count": 9,
+          "search_error_count": 0,
+          "hit_at_1": 0.8889,
+          "hit_at_1_count": 8,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 9,
+          "mrr": 0.9259
+        },
+        "총무": {
+          "case_count": 9,
+          "search_error_count": 0,
+          "hit_at_1": 0.7778,
+          "hit_at_1_count": 7,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 9,
+          "mrr": 0.8889
+        },
+        "회계": {
+          "case_count": 9,
+          "search_error_count": 0,
+          "hit_at_1": 1.0,
+          "hit_at_1_count": 9,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 9,
+          "mrr": 1.0
+        },
+        "비HR": {
+          "case_count": 45,
+          "search_error_count": 0,
+          "hit_at_1": 0.8222,
+          "hit_at_1_count": 37,
+          "hit_at_3": 0.9556,
+          "hit_at_3_count": 43,
+          "mrr": 0.8833
+        }
+      },
+      "after_by_category": {
+        "인사": {
+          "case_count": 9,
+          "search_error_count": 0,
+          "hit_at_1": 0.7778,
+          "hit_at_1_count": 7,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 9,
+          "mrr": 0.8704
+        },
+        "노무": {
+          "case_count": 9,
+          "search_error_count": 0,
+          "hit_at_1": 1.0,
+          "hit_at_1_count": 9,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 9,
+          "mrr": 1.0
+        },
+        "교육": {
+          "case_count": 9,
+          "search_error_count": 0,
+          "hit_at_1": 0.8889,
+          "hit_at_1_count": 8,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 9,
+          "mrr": 0.9259
+        },
+        "총무": {
+          "case_count": 9,
+          "search_error_count": 0,
+          "hit_at_1": 0.7778,
+          "hit_at_1_count": 7,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 9,
+          "mrr": 0.8889
+        },
+        "회계": {
+          "case_count": 9,
+          "search_error_count": 0,
+          "hit_at_1": 1.0,
+          "hit_at_1_count": 9,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 9,
+          "mrr": 1.0
+        },
+        "비HR": {
+          "case_count": 45,
+          "search_error_count": 0,
+          "hit_at_1": 0.8444,
+          "hit_at_1_count": 38,
+          "hit_at_3": 0.9556,
+          "hit_at_3_count": 43,
+          "mrr": 0.8944
+        }
+      }
+    },
+    "ncs_search_eval_nl_dev_long": {
+      "before": {
+        "case_count": 50,
+        "search_error_count": 0,
+        "hit_at_1": 0.42,
+        "hit_at_1_count": 21,
+        "hit_at_3": 0.52,
+        "hit_at_3_count": 26,
+        "mrr": 0.5071
+      },
+      "after": {
+        "case_count": 50,
+        "search_error_count": 0,
+        "hit_at_1": 0.46,
+        "hit_at_1_count": 23,
+        "hit_at_3": 0.56,
+        "hit_at_3_count": 28,
+        "mrr": 0.5411
+      },
+      "before_by_category": {
+        "인사": {
+          "case_count": 10,
+          "search_error_count": 0,
+          "hit_at_1": 0.1,
+          "hit_at_1_count": 1,
+          "hit_at_3": 0.1,
+          "hit_at_3_count": 1,
+          "mrr": 0.1786
+        },
+        "노무": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.625,
+          "hit_at_1_count": 5,
+          "hit_at_3": 0.75,
+          "hit_at_3_count": 6,
+          "mrr": 0.7188
+        },
+        "교육": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.5,
+          "hit_at_1_count": 4,
+          "hit_at_3": 0.5,
+          "hit_at_3_count": 4,
+          "mrr": 0.5625
+        },
+        "총무": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.125,
+          "hit_at_1_count": 1,
+          "hit_at_3": 0.25,
+          "hit_at_3_count": 2,
+          "mrr": 0.2326
+        },
+        "회계": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.5,
+          "hit_at_1_count": 4,
+          "hit_at_3": 0.625,
+          "hit_at_3_count": 5,
+          "mrr": 0.5781
+        },
+        "비HR": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.75,
+          "hit_at_1_count": 6,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 8,
+          "mrr": 0.8542
+        }
+      },
+      "after_by_category": {
+        "인사": {
+          "case_count": 10,
+          "search_error_count": 0,
+          "hit_at_1": 0.1,
+          "hit_at_1_count": 1,
+          "hit_at_3": 0.2,
+          "hit_at_3_count": 2,
+          "mrr": 0.2093
+        },
+        "노무": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.625,
+          "hit_at_1_count": 5,
+          "hit_at_3": 0.75,
+          "hit_at_3_count": 6,
+          "mrr": 0.7125
+        },
+        "교육": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.5,
+          "hit_at_1_count": 4,
+          "hit_at_3": 0.5,
+          "hit_at_3_count": 4,
+          "mrr": 0.5563
+        },
+        "총무": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.125,
+          "hit_at_1_count": 1,
+          "hit_at_3": 0.375,
+          "hit_at_3_count": 3,
+          "mrr": 0.2639
+        },
+        "회계": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.625,
+          "hit_at_1_count": 5,
+          "hit_at_3": 0.625,
+          "hit_at_3_count": 5,
+          "mrr": 0.65
+        },
+        "비HR": {
+          "case_count": 8,
+          "search_error_count": 0,
+          "hit_at_1": 0.875,
+          "hit_at_1_count": 7,
+          "hit_at_3": 1.0,
+          "hit_at_3_count": 8,
+          "mrr": 0.9375
+        }
+      }
+    }
+  },
+  "spelling": {
+    "before": {
+      "overall": {
+        "cases": 120,
+        "hit_at_1": 0.025,
+        "hit_at_3": 0.041666666666666664,
+        "mrr": 0.03194444444444445
+      },
+      "by_major": {
+        "01": {
+          "cases": 5,
+          "hit_at_1": 0.2,
+          "hit_at_3": 0.2,
+          "mrr": 0.2
+        },
+        "02": {
+          "cases": 5,
+          "hit_at_1": 0.0,
+          "hit_at_3": 0.0,
+          "mrr": 0.0
+        },
+        "03": {
+          "cases": 5,
+          "hit_at_1": 0.0,
+          "hit_at_3": 0.0,
+          "mrr": 0.0
+        },
+        "04": {
+          "cases": 5,
+          "hit_at_1": 0.0,
+          "hit_at_3": 0.0,
+          "mrr": 0.0
+        },
+        "05": {
+          "cases": 5,
+          "hit_at_1": 0.0,
+          "hit_at_3": 0.0,
+          "mrr": 0.0
+        },
+        "06": {
+          "cases": 5,
+          "hit_at_1": 0.0,
+          "hit_at_3": 0.0,
+          "mrr": 0.0
+        },
+        "07": {
+          "cases": 5,
+          "hit_at_1": 0.0,
+          "hit_at_3": 0.0,
+          "mrr": 0.0
+        },
+        "08": {
+          "cases": 5,
+          "hit_at_1": 0.2,
+          "hit_at_3": 0.2,
+          "mrr": 0.2
+        },
+        "09": {
+          "cases": 5,
+          "hit_at_1": 0.0,
+          "hit_at_3": 0.0,
+          "mrr": 0.0
+        },
+        "10": {
+          "cases": 5,
+          "hit_at_1": 0.0,
+          "hit_at_3": 0.0,
+          "mrr": 0.0
+        },
+        "11": {
+          "cases": 5,
+          "hit_at_1": 0.0,
+          "hit_at_3": 0.0,
+          "mrr": 0.0
+        },
+        "12": {
+          "cases": 5,
+          "hit_at_1": 0.0,
+          "hit_at_3": 0.2,
+          "mrr": 0.1
+        },
+        "13": {
+          "cases": 5,
+          "hit_at_1": 0.0,
+          "hit_at_3": 0.0,
+          "mrr": 0.0
+        },
+        "14": {
+          "cases": 5,
+          "hit_at_1": 0.0,
+          "hit_at_3": 0.0,
+          "mrr": 0.0
+        },
+        "15": {
+          "cases": 5,
+          "hit_at_1": 0.2,
+          "hit_at_3": 0.4,
+          "mrr": 0.26666666666666666
+        },
+        "16": {
+          "cases": 5,
+          "hit_at_1": 0.0,
+          "hit_at_3": 0.0,
+          "mrr": 0.0
+        },
+        "17": {
+          "cases": 5,
+          "hit_at_1": 0.0,
+          "hit_at_3": 0.0,
+          "mrr": 0.0
+        },
+        "18": {
+          "cases": 5,
+          "hit_at_1": 0.0,
+          "hit_at_3": 0.0,
+          "mrr": 0.0
+        },
+        "19": {
+          "cases": 5,
+          "hit_at_1": 0.0,
+          "hit_at_3": 0.0,
+          "mrr": 0.0
+        },
+        "20": {
+          "cases": 5,
+          "hit_at_1": 0.0,
+          "hit_at_3": 0.0,
+          "mrr": 0.0
+        },
+        "21": {
+          "cases": 5,
+          "hit_at_1": 0.0,
+          "hit_at_3": 0.0,
+          "mrr": 0.0
+        },
+        "22": {
+          "cases": 5,
+          "hit_at_1": 0.0,
+          "hit_at_3": 0.0,
+          "mrr": 0.0
+        },
+        "23": {
+          "cases": 5,
+          "hit_at_1": 0.0,
+          "hit_at_3": 0.0,
+          "mrr": 0.0
+        },
+        "24": {
+          "cases": 5,
+          "hit_at_1": 0.0,
+          "hit_at_3": 0.0,
+          "mrr": 0.0
+        }
+      }
+    },
+    "after": {
+      "overall": {
+        "cases": 120,
+        "hit_at_1": 0.9833333333333333,
+        "hit_at_3": 0.9833333333333333,
+        "mrr": 0.9833333333333333
+      },
+      "by_major": {
+        "01": {
+          "cases": 5,
+          "hit_at_1": 1.0,
+          "hit_at_3": 1.0,
+          "mrr": 1.0
+        },
+        "02": {
+          "cases": 5,
+          "hit_at_1": 1.0,
+          "hit_at_3": 1.0,
+          "mrr": 1.0
+        },
+        "03": {
+          "cases": 5,
+          "hit_at_1": 1.0,
+          "hit_at_3": 1.0,
+          "mrr": 1.0
+        },
+        "04": {
+          "cases": 5,
+          "hit_at_1": 1.0,
+          "hit_at_3": 1.0,
+          "mrr": 1.0
+        },
+        "05": {
+          "cases": 5,
+          "hit_at_1": 1.0,
+          "hit_at_3": 1.0,
+          "mrr": 1.0
+        },
+        "06": {
+          "cases": 5,
+          "hit_at_1": 1.0,
+          "hit_at_3": 1.0,
+          "mrr": 1.0
+        },
+        "07": {
+          "cases": 5,
+          "hit_at_1": 1.0,
+          "hit_at_3": 1.0,
+          "mrr": 1.0
+        },
+        "08": {
+          "cases": 5,
+          "hit_at_1": 1.0,
+          "hit_at_3": 1.0,
+          "mrr": 1.0
+        },
+        "09": {
+          "cases": 5,
+          "hit_at_1": 1.0,
+          "hit_at_3": 1.0,
+          "mrr": 1.0
+        },
+        "10": {
+          "cases": 5,
+          "hit_at_1": 1.0,
+          "hit_at_3": 1.0,
+          "mrr": 1.0
+        },
+        "11": {
+          "cases": 5,
+          "hit_at_1": 1.0,
+          "hit_at_3": 1.0,
+          "mrr": 1.0
+        },
+        "12": {
+          "cases": 5,
+          "hit_at_1": 1.0,
+          "hit_at_3": 1.0,
+          "mrr": 1.0
+        },
+        "13": {
+          "cases": 5,
+          "hit_at_1": 1.0,
+          "hit_at_3": 1.0,
+          "mrr": 1.0
+        },
+        "14": {
+          "cases": 5,
+          "hit_at_1": 1.0,
+          "hit_at_3": 1.0,
+          "mrr": 1.0
+        },
+        "15": {
+          "cases": 5,
+          "hit_at_1": 1.0,
+          "hit_at_3": 1.0,
+          "mrr": 1.0
+        },
+        "16": {
+          "cases": 5,
+          "hit_at_1": 1.0,
+          "hit_at_3": 1.0,
+          "mrr": 1.0
+        },
+        "17": {
+          "cases": 5,
+          "hit_at_1": 0.8,
+          "hit_at_3": 0.8,
+          "mrr": 0.8
+        },
+        "18": {
+          "cases": 5,
+          "hit_at_1": 1.0,
+          "hit_at_3": 1.0,
+          "mrr": 1.0
+        },
+        "19": {
+          "cases": 5,
+          "hit_at_1": 1.0,
+          "hit_at_3": 1.0,
+          "mrr": 1.0
+        },
+        "20": {
+          "cases": 5,
+          "hit_at_1": 1.0,
+          "hit_at_3": 1.0,
+          "mrr": 1.0
+        },
+        "21": {
+          "cases": 5,
+          "hit_at_1": 1.0,
+          "hit_at_3": 1.0,
+          "mrr": 1.0
+        },
+        "22": {
+          "cases": 5,
+          "hit_at_1": 1.0,
+          "hit_at_3": 1.0,
+          "mrr": 1.0
+        },
+        "23": {
+          "cases": 5,
+          "hit_at_1": 0.8,
+          "hit_at_3": 0.8,
+          "mrr": 0.8
+        },
+        "24": {
+          "cases": 5,
+          "hit_at_1": 1.0,
+          "hit_at_3": 1.0,
+          "mrr": 1.0
+        }
+      }
+    },
+    "source_db_unchanged": true
+  },
+  "exact_names": {
+    "cases": 240,
+    "hit_at_1": 1.0,
+    "hit_at_3": 1.0,
+    "mrr": 1.0
+  },
+  "exact_codes": {
+    "cases": 240,
+    "hit_at_1": 1.0,
+    "hit_at_3": 1.0,
+    "mrr": 1.0
+  },
+  "lint": {
+    "ok": true,
+    "errors": 0,
+    "warnings": 0,
+    "issues": []
+  },
+  "smoke": {
+    "passed": true
+  },
+  "search_checks": {
+    "tests": 381,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "baseline_failures_separately_reproduced": [
+      "test_query_router.ExplicitJobScopeRealDbRegressionTests.test_direct_unknown_explicit_job_request_fails_closed",
+      "test_query_router.ExplicitJobScopeRealDbRegressionTests.test_nonexact_hospitality_scope_cannot_run_unfiltered_mixed_search"
+    ]
+  },
+  "full_suite": {
+    "status": "running",
+    "shards": 3,
+    "logs": ".state/search-improvement-20261010/unittest_shard_*.log"
+  },
+  "fresh_blind_holdout": {
+    "measured": false,
+    "reason": "operator_frozen_v3_fixture_absent"
+  },
+  "db_writes": false,
+  "human_approval_claim": false,
+  "production_deployment_claim": false,
+  "source_sha256": {
+    "src/ncs_mcp/search/core.py": "ab5fb7cd9cb82ffc0bd06383afe0b7899d04a6cfe68ecf4413448e31e3e1dc6b",
+    "src/ncs_mcp/search/spelling.py": "20e729ecce984676a97bcdc267371e7135aa0cfae09b3e62a7fc42b621567bb6",
+    "scripts/audit_ncs_spelling_lookup.py": "37cf323727c5841978213ea9b03a5c37ebbde22a7232d625e6a949beae95a200"
+  }
+}

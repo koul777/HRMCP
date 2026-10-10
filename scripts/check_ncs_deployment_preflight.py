@@ -355,6 +355,7 @@ SOURCE_MIRRORS = (
     ("ontology_export_source_mirror", "ontology_export.py"),
     ("query_router_source_mirror", "query_router.py"),
     ("search_core_source_mirror", "search/core.py"),
+    ("search_spelling_source_mirror", "search/spelling.py"),
     ("search_normalization_source_mirror", "search/normalization.py"),
     ("server_source_mirror", "server.py"),
     ("tool_registry_mirror", "tool_registry.py"),
