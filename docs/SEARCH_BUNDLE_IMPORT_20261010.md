@@ -60,7 +60,7 @@ are under `.state/search-bundle-import-20261010/`.
 
 The bundle also supplies `.github/workflows/search-accuracy.yml`, which runs
 search regression and deployment parity on Windows Python 3.11 and 3.12.
-Remote CI results will be added after the merge commit is pushed and tested.
+The merge and workflow-fix commits passed remote validation as recorded below.
 CI uses synthetic databases and cannot replace the real-snapshot measurements.
 
 The first imported workflow failed validation before starting its tests.
@@ -71,6 +71,32 @@ context is unavailable according to the
 The smoke DB path is now set in step-level `env` and exported through
 `GITHUB_ENV` for subsequent steps. Search runtime files retain the original
 bundle contents. The corrected workflow passes actionlint.
+
+## Completed remote validation
+
+Merge commit `89a8cdf73cc729c672b6c334c5faa35751b1e296` has both the previous
+PC `main` and original `d7a57e6` as parents. The workflow correction was
+pushed as `90849453b9f576303eafe78e216c042f0d2bf077`.
+
+[Search CI 38056649681](https://github.com/koul777/HRMCP/actions/runs/38056649681)
+passed on Python 3.11 and 3.12. Each version passed 381 search behavior and
+evaluation checks plus 3 runtime parity checks, with 7 skips: 384 passed
+and 7 skipped per version. Uploaded JUnit artifacts were downloaded and
+their counts checked on the PC.
+
+[Full CI 38056649686](https://github.com/koul777/HRMCP/actions/runs/38056649686)
+completed successfully. All five jobs passed: three unit-test shards,
+Tests and MCP smoke, and Docker build. The shards ran 2,805 tests
+(851 / 828 / 1,126): 2,780 passed, 25 skipped, no failures or errors.
+The earlier superseded full CI run was canceled to avoid duplicate testing.
+
+The frozen baseline copy was also verified against all 108 tracked Python
+source files from `7ee69be`. No further runtime tuning followed the same-DB
+measurements. Subsequent commits record completed validation only.
+
+The synthetic CI environment skips the real-DB routing checks above, so CI
+success does not resolve those two local baseline failures. The fresh blind
+holdout and remaining category MRR limitations still apply.
 
 No source DB writes, human-review status changes, production deployment, or
 credential output are part of this import.
