@@ -50,6 +50,10 @@ recent_review_audit = load_script_module(
     "audit_recent_review_status_writes",
     "scripts/audit_recent_review_status_writes.py",
 )
+script_output_sandbox = load_script_module(
+    "checkpoint_script_output_sandbox",
+    "tests/script_output_sandbox.py",
+)
 
 
 def initialize_minimal_ncs006_db(path: Path) -> None:
@@ -240,6 +244,12 @@ def write_safe_human_review_checkpoint_inputs(
 
 
 class Ncs006CheckpointTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.script_root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(script_output_sandbox.isolated_script_paths(
+            self.script_root, ncs006_checkpoint, element_runner, element_watchdog,
+        ))
+
     def test_checkpoint_counts_and_incomplete_batch_are_report_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -349,10 +359,10 @@ class Ncs006CheckpointTests(unittest.TestCase):
             watch_log_path = root / "watch.jsonl"
             out_path = root / "checkpoint_ncs006_element_api_status_20260620.json"
             md_path = root / "checkpoint_ncs006_element_api_status_20260620.md"
-            alias_out = ROOT / "reports" / "checkpoint_ncs006_element_api_status_20260624.json"
-            alias_md = ROOT / "reports" / "checkpoint_ncs006_element_api_status_20260624.md"
-            current_alias_out = ROOT / "reports" / "checkpoint_ncs006_element_api_status_20260624_current.json"
-            current_alias_md = ROOT / "reports" / "checkpoint_ncs006_element_api_status_20260624_current.md"
+            alias_out = self.script_root / "reports" / "checkpoint_ncs006_element_api_status_20260624.json"
+            alias_md = self.script_root / "reports" / "checkpoint_ncs006_element_api_status_20260624.md"
+            current_alias_out = self.script_root / "reports" / "checkpoint_ncs006_element_api_status_20260624_current.json"
+            current_alias_md = self.script_root / "reports" / "checkpoint_ncs006_element_api_status_20260624_current.md"
             initialize_minimal_ncs006_db(db_path)
             log_path.write_text("", encoding="utf-8")
             summary_path.write_text("{}", encoding="utf-8")
@@ -387,8 +397,6 @@ class Ncs006CheckpointTests(unittest.TestCase):
             self.assertTrue(alias_out.read_bytes().isascii())
             self.assertEqual(json.loads(out_path.read_text(encoding="utf-8"))["schema"], "ncs006_element_api_checkpoint_v1")
             self.assertEqual(json.loads(alias_out.read_text(encoding="utf-8"))["schema"], "ncs006_element_api_checkpoint_v1")
-            alias_out.unlink(missing_ok=True)
-            alias_md.unlink(missing_ok=True)
 
     def test_element_api_runner_and_watchdog_write_current_date_alias_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -418,20 +426,11 @@ class Ncs006CheckpointTests(unittest.TestCase):
             with patch.object(element_watchdog, "current_date_stamp", return_value="20260625"):
                 element_watchdog.write_alias_outputs(watchdog_args)
 
-            self.assertTrue((ROOT / "reports" / "element_api_collection_all_20260625.pid").exists())
-            self.assertTrue((ROOT / "reports" / "element_api_collection_all_20260625.jsonl").exists())
-            self.assertTrue((ROOT / "reports" / "element_api_collection_all_20260625_summary.json").exists())
-            self.assertTrue((ROOT / "reports" / "element_api_collection_all_watchdog_20260625.pid").exists())
-            self.assertTrue((ROOT / "reports" / "element_api_collection_all_watchdog_20260625.jsonl").exists())
-
-            for path in [
-                ROOT / "reports" / "element_api_collection_all_20260625.pid",
-                ROOT / "reports" / "element_api_collection_all_20260625.jsonl",
-                ROOT / "reports" / "element_api_collection_all_20260625_summary.json",
-                ROOT / "reports" / "element_api_collection_all_watchdog_20260625.pid",
-                ROOT / "reports" / "element_api_collection_all_watchdog_20260625.jsonl",
-            ]:
-                path.unlink(missing_ok=True)
+            self.assertTrue((self.script_root / "reports" / "element_api_collection_all_20260625.pid").exists())
+            self.assertTrue((self.script_root / "reports" / "element_api_collection_all_20260625.jsonl").exists())
+            self.assertTrue((self.script_root / "reports" / "element_api_collection_all_20260625_summary.json").exists())
+            self.assertTrue((self.script_root / "reports" / "element_api_collection_all_watchdog_20260625.pid").exists())
+            self.assertTrue((self.script_root / "reports" / "element_api_collection_all_watchdog_20260625.jsonl").exists())
 
     def test_next_safe_collection_action_distinguishes_watchdog_and_retry_due(self) -> None:
         active = ncs006_checkpoint.next_safe_collection_action(
@@ -1007,6 +1006,148 @@ class Ncs006CheckpointTests(unittest.TestCase):
                 "collector_related": 0,
             },
         )
+
+
+class ScriptOutputIsolationTests(unittest.TestCase):
+    """Exercise real writers against sentinels without using repository outputs."""
+
+    def setUp(self) -> None:
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.protected_root = root / "existing-project"
+        self.sandbox_root = root / "test-project"
+        self.sandbox_root.mkdir()
+        self.modules = (ncs006_checkpoint, element_runner, element_watchdog)
+        self.enterContext(script_output_sandbox.isolated_script_paths(
+            self.protected_root, *self.modules,
+        ))
+        reports = self.protected_root / "reports"
+        reports.mkdir(parents=True)
+        self.alias_names = (
+            "checkpoint_ncs006_element_api_status_20260624.json",
+            "checkpoint_ncs006_element_api_status_20260624.md",
+            "checkpoint_ncs006_element_api_status_20260624_current.json",
+            "checkpoint_ncs006_element_api_status_20260624_current.md",
+            "element_api_collection_all_20260624.pid",
+            "element_api_collection_all_20260624.jsonl",
+            "element_api_collection_all_20260624_summary.json",
+            "element_api_collection_all_watchdog_20260624.pid",
+            "element_api_collection_all_watchdog_20260624.jsonl",
+        )
+        for name in self.alias_names:
+            (reports / name).write_bytes(f"existing operational evidence: {name}".encode())
+        self.protected_snapshot = self.snapshot(reports)
+        self.addCleanup(self.assert_protected_outputs_unchanged)
+
+    @staticmethod
+    def snapshot(root: Path) -> dict[str, tuple[bytes, int]]:
+        return {
+            str(path.relative_to(root)): (path.read_bytes(), path.stat().st_mtime_ns)
+            for path in root.rglob("*") if path.is_file()
+        }
+
+    def assert_protected_outputs_unchanged(self) -> None:
+        self.assertEqual(
+            self.snapshot(self.protected_root / "reports"), self.protected_snapshot,
+        )
+
+    def test_checkpoint_main_defaults_and_current_aliases_are_isolated(self) -> None:
+        with script_output_sandbox.isolated_script_paths(self.sandbox_root, *self.modules):
+            for module in self.modules:
+                for name, path in vars(module).items():
+                    if name.isupper() and isinstance(path, Path):
+                        self.assertTrue(path.is_relative_to(self.sandbox_root), name)
+            ncs006_checkpoint.DEFAULT_DB_PATH.parent.mkdir(parents=True)
+            initialize_minimal_ncs006_db(ncs006_checkpoint.DEFAULT_DB_PATH)
+            with (
+                patch("sys.argv", ["checkpoint_ncs006_element_api_status.py"]),
+                patch.object(ncs006_checkpoint, "process_snapshot", return_value=[]),
+                patch.object(ncs006_checkpoint, "now_iso", return_value="2026-06-24T00:00:00+00:00"),
+                patch.object(ncs006_checkpoint, "current_date_stamp", return_value="20260624"),
+            ):
+                self.assertEqual(ncs006_checkpoint.main(), 0)
+            current = self.sandbox_root / "reports" / self.alias_names[2]
+            self.assertEqual(json.loads(current.read_text(encoding="utf-8"))["totals"]["total"], 3)
+            self.assertTrue((self.sandbox_root / "reports" / self.alias_names[3]).exists())
+        self.assertEqual(ncs006_checkpoint.PROJECT_ROOT, self.protected_root)
+
+    def test_runner_and_watchdog_alias_copy_and_unlink_are_isolated(self) -> None:
+        with script_output_sandbox.isolated_script_paths(self.sandbox_root, *self.modules):
+            sources = self.sandbox_root / "sources"
+            sources.mkdir()
+            args = Namespace(
+                pid_file=sources / "runner.pid",
+                watchdog_pid_file=sources / "watchdog.pid",
+                log_path=sources / "watchdog.jsonl",
+                run_log_path=sources / "runner.jsonl",
+                summary_path=sources / "summary.json",
+            )
+            for source in vars(args).values():
+                source.write_text(f"fixture: {source.name}", encoding="utf-8")
+            runner_args = Namespace(
+                pid_file=args.pid_file, log_path=args.run_log_path,
+                summary_path=args.summary_path,
+            )
+            with (
+                patch.object(element_runner, "current_date_stamp", return_value="20260624"),
+                patch.object(element_watchdog, "current_date_stamp", return_value="20260624"),
+            ):
+                element_runner.write_alias_outputs(runner_args)
+                element_watchdog.write_alias_outputs(args)
+                aliases = self.sandbox_root / "reports"
+                expected_sources = (
+                    args.pid_file, args.run_log_path, args.summary_path,
+                    args.watchdog_pid_file, args.log_path,
+                )
+                for name, source in zip(self.alias_names[4:], expected_sources):
+                    self.assertEqual((aliases / name).read_bytes(), source.read_bytes())
+                for source in vars(args).values():
+                    source.unlink()
+                element_runner.write_alias_outputs(runner_args)
+                element_watchdog.write_alias_outputs(args)
+                self.assertEqual(list(aliases.iterdir()), [])
+
+    def test_checkpoint_write_failure_restores_isolation(self) -> None:
+        with self.assertRaisesRegex(OSError, "fixture write failure"):
+            with (
+                script_output_sandbox.isolated_script_paths(self.sandbox_root, *self.modules),
+                patch.object(ncs006_checkpoint, "current_date_stamp", return_value="20260624"),
+                patch.object(ncs006_checkpoint, "write_markdown", side_effect=OSError("fixture write failure")),
+            ):
+                ncs006_checkpoint.write_alias_outputs(
+                    Namespace(out=self.sandbox_root / "custom.json", markdown_out=self.sandbox_root / "custom.md"),
+                    {"fixture": True},
+                )
+        self.assertTrue((self.sandbox_root / "reports" / self.alias_names[0]).exists())
+        for module in self.modules:
+            self.assertEqual(module.PROJECT_ROOT, self.protected_root)
+            self.assertTrue(module.DEFAULT_DB_PATH.is_relative_to(self.protected_root))
+
+    def test_watchdog_failure_cleanup_keeps_external_pid_and_logs(self) -> None:
+        aliases = self.sandbox_root / "reports"
+        aliases.mkdir()
+        for name in self.alias_names[4:]:
+            (aliases / name).write_text("stale test alias", encoding="utf-8")
+        sources = self.sandbox_root / "sources"
+        argv = ["watch_element_api_collection.py"]
+        for flag, name in (
+            ("--pid-file", "runner.pid"),
+            ("--watchdog-pid-file", "watchdog.pid"),
+            ("--log-path", "watchdog.jsonl"),
+            ("--run-log-path", "runner.jsonl"),
+            ("--summary-path", "summary.json"),
+        ):
+            argv.extend((flag, str(sources / name)))
+        with self.assertRaisesRegex(RuntimeError, "fixture count failure"):
+            with (
+                script_output_sandbox.isolated_script_paths(self.sandbox_root, *self.modules),
+                patch("sys.argv", argv),
+                patch.object(element_watchdog, "active_watchdog_processes", return_value=[]),
+                patch.object(element_watchdog, "remaining_counts", side_effect=RuntimeError("fixture count failure")),
+                patch.object(element_watchdog, "current_date_stamp", return_value="20260624"),
+            ):
+                element_watchdog.main()
+        self.assertEqual(list(aliases.iterdir()), [])
+        self.assertEqual(element_watchdog.PROJECT_ROOT, self.protected_root)
 
 
 class ElementCollectionWatchdogTests(unittest.TestCase):

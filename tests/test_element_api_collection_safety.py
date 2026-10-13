@@ -28,9 +28,19 @@ element_watchdog = load_script_module(
     "watch_element_api_collection_safety",
     "scripts/watch_element_api_collection.py",
 )
+script_output_sandbox = load_script_module(
+    "collection_script_output_sandbox",
+    "tests/script_output_sandbox.py",
+)
 
 
 class ElementApiCollectionSafetyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.script_root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(script_output_sandbox.isolated_script_paths(
+            self.script_root, element_runner, element_watchdog,
+        ))
+
     def test_batch_fully_rate_limited_requires_no_progress(self) -> None:
         result = {
             "summary": {

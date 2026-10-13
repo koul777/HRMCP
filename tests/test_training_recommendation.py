@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
@@ -70,6 +71,7 @@ from ncs_mcp.training_recommendation import (
     _score_course,
     _course_delivery_relations,
     _compact_course_card,
+    _compact_course_reasons,
     _delivery_mode_profile,
     _definition_trust_profile,
     _diversify_top_k_candidates,
@@ -3148,6 +3150,110 @@ class TrainingRecommendationTests(unittest.TestCase):
                 })
                 self.assertIn("미확인", card["rationale"])
                 self.assertNotIn("정의 본문 없음", card["rationale"])
+
+    def test_compact_definition_review_survives_all_three_reason_summaries(self) -> None:
+        cases = (
+            ("empty", _definition_trust_profile([
+                {"concept_id": 1, "concept_name": "planning", "definition": ""},
+            ]), "정의 본문 없음 1개"),
+            ("boilerplate", _definition_trust_profile([{
+                "concept_id": 1, "concept_name": "planning", "concept_type": "knowledge",
+                "definition": "planning: 업무 판단과 문제 해결에 필요한 관련 원리, 기준, 절차, 사례에 대한 지식.",
+            }]), "정형 정의 1개"),
+            ("unresolved", _definition_trust_profile([], requested_concept_ids={99}), "개념 정보 미확인 1개"),
+            ("no_matched_concepts", _definition_trust_profile([]), "연결된 KSA 개념이 없어 정의 근거 미확인"),
+            ("no_warning", None, None),
+        )
+        for name, trust, expected_review in cases:
+            with self.subTest(state=name):
+                match = {"goal_direct_concept_hits": 1, "reasons": ["training_goal_concept_text"]}
+                if trust is not None:
+                    match["definition_trust"] = trust
+                raw = {
+                    "rank": 1, "course_name": "Workforce planning", "training_course_id": 12,
+                    "tier": "primary", "final_score": 0.9,
+                    "confidence_score": 0.27, "confidence_grade": "low",
+                    "match": match,
+                    "evidence_highlights": {
+                        "source_ksa": ["job analysis"], "gap_ksa": ["capacity planning"],
+                        "goal_ksa": ["workforce forecasting"],
+                    },
+                }
+                result = {
+                    "ok": True,
+                    "recommendation_groups": {"primary": [raw], "supplemental": [], "adjacent": []},
+                    "transition": {"summary": {}, "current_scope": {}, "target_scope": {}},
+                }
+                original = deepcopy(result)
+                compact = compact_training_transition_response(result)
+                original_compact = deepcopy(compact)
+                plan = compact_ncs_education_plan_response(compact)
+                card = compact["recommended_courses"][0]
+                summaries = {
+                    "transition_answer": compact["answer_summary"]["recommended_path"][0]["why"],
+                    "planning_stage": plan["recommended_path"][1]["courses"][0]["why_recommended"],
+                    "course_link": plan["training_system_matrix"][0]["course_link"]["why_recommended"],
+                    "matrix": plan["training_system_matrix"][0]["why_recommended"],
+                }
+                self.assertGreater(len(card["why_recommended"]), 3)
+                for path, reasons in summaries.items():
+                    with self.subTest(path=path):
+                        self.assertLessEqual(len(reasons), 3)
+                        self.assertEqual(reasons[0], "목표 범위 KSA: job analysis")
+                        if expected_review:
+                            self.assertIn("훈련목표 KSA: workforce forecasting", reasons)
+                            self.assertTrue(any(expected_review in reason for reason in reasons))
+                            if name != "empty":
+                                self.assertFalse(any("정의 본문 없음" in reason for reason in reasons))
+                        else:
+                            self.assertEqual(reasons, card["why_recommended"][:3])
+                self.assertEqual(result, original)
+                self.assertEqual(compact, original_compact)
+                for key in ("rank", "training_course_id", "confidence_score", "confidence_grade", "tier"):
+                    self.assertEqual(card[key], raw[key])
+                    self.assertEqual(plan["recommended_path"][1]["courses"][0][key], raw[key])
+                self.assertFalse(card["human_review"]["status_update_allowed"])
+                self.assertFalse(card["human_review"]["approval_claim"])
+                self.assertFalse(plan["training_system_matrix"][0]["decision_state"]["approval_claim"])
+
+    def test_compact_definition_review_keeps_match_evidence_without_goal_highlights(self) -> None:
+        raw = {
+            "course_name": "Planning", "training_course_id": 12, "tier": "primary",
+            "confidence_score": 0.27, "confidence_grade": "low",
+            "match": {
+                "reasons": ["source_element_coverage"],
+                "definition_trust": _definition_trust_profile([]),
+            },
+            "evidence_highlights": {"source_ksa": ["job analysis"], "gap_ksa": ["capacity planning"]},
+        }
+        result = {
+            "ok": True,
+            "recommendation_groups": {"primary": [raw], "supplemental": [], "adjacent": []},
+            "transition": {"summary": {}, "current_scope": {}, "target_scope": {}},
+        }
+        compact = compact_training_transition_response(result)
+        reasons = compact["answer_summary"]["recommended_path"][0]["why"]
+        self.assertEqual(len(reasons), 3)
+        self.assertEqual(reasons[0], "목표 범위 KSA: job analysis")
+        self.assertIn("근거 방식: source_element_coverage", reasons)
+        self.assertTrue(any("정의 근거 미확인" in reason for reason in reasons))
+
+    def test_compact_reasons_preserve_short_lists_and_existing_review_position(self) -> None:
+        review = "KSA 정의 신뢰도: 정형 정의 1개. 과정 근거와 별도로 정의 검토가 필요합니다."
+        for reasons in ([], ["task evidence"], ["task evidence", review],
+                        [review, "task evidence", "course evidence", "extra evidence"],
+                        ["task evidence", review, "course evidence", "extra evidence"]):
+            with self.subTest(reasons=reasons):
+                card = {"why_recommended": reasons}
+                original = deepcopy(card)
+                self.assertEqual(_compact_course_reasons(card), reasons[:3])
+                self.assertEqual(card, original)
+        self.assertEqual(_compact_course_reasons({}), [])
+        self.assertEqual(_compact_course_reasons({"why_recommended": None}), [])
+        self.assertEqual(
+            _compact_course_reasons({"why_recommended": ["task evidence", "course evidence", "extra evidence", review]}),
+            ["task evidence", "course evidence", review],
+        )
 
     def test_task_recommendation_requires_task_locator(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

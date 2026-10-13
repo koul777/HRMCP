@@ -96,6 +96,7 @@ DEFINITION_TRUST_WEIGHT = {
     "candidate": 0.5,
     "missing": 0.3,
 }
+DEFINITION_TRUST_EXPLANATION_PREFIX = "KSA 정의 신뢰도:"
 # Template sources such as ksa_meaning_candidates.term_definition_template never
 # carry a written definition, whatever the status columns say.
 GENERATED_DEFINITION_SOURCE_SUFFIXES = ("_template", "_placeholder")
@@ -5504,7 +5505,33 @@ def _definition_trust_explanation(match: dict[str, Any]) -> str:
         details.append("연결된 KSA 개념이 없어 정의 근거 미확인")
     if not details:
         details.append("정의와 검토 상태 확인 필요")
-    return "KSA 정의 신뢰도: " + ", ".join(details) + ". 과정 근거와 별도로 정의 검토가 필요합니다."
+    return DEFINITION_TRUST_EXPLANATION_PREFIX + " " + ", ".join(details) + ". 과정 근거와 별도로 정의 검토가 필요합니다."
+
+
+def _compact_course_reasons(card: dict[str, Any]) -> list[str]:
+    """Keep course evidence and definition review visible within three reasons."""
+    reasons = card.get("why_recommended") or []
+    summary = reasons[:3]
+    definition_review = next(
+        (
+            reason for reason in reasons
+            if isinstance(reason, str) and reason.startswith(DEFINITION_TRUST_EXPLANATION_PREFIX)
+        ),
+        None,
+    )
+    if definition_review is None or definition_review in summary:
+        return summary
+    evidence = reasons[:2]
+    course_evidence = next(
+        (
+            reason for reason in reasons
+            if isinstance(reason, str) and reason.startswith(("훈련목표 KSA:", "근거 방식:"))
+        ),
+        None,
+    )
+    if course_evidence is not None and course_evidence not in evidence:
+        evidence[-1] = course_evidence
+    return [*evidence, definition_review]
 
 
 def _compact_course_card(
@@ -5891,7 +5918,7 @@ def _compact_transition_answer_summary(
                 "level": delivery.get("level"),
                 "hours": delivery.get("hours"),
                 "methods": delivery.get("methods"),
-                "why": (card.get("why_recommended") or [])[:3],
+                "why": _compact_course_reasons(card),
             }
         )
 
@@ -6144,7 +6171,7 @@ def _planning_course_brief(card: dict[str, Any]) -> dict[str, Any]:
         "evidence_highlights": card.get("evidence_highlights") or {},
         "career_path_review_basis": card.get("career_path_review_basis") or {},
         "quality_issue_penalty": card.get("quality_issue_penalty") or {},
-        "why_recommended": (card.get("why_recommended") or [])[:3],
+        "why_recommended": _compact_course_reasons(card),
         "fit_summary": card.get("fit_summary") or [],
         "training_system_fit": card.get("training_system_fit") or {},
     }
@@ -6766,7 +6793,7 @@ def _course_link_contract(
             course_scope_fit=course_scope_fit,
         ),
         "course_scope_fit": course_scope_fit,
-        "why_recommended": (card.get("why_recommended") or [])[:3],
+        "why_recommended": _compact_course_reasons(card),
     }
 
 
@@ -6987,7 +7014,7 @@ def _training_system_matrix(
                     "review_board_hint": "Use the review board for rows with weak, adjacent, or incomplete evidence.",
                     "flags": review_flags,
                 },
-                "why_recommended": (card.get("why_recommended") or [])[:3],
+                "why_recommended": _compact_course_reasons(card),
             }
         )
     return rows
