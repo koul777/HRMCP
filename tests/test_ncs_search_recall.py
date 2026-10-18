@@ -2194,6 +2194,140 @@ class NcsSearchRecallTests(unittest.TestCase):
             statements = [sql for sql in self.sql_statements if f"FROM {table}" in sql]
             self.assertEqual(len(statements), 1, table)
 
+    def test_leaf_phrase_pages_bound_sql_matching_work_on_many_positive_rows(self) -> None:
+        source_rows = [
+            (10000 + index, f"한정검증 boundedprobe {index:04d}")
+            for index in range(500)
+        ]
+        with self._open_db() as conn:
+            conn.execute(
+                "INSERT INTO competency_elements VALUES (9001, 'bounded leaf fixture', 'U_EXACT')"
+            )
+            conn.executemany(
+                "INSERT INTO performance_criteria VALUES (?, ?, NULL, 9001)", source_rows
+            )
+            conn.executemany(
+                "INSERT INTO ksa_items VALUES (?, 'knowledge', ?, NULL, 9001)", source_rows
+            )
+            conn.commit()
+
+        # Count actual SQL predicate work, not Python response annotations or
+        # elapsed time. Both registered UDFs still use the production matcher.
+        # A needless sort of all 500 positive matches defeats LIMIT's early exit.
+        calls = {"legacy": 0, "normalized": 0}
+        register_udfs = search_core._register_ncs_search_udfs
+        legacy_match = search_core._ncs_search_boundary_match
+        normalized_match = search_core._ncs_search_boundary_match_normalized
+
+        def counted_legacy(value, needle):
+            calls["legacy"] += 1
+            return legacy_match(value, needle)
+
+        def counted_normalized(value, needle):
+            calls["normalized"] += 1
+            return normalized_match(value, needle)
+
+        def register_counted_udfs(conn):
+            register_udfs(conn)
+            conn.create_function("ncs_search_match", 2, counted_legacy)
+            conn.create_function("ncs_search_match_normalized", 2, counted_normalized)
+
+        legacy_payloads = {}
+        page_size = 7
+        with patch.object(search_core, "_register_ncs_search_udfs", register_counted_udfs):
+            for normalized in (False, True):
+                if normalized:
+                    with self._open_db() as conn:
+                        self._add_normalized_columns(conn)
+                        conn.commit()
+                for scope in ("criteria", "ksa"):
+                    for query in ("한정검증", "boundedprobe"):
+                        for offset in (0, page_size):
+                            with self.subTest(normalized=normalized, scope=scope,
+                                              query=query, offset=offset):
+                                calls.update(legacy=0, normalized=0)
+                                result = server.search_ncs(
+                                    query, scope=scope, limit=page_size, offset=offset
+                                )
+                                self.assertEqual(result["match_mode"], "phrase")
+                                self.assertEqual(
+                                    [row["id"] for row in result["results"]],
+                                    [row[0] for row in source_rows[offset:offset + page_size]],
+                                )
+                                self.assertEqual(
+                                    [row["text"] for row in result["results"]],
+                                    [row[1] for row in source_rows[offset:offset + page_size]],
+                                )
+                                self.assertTrue(all(
+                                    row["path"]["unit_code"] == "U_EXACT"
+                                    and row["path"]["element_id"] == 9001
+                                    for row in result["results"]
+                                ))
+                                self.assertTrue(result["has_more_by_type"][scope])
+                                self.assertEqual(result["next_offset"], offset + page_size)
+                                self.assertGreater(sum(calls.values()), 0)
+                                # Allow multiple field predicates per retained
+                                # candidate, but not a scan of all positive rows.
+                                self.assertLessEqual(
+                                    sum(calls.values()), 4 * (offset + page_size + 1), calls
+                                )
+                                key = (scope, query, offset)
+                                if normalized:
+                                    self.assertEqual(result, legacy_payloads[key])
+                                else:
+                                    legacy_payloads[key] = result
+
+    def test_leaf_scored_fallback_keeps_evidence_order_before_pagination(self) -> None:
+        source_rows = (
+            (10101, "leafprobealpha raw evidence", None),
+            (10199, "leafprobebeta raw evidence", "leafprobebeta refined evidence"),
+            (10200, "leafprobebeta raw evidence", "leafprobebeta refined evidence"),
+        )
+        with self._open_db() as conn:
+            conn.execute(
+                "INSERT INTO competency_elements VALUES (9001, 'scored leaf fixture', 'U_EXACT')"
+            )
+            conn.executemany(
+                "INSERT INTO performance_criteria VALUES (?, ?, ?, 9001)", source_rows
+            )
+            conn.executemany(
+                "INSERT INTO ksa_items VALUES (?, 'knowledge', ?, ?, 9001)", source_rows
+            )
+            conn.commit()
+
+        legacy_payloads = {}
+        for normalized in (False, True):
+            if normalized:
+                with self._open_db() as conn:
+                    self._add_normalized_columns(conn)
+                    conn.commit()
+            for scope in ("criteria", "ksa"):
+                with self.subTest(normalized=normalized, scope=scope):
+                    query = "leafprobealpha leafprobebeta"
+                    whole = server.search_ncs(query, scope=scope, limit=3)
+                    first = server.search_ncs(query, scope=scope, limit=2)
+                    second = server.search_ncs(query, scope=scope, limit=1, offset=2)
+                    self.assertEqual(whole["match_mode"], "token_or")
+                    # Stronger raw+refined evidence beats a smaller source ID;
+                    # IDs still break score ties. Removing all ORDER BY terms
+                    # would break this even if unscored phrase pages stayed fast.
+                    self.assertEqual(
+                        [row["id"] for row in whole["results"]], [10199, 10200, 10101]
+                    )
+                    self.assertEqual(first["results"] + second["results"], whole["results"])
+                    self.assertEqual(first["next_offset"], 2)
+                    self.assertIsNone(second["next_offset"])
+                    self.assertTrue(all(
+                        row["match_mode"] == "token_or"
+                        and row["path"]["unit_code"] == "U_EXACT"
+                        for row in whole["results"]
+                    ))
+                    payloads = (whole, first, second)
+                    if normalized:
+                        self.assertEqual(payloads, legacy_payloads[scope])
+                    else:
+                        legacy_payloads[scope] = payloads
+
     def test_and_fallback_runs_only_after_empty_phrase_tier(self) -> None:
         result = server.search_ncs("analysis data", scope="all", limit=4)
 

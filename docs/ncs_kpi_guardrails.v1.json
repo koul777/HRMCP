@@ -1,0 +1,649 @@
+{
+  "schema": "ncs_kpi_guardrails_v1",
+  "version": "1.0.0",
+  "defined_on": "2026-10-18",
+  "timezone": "Asia/Seoul",
+  "purpose": "NCS MCP 품질·성능 개선 측정과 안전 경계",
+  "report_only": true,
+  "db_writes": false,
+  "status_update_allowed": false,
+  "approval_claim": false,
+  "enforcement": {
+    "runtime_integration": false,
+    "existing_gates_unchanged": true,
+    "automatic_deployment": false,
+    "automatic_shutdown": false,
+    "composite_score_allowed": false,
+    "commit_policy": "Same-condition measured performance improvement AND no applicable quality/guardrail regression; unknown evidence never counts as pass."
+  },
+  "threshold_policy": {
+    "new_targets": "provisional",
+    "invariants": "existing_repository_policy",
+    "calibration": "After two valid measurement cycles, version changes with rationale; never weaken existing safety rules."
+  },
+  "statuses": [
+    "pass",
+    "warn",
+    "fail",
+    "unknown",
+    "inconclusive",
+    "review_required",
+    "not_applicable"
+  ],
+  "missing_data_policy": {
+    "missing_evidence": "unknown",
+    "insufficient_sample": "inconclusive",
+    "zero_denominator": "unknown",
+    "zero_gap": "separate_no_gap_cohort",
+    "facility_unknown": "review_required",
+    "disabled_surface": "not_applicable_with_reason",
+    "unknown_is_pass": false
+  },
+  "scope": {
+    "public": "Check deployed enabled tools and identity before measurement.",
+    "internal": "K02-K05 and planner K06 require controlled eligible evaluation; do not infer production activation.",
+    "historical_profile_evidence": "reports/urgent_2h_20261013/deployment/final_handoff.json",
+    "independent_holdout": "tests/fixtures/ncs_search_eval_nl_holdout_v3.json",
+    "holdout_contract": "tests/fixtures/ncs_search_eval_nl_holdout_v3.README.md",
+    "all_major_claim": {
+      "min_cases": 120,
+      "min_per_available_major": 5,
+      "census": "available_major_codes",
+      "generalization_guarantee": false
+    }
+  },
+  "measurement_record_required_fields": [
+    "metric_id",
+    "definition_version",
+    "observed_at",
+    "window_start",
+    "window_end",
+    "surface",
+    "workload",
+    "cache_state",
+    "concurrency",
+    "code_commit",
+    "working_tree_patch_sha256",
+    "db_sha256",
+    "fixture_sha256",
+    "deployment_identity",
+    "numerator",
+    "denominator",
+    "sample_count",
+    "excluded_count",
+    "exclusion_reasons",
+    "errors",
+    "timeouts",
+    "expected_action",
+    "value",
+    "confidence_interval",
+    "source_artifacts",
+    "status",
+    "limitations"
+  ],
+  "statistics": {
+    "quantile": "nearest_rank: sorted_values[ceil(p*n)-1]",
+    "confidence_level": 0.95,
+    "binomial": "Wilson",
+    "quality_macro_mean": "scenario bootstrap",
+    "latency": "time-block bootstrap",
+    "ab_comparison": "paired bootstrap",
+    "bootstrap_replicates": 10000,
+    "bootstrap_seed": 20261018,
+    "latency_interval_crosses_target": "inconclusive",
+    "quality_interpretation": "Fixed-fixture result; report uncertainty without claiming population guarantee.",
+    "timeouts": "Retain in reliability denominator; never fabricate successful latency.",
+    "clustered_slot_metric": "K03: scenario bootstrap; never Wilson over correlated 3*N slots"
+  },
+  "metrics": [
+    {
+      "id": "K01",
+      "name": "독립 자연어 검색 Hit@3",
+      "unit": "ratio",
+      "scope": "frozen HR holdout; all-major claims need separate stratified set",
+      "formula": "count(expected unit code in top3)/all frozen queries; errors and unexpected empty responses remain misses",
+      "sample": {
+        "min_cases": 60,
+        "groups": [
+          "인사",
+          "노무",
+          "교육",
+          "총무",
+          "회계"
+        ],
+        "balanced": true,
+        "operator_frozen": true
+      },
+      "target": {
+        "operator": ">=",
+        "value": 0.8
+      },
+      "warning": {
+        "lower_inclusive": 0.7,
+        "upper_exclusive": 0.8
+      },
+      "action": {
+        "below": 0.7,
+        "response": "improve_search; retain all existing release gates"
+      },
+      "owner": "검색·평가",
+      "cadence": "weekly_and_relevant_release_candidate",
+      "measurement_status": "not_instrumented_under_v1",
+      "evidence_sources": [
+        "docs/SEARCH_ACCURACY.md",
+        "tests/fixtures/ncs_search_eval_nl_holdout_v3.README.md"
+      ]
+    },
+    {
+      "id": "K02",
+      "name": "packet-backed 추천 Hit@1",
+      "unit": "ratio",
+      "scope": "controlled answerable recommendation cohort",
+      "formula": "count(top1 unique source course ID + scope belongs to frozen gold)/all frozen answerable scenarios; errors and empty=miss",
+      "sample": {
+        "min_cases": 30,
+        "min_jobs": 5,
+        "min_per_job": 5,
+        "packet_backed_required": true
+      },
+      "target": {
+        "operator": ">=",
+        "value": 0.95
+      },
+      "warning": {
+        "lower_inclusive": 0.9,
+        "upper_exclusive": 0.95
+      },
+      "action": {
+        "below": 0.9,
+        "response": "improve_recommendation; existing top1/recall/ndcg gates remain"
+      },
+      "owner": "추천·HR 검토",
+      "cadence": "weekly_and_relevant_release_candidate",
+      "measurement_status": "not_instrumented_under_v1",
+      "evidence_sources": [
+        "src/ncs_mcp/quality_gates.py",
+        "src/ncs_mcp/training_recommendation.py"
+      ]
+    },
+    {
+      "id": "K03",
+      "name": "상위 3개 직접근거 슬롯 비율",
+      "unit": "ratio",
+      "scope": "frozen cases with >=3 preverified evidence-backed candidates",
+      "formula": "count(slots with valid source IDs + same-scope task/KSA + training_goal_concept_text)/(3 * all frozen cases); missing/duplicate/error slots are zero",
+      "sample": {
+        "min_cases": 30,
+        "candidates_per_case_at_least": 3,
+        "parallel_report": [
+          "evidence_availability",
+          "abstention",
+          "errors"
+        ],
+        "semantic_accuracy_claim": false
+      },
+      "target": {
+        "operator": ">=",
+        "value": 0.9
+      },
+      "warning": {
+        "lower_inclusive": 0.8,
+        "upper_exclusive": 0.9
+      },
+      "action": {
+        "below": 0.8,
+        "response": "improve_direct_evidence; weak/cross-scope promotion checked by G03"
+      },
+      "owner": "추천·평가",
+      "cadence": "weekly_and_relevant_release_candidate",
+      "measurement_status": "not_instrumented_under_v1",
+      "evidence_sources": [
+        "docs/NCS_HRD_GUIDE_REFERENCE.md",
+        "src/ncs_mcp/training_recommendation.py"
+      ]
+    },
+    {
+      "id": "K04",
+      "name": "직접 KSA gap coverage@5",
+      "unit": "ratio",
+      "scope": "frozen answerable cases with validated nonempty gap",
+      "formula": "macro_mean(sum(frozen weights of unique gap IDs directly covered by same-scope top5 courses)/sum(all frozen gap weights)); exclude conflicting courses and token/implied/inherited-only links",
+      "sample": {
+        "min_cases": 30,
+        "min_jobs": 5,
+        "min_per_job": 5,
+        "min_unique_gap_ids": 100,
+        "default_gap_weight": 1,
+        "weights_frozen": true,
+        "packet_backed_required": true,
+        "unknown_facility": "provisional_coverage_plus_review_rate"
+      },
+      "target": {
+        "operator": ">=",
+        "value": 0.7
+      },
+      "warning": {
+        "lower_inclusive": 0.5,
+        "upper_exclusive": 0.7
+      },
+      "action": {
+        "below": 0.5,
+        "response": "improve_gap_coverage; no-gap remains separate cohort"
+      },
+      "owner": "추천·HR 검토",
+      "cadence": "weekly_and_relevant_release_candidate",
+      "measurement_status": "not_instrumented_under_v1",
+      "evidence_sources": [
+        "docs/reference/ncs_hrd_guide_reference.index.json"
+      ]
+    },
+    {
+      "id": "K05",
+      "name": "사람이 판단 가능한 교육계획 비율",
+      "unit": "ratio",
+      "scope": "frozen answerable plan requests",
+      "formula": "count(plans satisfying six guide checks, mandatory matrix/path/route, source chain, no explicit constraint conflict, human-review state, and human usability rubric)/all frozen plan requests",
+      "sample": {
+        "min_cases": 30,
+        "min_jobs": 5,
+        "min_per_job": 5,
+        "min_constrained_cases": 10,
+        "human_rubric_required": true,
+        "usability_is_approval": false
+      },
+      "target": {
+        "operator": ">=",
+        "value": 0.8
+      },
+      "warning": {
+        "lower_inclusive": 0.6,
+        "upper_exclusive": 0.8
+      },
+      "action": {
+        "below": 0.6,
+        "response": "repair_plan_evidence_and_usability; never write trusted statuses"
+      },
+      "owner": "제품·HR 검토",
+      "cadence": "weekly_and_relevant_release_candidate",
+      "measurement_status": "not_instrumented_under_v1",
+      "evidence_sources": [
+        "docs/NCS_HRD_GUIDE_REFERENCE.md",
+        "AGENTS.md"
+      ]
+    },
+    {
+      "id": "K06",
+      "name": "Warm MCP 응답 p95",
+      "unit": "ms",
+      "scope": "per surface/workload/cache_state/concurrency; MCP request to full structured response",
+      "formula": "nearest_rank_p95(successful logical request elapsed_ms including retries); publish all-request errors/timeouts/completion alongside",
+      "sample": {
+        "min_per_stratum": 100,
+        "cache_reuse_proven": true,
+        "first_observed_is_cold": false
+      },
+      "target": {
+        "operator": "<=",
+        "by_workload": {
+          "public_search": 2500,
+          "internal_planner": 5000
+        },
+        "threshold_status": "provisional"
+      },
+      "warning": {
+        "condition": "point estimate above workload target"
+      },
+      "action": {
+        "condition": "95% CI lower bound above target",
+        "response": "hold_performance_acceptance; if interval crosses target use inconclusive"
+      },
+      "owner": "플랫폼·성능 QA",
+      "cadence": "weekly_and_relevant_release_candidate",
+      "measurement_status": "not_instrumented_under_v1",
+      "evidence_sources": [
+        "scripts/audit_remote_ncs_performance.py",
+        "docs/HARNESS_ENGINEERING.md"
+      ]
+    },
+    {
+      "id": "K07",
+      "name": "통제된 cold initialize p95",
+      "unit": "ms",
+      "scope": "same release, verified independent fresh instance and snapshot cache miss",
+      "formula": "nearest_rank_p95(first initialize request to valid initialize response); remote and local measured separately",
+      "sample": {
+        "min_independent_initializations": 100,
+        "descriptive_only_min": 30,
+        "below_30": "inconclusive",
+        "remote_restart_authorized_by_spec": false
+      },
+      "target": {
+        "operator": "<=",
+        "value": 8000,
+        "threshold_status": "provisional"
+      },
+      "warning": {
+        "condition": "point estimate >8000"
+      },
+      "action": {
+        "condition": "95% CI lower bound >8000",
+        "response": "hold_cold_performance_acceptance"
+      },
+      "owner": "플랫폼",
+      "cadence": "weekly_and_relevant_release_candidate",
+      "measurement_status": "not_instrumented_under_v1",
+      "evidence_sources": [
+        "scripts/audit_remote_ncs_performance.py",
+        "docs/HARNESS_ENGINEERING.md"
+      ]
+    },
+    {
+      "id": "K08",
+      "name": "유효 요청 성공률·timeout 비율",
+      "unit": "ratio_pair",
+      "scope": "rolling 7 days per active surface and workload",
+      "formula": "successes/all valid logical requests; timeouts/same denominator; expected valid clarification can succeed; 429/5xx/busy/unexpected errors fail",
+      "sample": {
+        "window_days": 7,
+        "min_valid_requests": 1000,
+        "deadlines": "must be frozen and recorded before run",
+        "retry_counting": "one logical request; retain individual attempts",
+        "expected_disabled_negative_tests": "separate excluded cohort with counts"
+      },
+      "target": {
+        "success_at_least": 0.995,
+        "timeout_at_most": 0.005,
+        "threshold_status": "provisional"
+      },
+      "warning": {
+        "condition": "point estimates breach either target"
+      },
+      "action": {
+        "condition": "Wilson95 upper success bound <0.995 OR lower timeout bound >0.005",
+        "response": "hold_reliability_acceptance; interval crossing target inconclusive"
+      },
+      "owner": "플랫폼",
+      "cadence": "weekly_and_relevant_release_candidate",
+      "measurement_status": "not_instrumented_under_v1",
+      "evidence_sources": [
+        "scripts/audit_remote_ncs_performance.py"
+      ]
+    },
+    {
+      "id": "K09",
+      "name": "동일 DB 성능 회귀율",
+      "unit": "relative_ratio",
+      "scope": "same DB/fixtures/parameters/PRAGMA/environment; frozen source trees",
+      "formula": "candidate_latency/baseline_latency - 1, separately workload pooled p95 and every query p50",
+      "sample": {
+        "min_pairs_per_query": 14,
+        "alternate": "AB/BA",
+        "warmups_excluded": true,
+        "retest_pairs_per_query": 30,
+        "max_planned_retests": 1,
+        "retain_all_runs": true
+      },
+      "target": {
+        "operator": "<=",
+        "value": 0.05,
+        "applies_to": [
+          "pooled_p95",
+          "each_query_p50"
+        ]
+      },
+      "warning": {
+        "condition": "first >0.05 observation"
+      },
+      "action": {
+        "condition": "reproduced in planned retest AND paired95 CI lower bound >0.05",
+        "response": "hold_candidate_change; no favorable rerun selection"
+      },
+      "owner": "엔지니어링·성능 QA",
+      "cadence": "weekly_and_relevant_release_candidate",
+      "measurement_status": "not_instrumented_under_v1",
+      "evidence_sources": [
+        "scripts/benchmark_ncs_code_ab.py",
+        "docs/HARNESS_ENGINEERING.md"
+      ]
+    },
+    {
+      "id": "K10",
+      "name": "자격 API 결과 확인 완료율",
+      "unit": "ratio",
+      "scope": "all competency units in one fixed DB; all majors",
+      "formula": "(collected unit count + valid empty unit count)/all target units; exclude error",
+      "sample": {
+        "census": true,
+        "per_major_required": true,
+        "empty_is_positive_qualification_evidence": false
+      },
+      "target": {
+        "operator": ">=",
+        "value": 0.9
+      },
+      "warning": {
+        "lower_inclusive": 0.1,
+        "upper_exclusive": 0.9
+      },
+      "action": {
+        "below": 0.1,
+        "response": "hold_qualification_evidence_readiness_only; plan guarded batches without executing from KPI"
+      },
+      "owner": "데이터 운영",
+      "cadence": "weekly_and_relevant_release_candidate",
+      "measurement_status": "not_instrumented_under_v1",
+      "evidence_sources": [
+        "src/ncs_mcp/quality_gates.py",
+        "AGENTS.md"
+      ]
+    }
+  ],
+  "guardrails": [
+    {
+      "id": "G01",
+      "name": "원천 KSA 변경",
+      "unit": "count",
+      "formula": "Count changed/deleted (ksa_id,ksa_text_raw) mappings in the same source version; compare full row-hash manifests.",
+      "target": {
+        "operator": "==",
+        "value": 0
+      },
+      "owner": "데이터",
+      "cadence": "every_builder_candidate",
+      "on_violation": "Hold affected transform/package promotion; compare preservation copy.",
+      "missing_evidence_status": "unknown",
+      "default_current_value": null
+    },
+    {
+      "id": "G02",
+      "name": "근거 없는 신뢰 승격·실질 정의 주장",
+      "unit": "count",
+      "formula": "Count claimed trusted rows without same-row human audit, packet/hash/reviewer/rationale/evidence/status provenance; separately count boilerplate/draft promoted or claimed substantive.",
+      "target": {
+        "operator": "==",
+        "value": 0
+      },
+      "owner": "HR·온톨로지 QA",
+      "cadence": "every_evaluation_and_candidate",
+      "on_violation": "Exclude unproven rows from trusted KPI and send for reconfirmation; no automatic status mutation.",
+      "missing_evidence_status": "unknown",
+      "default_current_value": null
+    },
+    {
+      "id": "G03",
+      "name": "source ID·범위·직접근거 위반",
+      "unit": "count",
+      "formula": "Count nonexistent source IDs, explicit scope violations, inherited-only or cross_scope_name_only promoted as core/direct evidence.",
+      "target": {
+        "operator": "==",
+        "value": 0
+      },
+      "owner": "추천 QA",
+      "cadence": "every_evaluation_and_affected_response",
+      "on_violation": "Withhold core-evidence status from affected recommendations.",
+      "missing_evidence_status": "unknown",
+      "default_current_value": null
+    },
+    {
+      "id": "G04",
+      "name": "framework·legacy 근거 오염",
+      "unit": "count",
+      "formula": "Count guide samples used as source/scoring facts and SQF/study modules used as active default recommendation evidence.",
+      "target": {
+        "operator": "==",
+        "value": 0
+      },
+      "owner": "데이터·제품",
+      "cadence": "every_builder_candidate",
+      "on_violation": "Hold affected links/scoring and regenerate evidence.",
+      "missing_evidence_status": "unknown",
+      "default_current_value": null
+    },
+    {
+      "id": "G05",
+      "name": "활성 응답·증거 계약 결손",
+      "unit": "count",
+      "formula": "Count missing/mismatched mandatory response, route, guide, matrix and required nonempty static proof artifacts.",
+      "target": {
+        "operator": "==",
+        "value": 0
+      },
+      "owner": "플랫폼 QA",
+      "cadence": "every_surface_change_and_release",
+      "on_violation": "Hold affected surface readiness; distinguish disabled public facade from successful internal plan.",
+      "missing_evidence_status": "unknown",
+      "default_current_value": null
+    },
+    {
+      "id": "G06",
+      "name": "제약 적합성 허위 판정",
+      "unit": "count",
+      "formula": "Count explicit facility/method/level/time conflicts or unknown evidence represented as confirmed fit/executable.",
+      "target": {
+        "operator": "==",
+        "value": 0
+      },
+      "owner": "HR·추천",
+      "cadence": "every_plan_evaluation",
+      "on_violation": "Hold conflicting plan feasibility; unknown/not_requested alone remain review_required.",
+      "missing_evidence_status": "unknown",
+      "default_current_value": null
+    },
+    {
+      "id": "G07",
+      "name": "측정 타당성 위반",
+      "unit": "count",
+      "formula": "Count exposed/dev/self-retrieval as independent quality, dropped failures, name-only truth, comparison mismatch, or insufficient/missing evidence treated as pass.",
+      "target": {
+        "operator": "==",
+        "value": 0
+      },
+      "owner": "평가",
+      "cadence": "every_evaluation",
+      "on_violation": "Invalidate affected KPI judgment; preserve records and repair evaluation.",
+      "missing_evidence_status": "unknown",
+      "default_current_value": null
+    },
+    {
+      "id": "G08",
+      "name": "guarded 실행 경계 위반",
+      "unit": "count",
+      "formula": "Count cooldown/retry/batch/preflight violations, overlapping broad writers, and no-save serving writes.",
+      "target": {
+        "operator": "==",
+        "value": 0
+      },
+      "owner": "데이터·플랫폼",
+      "cadence": "before_and_after_batch_and_serving_verification",
+      "on_violation": "Stop affected collection/write wave and restore bounded single-writer conditions.",
+      "missing_evidence_status": "unknown",
+      "default_current_value": null
+    },
+    {
+      "id": "G09",
+      "name": "Builder·배포 동일성 위반",
+      "unit": "count",
+      "formula": "Count operational refresh/package/deploy/baseline promotion outside versioned Builder or source/snapshot/deployment identity mismatch.",
+      "target": {
+        "operator": "==",
+        "value": 0
+      },
+      "owner": "release_owner",
+      "cadence": "every_candidate_and_release",
+      "on_violation": "Hold production/baseline promotion; collection exceptions grant no deploy authority.",
+      "missing_evidence_status": "unknown",
+      "default_current_value": null
+    },
+    {
+      "id": "G10",
+      "name": "공식 판단 오인·비밀 노출",
+      "unit": "count",
+      "formula": "Count actual official approval/qualification/legal eligibility claims and actual secret exposure separately; missing approval flag is G05, not a proven false claim.",
+      "target": {
+        "operator": "==",
+        "value": 0
+      },
+      "owner": "제품·보안",
+      "cadence": "every_public_artifact",
+      "on_violation": "Block or correct affected public artifact; preserve safe audit evidence without exposing secret values.",
+      "missing_evidence_status": "unknown",
+      "default_current_value": null
+    }
+  ],
+  "supporting_metrics": [
+    {
+      "id": "S01",
+      "name": "검색 Hit@1/MRR·분야별 결과",
+      "purpose": "상위 순위와 작은 분야 회귀 공개"
+    },
+    {
+      "id": "S02",
+      "name": "raw Recall@5·달성가능 상한·NDCG@5",
+      "formula": "recall=|unique top5 ∩ gold|/|gold|; ceiling=min(5,|gold|)/|gold|",
+      "purpose": "K02와 별도; 기존 이름 기반 필드 재사용 금지"
+    },
+    {
+      "id": "S03",
+      "name": "근거 가용률·올바른 보류율·오류율",
+      "purpose": "직접근거 KPI에서 희소/보류 사례를 숨기지 않음"
+    },
+    {
+      "id": "S04",
+      "name": "사람 packet-backed 평가 표본 수·분야 분포",
+      "purpose": "신뢰상태 문자열만으로 평가 자격 부여 금지"
+    },
+    {
+      "id": "S05",
+      "name": "중복 과정·generic KSA·시설 unknown 비율",
+      "purpose": "coverage 최적화로 중복·실행 제약이 가려지지 않음"
+    },
+    {
+      "id": "S06",
+      "name": "자격 시도율·실제 결과 보유율·오류·대분류별 수",
+      "purpose": "empty와 실제 자격 근거 확보를 구분"
+    },
+    {
+      "id": "S07",
+      "name": "사용자 질문부터 최종 LLM 답변까지 지연",
+      "purpose": "현재 미계측; MCP 지연으로 대체 금지"
+    },
+    {
+      "id": "S08",
+      "name": "공식명/코드 self-retrieval",
+      "purpose": "구조적 정확 조회 회귀 검사; 독립 의미 품질과 분리"
+    }
+  ],
+  "sources": [
+    "AGENTS.md",
+    "ARCHITECTURE.md",
+    "docs/HARNESS_ENGINEERING.md",
+    "docs/NCS_MCP_PRD.md",
+    "docs/NCS_HRD_GUIDE_REFERENCE.md",
+    "docs/reference/ncs_hrd_guide_reference.index.json",
+    "docs/SEARCH_ACCURACY.md",
+    "src/ncs_mcp/quality_gates.py",
+    "src/ncs_mcp/training_recommendation.py",
+    "scripts/audit_remote_ncs_performance.py",
+    "scripts/benchmark_ncs_code_ab.py"
+  ]
+}

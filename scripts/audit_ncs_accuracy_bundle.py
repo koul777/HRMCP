@@ -369,7 +369,7 @@ def compare_reports(baseline: dict, candidate: dict, proofs: list[dict]) -> dict
                                             for label, report in (("baseline", baseline), ("candidate", candidate))},
             "required_artifacts": proofs, "release_ready": False, "approval_ready": False,
             "db_writes": False, "human_approval_claim": False,
-            "limitations": ["Same compact snapshot only; operational DB freshness is not evaluated.",
+            "limitations": ["Same fingerprinted input database only; freshness outside the measured window is not evaluated.",
                             "Exact inventories are structural source self-retrieval; bounded samples are not a census.",
                             "dev90/regression40/dev-long are code-reviewed development expectations, not independent human relevance.",
                             "Stored transition review labels require provenance checks and contain incomplete course labels; no precision claim.",

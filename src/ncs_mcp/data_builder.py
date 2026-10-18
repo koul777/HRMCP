@@ -32,6 +32,7 @@ from .builder_authorization import (
 )
 from .ontology_refresh_builder import _sqlite_online_snapshot
 from .preprocess_excel import build_header_map
+from .classification_identity import reconcile_unit_classification_ids
 
 
 class BuilderError(RuntimeError):
@@ -1006,9 +1007,15 @@ class DataBuilder:
                 self._failed(folder, report, exc, builder_context)
                 raise
 
-    def copy_current(self) -> dict:
+    def copy_current(self, source: Path | None = None) -> dict:
+        from .builder_validation import _require_candidate_paths
+
         with self.exclusive("copy_current") as builder_context:
-            source = self.current_db()
+            source = (
+                Path(source).resolve(strict=True)
+                if source is not None
+                else self.current_db()
+            )
             self._space(source.stat().st_size * 2 + 1024**3)
             folder, report = self._new("current-copy", builder_context)
             try:
@@ -1017,7 +1024,29 @@ class DataBuilder:
                 )
                 _sqlite_online_snapshot(source, folder / "ncs.db", authorize=lambda: require_builder_context(
                     builder_context, action="copy_current", version_dir=folder))
+                candidate_path = folder / "ncs.db"
+
+                def authorize_candidate() -> None:
+                    _require_candidate_paths(
+                        candidate_path, folder / "validation-checkpoint.json", builder_context
+                    )
+
+                authorize_candidate()
+                candidate = sqlite3.connect(candidate_path.as_uri() + "?mode=rw", uri=True)
+                candidate.row_factory = sqlite3.Row
+                try:
+                    with candidate:
+                        authorize_candidate()
+                        identity_report = reconcile_unit_classification_ids(
+                            candidate, apply=True
+                        )
+                        # A revoked lease must roll back before the context manager commits.
+                        authorize_candidate()
+                finally:
+                    candidate.close()
+                authorize_candidate()
                 report["parent_database"] = str(source)
+                report["unit_classification_reconciliation"] = identity_report
                 return self._finish(folder, report, builder_context)
             except Exception as exc:
                 self._failed(folder, report, exc, builder_context)

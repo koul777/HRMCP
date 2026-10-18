@@ -19,6 +19,13 @@ when legacy/reference table counts are needed.
 
 ## Query Performance Comparisons
 
+Use [NCS KPI and Guardrails](NCS_KPI_GUARDRAILS.md) for the measurement window,
+sample requirements, frozen denominators, uncertainty and missing-evidence rules.
+`benchmark_ncs_code_ab.py` exit code zero establishes response/file invariants,
+not performance improvement or commit eligibility. Evaluate raw samples and
+per-query regressions separately before claiming a gain. Keep local function,
+local MCP, remote MCP and controlled cold measurements distinct.
+
 ### Source self-retrieval accuracy
 
 `scripts/audit_ncs_exact_lookup.py` checks official unit names or codes against
@@ -1289,3 +1296,35 @@ summary is named `all_non_rejected_evaluation`; readiness automation should read
 `--allow-automated-status-write` before it may write non-trusted automated
 candidate statuses. Trusted statuses still require the guarded human-decision
 import path.
+
+## Scope lookup completion and empty results
+
+`resolve_ncs_query_scope` distinguishes a completed lookup from a matching
+scope. A normal resolver result with `candidates=[]`, string `query` and
+`normalized_query`, and no explicit error or timeout fields is returned by the
+MCP wrapper as `ok=true`, `error=null`. `selected_candidate` remains `null`;
+the caller must inspect the candidates and clarification state before planning
+training. An empty result does not establish recommendation quality or count as
+an independently verified correct abstention.
+
+Explicit failure fields and malformed resolver responses retain failure
+semantics. The domain resolver's own result is not mutated. Regression coverage
+is in `tests/test_scope_response_contract.py`; same-DB comparisons must keep
+this response-contract correction identical in both performance arms and retain
+empty cases in their request denominators.
+
+## Competency-unit classification identity
+
+Excel normalization registers the selected classification paths before ingesting
+evidence, so borrowed rows retain their criteria and KSA even when their canonical
+path appears later in the workbook. Both passes honor the same sheet and row limits.
+Search and unit detail resolve official unit prefixes to one unique classification;
+fresh Excel databases use structural uniqueness until API activity metadata exists,
+after which only a unique active path is eligible. This does not claim API activity
+has been verified for a fresh import.
+
+Builder copies reconcile cached classification IDs only inside the isolated
+candidate. Candidate and sidecar link checks and the operation lease are verified
+before opening for writes and before committing. Source KSA and human review states
+are preserved. Run `python -m pytest -q tests/test_classification_identity.py` in
+addition to unittest discovery because that file includes pytest functions.

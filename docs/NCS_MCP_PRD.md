@@ -113,6 +113,12 @@ steps live in `docs/AIHR_DEPLOYMENT_RUNBOOK.md`.
 
 ## Success Criteria
 
+The versioned measurement contract is [NCS KPI and Guardrails](NCS_KPI_GUARDRAILS.md),
+with machine-readable definitions in `docs/ncs_kpi_guardrails.v1.json`. It separates
+quality, latency, reliability and data readiness from safety invariants. Missing
+measurements and unverified human-review provenance do not count as passes; the
+contract does not replace existing release gates or authorize deployment.
+
 - `recommend_training_for_task` returns relevant training courses for an NCS task query.
 - Every recommendation includes source task, KSA concept evidence, and training-course source IDs.
 - `plan_ncs_education_path` can answer guide-style prompts with `query_route`,

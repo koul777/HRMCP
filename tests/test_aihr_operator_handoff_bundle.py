@@ -450,6 +450,66 @@ class AihrOperatorHandoffBundleTests(unittest.TestCase):
             self.assertIn("## Verification Logs", handoff_text)
             self.assertIn("- human_decision_required: `True`", handoff_text)
 
+    def test_build_bundle_resolves_artifacts_under_nested_project_root(self) -> None:
+        # Use the real repository root: a mocked PROJECT_ROOT hides this regression.
+        with tempfile.TemporaryDirectory(prefix=".handoff-root-", dir=ROOT) as tmp:
+            root = Path(tmp)
+            paths = self._fixture(root)
+            reports = root / "reports"
+            next_json = reports / f"aihr_operator_next_actions_{STAMP}.json"
+            integrity_json = reports / f"operator_review_packet_integrity_audit_{STAMP}.json"
+            lineage_json = reports / f"operator_report_lineage_sync_audit_{STAMP}.json"
+            result = build_bundle(
+                release_readiness_path=paths["release"],
+                queue_run_path=paths["queue_run"],
+                transition_gap_json=paths["transition_gap_json"],
+                qualification_decision_json=paths["qualification_json"],
+                provenance_proofset_log=paths["proof_log"],
+                blocker_sprint_queue_json=paths["queue_json"],
+                blocker_sprint_queue_audit_json=paths["queue_audit"],
+                transition_crosswalk_json=paths["crosswalk_json"],
+                transition_crosswalk_csv=paths["crosswalk_csv"],
+                transition_crosswalk_audit_json=paths["crosswalk_audit"],
+                provenance_decision_sheet_json=paths["decision_json"],
+                concept_seedpack_csv=paths["concept_csv"],
+                blocker_ranked_seedpack_csv=paths["blocker_csv"],
+                provenance_decision_sheet_csv=paths["decision_csv"],
+                provenance_decision_audit_json=paths["decision_audit"],
+                qualification_decision_csv=paths["qualification_csv"],
+                qualification_decision_audit_json=paths["qualification_audit"],
+                quality_report_path=paths["quality"],
+                dashboard_verification_path=paths["dashboard"],
+                next_actions_out=next_json,
+                next_actions_markdown_out=next_json.with_suffix(".md"),
+                operator_audit_out=integrity_json,
+                operator_audit_markdown_out=integrity_json.with_suffix(".md"),
+                handoff_out=reports / f"overnight_10h_operator_handoff_{STAMP}.json",
+                handoff_markdown_out=reports / f"overnight_10h_operator_handoff_{STAMP}.md",
+                lineage_audit_out=lineage_json,
+                lineage_audit_markdown_out=lineage_json.with_suffix(".md"),
+                stamp=STAMP,
+                root=root,
+                generated_at=GENERATED_AT,
+            )
+            next_actions = json.loads(next_json.read_text(encoding="utf-8"))
+            integrity = json.loads(integrity_json.read_text(encoding="utf-8"))
+            lineage = json.loads(lineage_json.read_text(encoding="utf-8"))
+
+            self.assertTrue(result["ok"], integrity.get("issues"))
+            self.assertTrue(integrity["ok"], integrity.get("issues"))
+            self.assertTrue(lineage["ok"], lineage.get("issues"))
+            for action in next_actions["actions"]:
+                with self.subTest(blocker=action["id"]):
+                    self.assertTrue(action["open_first"].startswith("reports/"))
+                    self.assertTrue((root / action["open_first"]).is_file())
+                    for path in action["artifacts_to_open"]:
+                        self.assertTrue(path.startswith("reports/"), path)
+                        self.assertTrue((root / path).is_file(), path)
+                    self.assertTrue(all(item["exists_nonempty"] for item in action["artifact_status"]))
+                    if action.get("supporting_artifact"):
+                        self.assertTrue(action["supporting_artifact"].startswith("reports/"))
+                        self.assertTrue((root / action["supporting_artifact"]).is_file())
+
     def test_harness_command_writes_bundle_outputs(self) -> None:
         previous_argv = sys.argv[:]
         stdout = io.StringIO()

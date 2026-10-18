@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from openpyxl import Workbook
 
+from ncs_mcp import data_builder as data_builder_module
 from ncs_mcp.builder_desktop import format_result
 from ncs_mcp.data_builder import BuilderError, DataBuilder, inspect_workbook, api_failure_message
 from ncs_mcp.db import connect, initialize_database, now_utc
@@ -474,6 +475,180 @@ class DataBuilderTests(unittest.TestCase):
             conn.commit()
         with self.assertRaises(BuilderError):
             self.engine.candidate(result['version'])
+
+    def misclassify_copy_source(self):
+        with closing(connect(self.baseline)) as conn:
+            correct = conn.execute(
+                """
+                SELECT classification_id FROM classifications
+                WHERE major_code='20' AND middle_code='01'
+                  AND small_code='02' AND sub_code='02'
+                """
+            ).fetchone()[0]
+            conn.execute(
+                "UPDATE classifications SET api_usg_yn='Y' WHERE classification_id=?",
+                (correct,),
+            )
+            cursor = conn.execute(
+                """
+                INSERT INTO classifications(
+                    major_code, major_name, middle_code, middle_name,
+                    small_code, small_name, sub_code, sub_name, api_usg_yn
+                ) VALUES('07','사회복지','01','사회복지','02','서비스','05','자원봉사관리','Y')
+                """
+            )
+            wrong = cursor.lastrowid
+            conn.execute(
+                "UPDATE competency_units SET classification_id=? WHERE unit_code=?",
+                (wrong, self.values['unit_code']),
+            )
+            conn.commit()
+        return correct, wrong
+
+    def test_copy_current_repairs_unit_classification_in_builder_candidate_only(self):
+        correct, wrong = self.misclassify_copy_source()
+        source_before = self.baseline.read_bytes()
+        with patch.object(self.engine, '_space'):
+            result = self.engine.copy_current(self.baseline)
+        self.assertEqual(self.baseline.read_bytes(), source_before)
+        self.assertEqual(
+            result['unit_classification_reconciliation']['repair_count'], 1
+        )
+        candidate = self.engine.candidate(result['version'])
+        with closing(connect(self.baseline, read_only=True)) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT classification_id FROM competency_units WHERE unit_code=?",
+                    (self.values['unit_code'],),
+                ).fetchone()[0],
+                wrong,
+            )
+        with closing(connect(candidate, read_only=True)) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT classification_id FROM competency_units WHERE unit_code=?",
+                    (self.values['unit_code'],),
+                ).fetchone()[0],
+                correct,
+            )
+
+    def assert_copy_rejects_redirect(self, link_kind, *, sidecar=None):
+        self.misclassify_copy_source()
+        source_before = self.baseline.read_bytes()
+        sentinel = self.root / 'redirect-sentinel'
+        sentinel.write_bytes(b'external sidecar sentinel')
+        if link_kind == 'symlink':
+            probe = self.root / 'symlink-probe'
+            try:
+                probe.symlink_to(self.baseline)
+            except OSError as exc:
+                self.skipTest(f'File symlinks unavailable: {exc}')
+            else:
+                probe.unlink()
+        original_snapshot = data_builder_module._sqlite_online_snapshot
+        original_connect = sqlite3.connect
+        connection_patch = None
+        connection = None
+
+        def redirect(source, target, **kwargs):
+            nonlocal connection_patch, connection
+            original_snapshot(source, target, **kwargs)
+            redirected = Path(str(target) + sidecar) if sidecar else target
+            redirected.unlink(missing_ok=True)
+            external = sentinel if sidecar else source
+            if link_kind == 'hardlink':
+                os.link(external, redirected)
+            else:
+                redirected.symlink_to(external)
+            # Start observing only after the coherent snapshot has completed.
+            connection_patch = patch('ncs_mcp.data_builder.sqlite3.connect',
+                                     wraps=original_connect)
+            connection = connection_patch.start()
+
+        try:
+            with patch.object(self.engine, '_space'), \
+                    patch('ncs_mcp.data_builder._sqlite_online_snapshot', side_effect=redirect), \
+                    patch.object(self.engine, '_finish') as finish:
+                with self.assertRaises(BuilderError):
+                    self.engine.copy_current(self.baseline)
+                finish.assert_not_called()
+            self.assertIsNotNone(connection)
+            connection.assert_not_called()
+            self.assertEqual(self.baseline.read_bytes(), source_before)
+            self.assertEqual(sentinel.read_bytes(), b'external sidecar sentinel')
+            self.assertEqual(self.engine.versions()[0]['status'], 'failed')
+            self.assertFalse((self.engine.state / 'deployed.json').exists())
+            self.assertFalse((self.engine.state / 'operation.lock').exists())
+        finally:
+            if connection_patch is not None:
+                connection_patch.stop()
+
+    def test_copy_current_rejects_snapshot_replaced_by_source_hardlink(self):
+        self.assert_copy_rejects_redirect('hardlink')
+
+    def test_copy_current_rejects_snapshot_replaced_by_source_symlink(self):
+        self.assert_copy_rejects_redirect('symlink')
+
+    def test_copy_current_rejects_hardlinked_candidate_sidecar(self):
+        self.assert_copy_rejects_redirect('hardlink', sidecar='-journal')
+
+    def test_copy_current_rolls_back_reconciliation_when_lease_is_revoked(self):
+        _correct, wrong = self.misclassify_copy_source()
+        source_before = self.baseline.read_bytes()
+        original_reconcile = data_builder_module.reconcile_unit_classification_ids
+        recorded = {}
+
+        def revoke(conn, **kwargs):
+            recorded['db'] = Path(conn.execute('PRAGMA database_list').fetchone()[2])
+            recorded['build'] = (recorded['db'].parent / 'build.json').read_bytes()
+            report = original_reconcile(conn, **kwargs)
+            self.assertEqual(report['repair_count'], 1)
+            self.assertTrue(conn.in_transaction)
+            recorded['lock'] = self.replace_operation_lock()
+            return report
+
+        with patch.object(self.engine, '_space'), \
+                patch('ncs_mcp.data_builder.reconcile_unit_classification_ids', side_effect=revoke), \
+                patch.object(self.engine, '_finish') as finish:
+            with self.assertRaises(BuilderError):
+                self.engine.copy_current(self.baseline)
+            finish.assert_not_called()
+        with closing(connect(recorded['db'], read_only=True)) as conn:
+            self.assertEqual(conn.execute(
+                'SELECT classification_id FROM competency_units WHERE unit_code=?',
+                (self.values['unit_code'],),
+            ).fetchone()[0], wrong)
+        self.assertEqual(self.baseline.read_bytes(), source_before)
+        self.assertEqual((recorded['db'].parent / 'build.json').read_bytes(), recorded['build'])
+        self.assertEqual((self.engine.state / 'operation.lock').read_bytes(), recorded['lock'])
+        self.assertFalse((self.engine.state / 'deployed.json').exists())
+
+    def test_copy_current_reconciliation_error_rolls_back_and_records_failure(self):
+        _correct, wrong = self.misclassify_copy_source()
+        source_before = self.baseline.read_bytes()
+        original_reconcile = data_builder_module.reconcile_unit_classification_ids
+        recorded = {}
+
+        def fail(conn, **kwargs):
+            recorded['db'] = Path(conn.execute('PRAGMA database_list').fetchone()[2])
+            original_reconcile(conn, **kwargs)
+            raise RuntimeError('fixture reconciliation failure')
+
+        with patch.object(self.engine, '_space'), \
+                patch('ncs_mcp.data_builder.reconcile_unit_classification_ids', side_effect=fail), \
+                patch.object(self.engine, '_finish') as finish:
+            with self.assertRaisesRegex(RuntimeError, 'fixture reconciliation failure'):
+                self.engine.copy_current(self.baseline)
+            finish.assert_not_called()
+        with closing(connect(recorded['db'], read_only=True)) as conn:
+            self.assertEqual(conn.execute(
+                'SELECT classification_id FROM competency_units WHERE unit_code=?',
+                (self.values['unit_code'],),
+            ).fetchone()[0], wrong)
+        self.assertEqual(self.baseline.read_bytes(), source_before)
+        self.assertEqual(self.engine.versions()[0]['status'], 'failed')
+        self.assertFalse((self.engine.state / 'operation.lock').exists())
+        self.assertFalse((self.engine.state / 'deployed.json').exists())
 
     def test_api_failure_not_publishable_and_lock_released(self):
         def blocked(*args, **kwargs):

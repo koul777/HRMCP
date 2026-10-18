@@ -29,6 +29,7 @@ from pydantic import Field
 from starlette.responses import JSONResponse
 
 from ncs_mcp.config import load_settings
+from ncs_mcp.classification_identity import unit_classification_join
 from ncs_mcp.compact_postings import (
     concept_criteria_ids,
     has_compact_criteria_postings,
@@ -1691,6 +1692,7 @@ def _ksa_results_for_units(
         f"WHEN ce.unit_code = ? THEN {index}" for index in range(len(codes))
     )
     with open_db() as conn:
+        classification_join = unit_classification_join(conn)
         rows = conn.execute(
             f"""
             SELECT ki.ksa_id, ki.ksa_type_name, ki.ksa_text_raw,
@@ -1700,7 +1702,7 @@ def _ksa_results_for_units(
             FROM ksa_items ki
             JOIN competency_elements ce ON ce.element_id = ki.element_id
             JOIN competency_units cu ON cu.unit_code = ce.unit_code
-            JOIN classifications c ON c.classification_id = cu.classification_id
+            {classification_join}
             WHERE ce.unit_code IN ({placeholders})
             ORDER BY CASE {order_cases} ELSE 99 END, ki.ksa_id
             LIMIT ? OFFSET ?
@@ -3438,25 +3440,26 @@ def get_competency_units(
         clauses.append("cu.api_match_status = ?")
         params.append(api_match_status)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    sql = f"""
-        SELECT
-            cu.unit_code,
-            cu.unit_name_raw AS unit_name,
-            cu.unit_level_raw AS level,
-            cu.api_definition,
-            cu.api_match_status,
-            c.major_code, c.major_name,
-            c.middle_code, c.middle_name,
-            c.small_code, c.small_name,
-            c.sub_code, c.sub_name
-        FROM competency_units cu
-        JOIN classifications c ON c.classification_id = cu.classification_id
-        {where}
-        ORDER BY c.major_code, c.middle_code, c.small_code, c.sub_code, cu.unit_code
-        LIMIT ?
-    """
     params.append(clamp_limit(limit))
     with open_db() as conn:
+        classification_join = unit_classification_join(conn)
+        sql = f"""
+            SELECT
+                cu.unit_code,
+                cu.unit_name_raw AS unit_name,
+                cu.unit_level_raw AS level,
+                cu.api_definition,
+                cu.api_match_status,
+                c.major_code, c.major_name,
+                c.middle_code, c.middle_name,
+                c.small_code, c.small_name,
+                c.sub_code, c.sub_name
+            FROM competency_units cu
+            {classification_join}
+            {where}
+            ORDER BY c.major_code, c.middle_code, c.small_code, c.sub_code, cu.unit_code
+            LIMIT ?
+        """
         rows = conn.execute(sql, params).fetchall()
     return {"units": rows_to_dicts(rows)}
 
@@ -3478,8 +3481,9 @@ def get_unit_structure(
     """Get a full competency unit hierarchy: elements, performance criteria, and KSA."""
     version = text_version if text_version in {"raw", "refined", "both"} else "raw"
     with open_db() as conn:
+        classification_join = unit_classification_join(conn)
         unit = conn.execute(
-            """
+            f"""
             SELECT
                 cu.*,
                 c.major_code, c.major_name,
@@ -3488,7 +3492,7 @@ def get_unit_structure(
                 c.sub_code, c.sub_name,
                 c.duty_def_api, c.duty_order
             FROM competency_units cu
-            JOIN classifications c ON c.classification_id = cu.classification_id
+            {classification_join}
             WHERE cu.unit_code = ?
             """,
             (unit_code,),
@@ -3835,8 +3839,19 @@ def resolve_ncs_query_scope(
             sub_code=sub_code,
             limit=limit,
         )
+    # The domain resolver uses ok=bool(candidates). A completed lookup with
+    # no candidates is an empty result, not a transport/tool failure. Keep
+    # explicit failures and malformed payloads on the normal error path.
+    completed_without_match = (
+        result.get("ok") is False
+        and result.get("candidates") == []
+        and isinstance(result.get("query"), str)
+        and isinstance(result.get("normalized_query"), str)
+        and not any(key in result for key in ("error", "isError", "timeout", "timed_out"))
+    )
     return tool_response(
         result,
+        ok=True if completed_without_match else None,
         audit={
             "data_sources": [
                 "classifications",
@@ -5001,8 +5016,9 @@ def get_concept_evidence(concept_id: int, limit: int = 20) -> dict[str, Any]:
                 """,
                 (concept_id, max_rows),
             ).fetchall()
+        classification_join = unit_classification_join(conn)
         ksa_rows = conn.execute(
-            """
+            f"""
             SELECT
                 kcl.link_id, kcl.link_status, ki.ksa_id, ki.ksa_type_name,
                 ki.ksa_no, ki.ksa_text_raw, ki.ksa_text_refined,
@@ -5014,7 +5030,7 @@ def get_concept_evidence(concept_id: int, limit: int = 20) -> dict[str, Any]:
             JOIN ksa_items ki ON ki.ksa_id = kcl.ksa_id
             JOIN competency_elements ce ON ce.element_id = ki.element_id
             JOIN competency_units cu ON cu.unit_code = ce.unit_code
-            JOIN classifications c ON c.classification_id = cu.classification_id
+            {classification_join}
             WHERE kcl.concept_id = ?
             ORDER BY ce.unit_code, ce.element_id, ki.ksa_type_code, ki.ksa_id
             LIMIT ?

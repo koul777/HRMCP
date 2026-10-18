@@ -14,12 +14,16 @@ if str(SRC) not in sys.path:
 from ncs_mcp.blocker_report import (
     DEFAULT_HUMAN_REVIEW_BACKLOG_PATH,
     DEFAULT_REMAINING_BLOCKERS_PATH,
+    _artifact_date_alignment,
+    _artifact_date_tokens,
     _audit_review_seedpack,
     _ksa_immutability_audit_summary,
     _latest_report_path,
+    _prefer_queue_report_input_for_same_date,
     _queue_snapshot_from_report,
     _release_family_artifact_path,
     _release_readiness_cycle_safe_sha256,
+    _review_artifact_freshness_summary,
     build_goal_completion_audit_report_from_files,
     build_human_review_backlog_report_from_files,
     build_remaining_blockers_report_from_files,
@@ -185,6 +189,83 @@ def _ksa_immutability_audit_fixture() -> dict:
             "draft_or_template_trusted_status_count": 0,
         },
     }
+
+
+class ArtifactDateAlignmentTests(unittest.TestCase):
+    def test_dates_use_artifact_filename_across_path_styles(self) -> None:
+        values = (
+            r"C:\scratch_20261018\run_20260903\review_priority_20260707.json",
+            "/scratch_20261018/run_20260903/review_priority_20260707.json",
+            Path("scratch_20261018") / "run_20260903" / "review_priority_20260707.json",
+        )
+        for value in values:
+            with self.subTest(path=value):
+                self.assertEqual(_artifact_date_tokens(value), {"20260707"})
+
+    def test_dates_preserve_explicit_scalars_and_nested_artifact_evidence(self) -> None:
+        value = {
+            "active_date": "20260707",
+            "inputs": [
+                "scratch_20261018/report_20260706.json",
+                (Path("scratch_20260903/report_20260707.json"),),
+            ],
+            "comparison": {"scratch_20261018/comparison_20260705_20260707.json"},
+        }
+        self.assertEqual(_artifact_date_tokens(value), {"20260705", "20260706", "20260707"})
+
+    def test_distinct_artifact_dates_remain_mixed(self) -> None:
+        result = _artifact_date_alignment(
+            {"reports": [
+                "scratch_20261018/review_20260706.json",
+                "scratch_20261018/review_20260707.json",
+            ]},
+            active_date_source="20260707",
+        )
+        self.assertEqual(result["status"], "mixed_artifact_dates")
+        self.assertTrue(result["mixed_dates"])
+        self.assertEqual(result["all_dates"], ["20260706", "20260707"])
+        self.assertEqual(result["active_date"], "20260707")
+
+    def test_missing_artifact_dates_are_not_inferred_from_ancestors(self) -> None:
+        result = _artifact_date_alignment(
+            {"reports": ["scratch_20261018/review.json", Path("scratch_20260903/queue.json")]},
+            active_date_source="scratch_20261018/release.json",
+        )
+        self.assertEqual(result["status"], "no_dates")
+        self.assertEqual(result["all_dates"], [])
+        self.assertEqual(result["path_dates"], {})
+        self.assertIsNone(result["active_date"])
+
+    def test_same_date_queue_preference_ignores_ancestor_dates(self) -> None:
+        recorded = "scratch_20261018/review_20260707.json"
+        queue = r"C:\scratch_20260903\review_20260707.json"
+        self.assertEqual(_prefer_queue_report_input_for_same_date(recorded, queue), queue)
+        self.assertEqual(
+            _prefer_queue_report_input_for_same_date(recorded, "scratch_20261018/review_20260706.json"),
+            recorded,
+        )
+
+    def test_undated_queue_evidence_does_not_replace_recorded_path(self) -> None:
+        recorded = "scratch_20261018/recorded.json"
+        queue = "scratch_20261018/queue.json"
+        self.assertEqual(_prefer_queue_report_input_for_same_date(recorded, queue), recorded)
+
+    def test_no_dates_is_not_promoted_to_aligned_in_freshness_summary(self) -> None:
+        alignment = _artifact_date_alignment({"report": "scratch_20261018/review.json"})
+        result = _review_artifact_freshness_summary(
+            remaining_blockers={"review_artifact_date_alignment": alignment},
+            human_review_backlog={"review_artifact_date_alignment": alignment},
+        )
+        self.assertEqual(result["status"], "no_dates")
+        self.assertEqual(result["all_dates"], [])
+        self.assertIsNone(result["active_date"])
+
+    def test_unknown_alignment_is_not_promoted_to_aligned_in_freshness_summary(self) -> None:
+        result = _review_artifact_freshness_summary(
+            remaining_blockers={"review_artifact_date_alignment": {"status": "aligned"}},
+            human_review_backlog={"review_artifact_date_alignment": {"status": "unknown"}},
+        )
+        self.assertEqual(result["status"], "unknown")
 
 
 class BlockerReportTests(unittest.TestCase):
@@ -749,7 +830,8 @@ class BlockerReportTests(unittest.TestCase):
 
     def test_remaining_blockers_prefers_queue_review_priority_when_triage_date_matches(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = Path(tmp) / "kpi_10h_20261018_215751"
+            tmp_path.mkdir()
             release_path = tmp_path / "aihr_release_readiness_20260707.json"
             triage_path = tmp_path / "aihr_review_triage_20260707.json"
             queue_path = tmp_path / "aihr_agent_queue_status_20260707.json"

@@ -16,6 +16,7 @@ from typing import Any
 from openpyxl import load_workbook
 
 from ncs_mcp.config import load_settings
+from ncs_mcp.classification_identity import resolve_import_classification_id
 from ncs_mcp.db import (
     connect,
     create_indexes,
@@ -298,12 +299,18 @@ class Normalizer:
         )
 
     def ingest(self, sheet_name: str, sheet_row_number: int, values: dict[str, str], timestamp: str) -> None:
-        classification_id = self.get_classification_id(values)
+        self.get_classification_id(values)
+        raw_row_id = self.insert_raw_row(sheet_name, sheet_row_number, values, timestamp)
+        base_code, _ = split_unit_code(values["unit_code"])
+        classification_id = resolve_import_classification_id(self.conn, base_code)
+        if classification_id is None:
+            # Preserve the source row, but do not normalize it under a borrowed,
+            # inactive, missing, or ambiguous classification path.
+            return
         self.upsert_unit(values, classification_id, timestamp)
         element_id = self.get_element_id(values)
         criteria_id = self.get_criteria_id(element_id, values)
         ksa_id = self.get_ksa_id(element_id, values)
-        raw_row_id = self.insert_raw_row(sheet_name, sheet_row_number, values, timestamp)
         self.insert_link(raw_row_id, element_id, criteria_id, ksa_id)
 
 
@@ -387,6 +394,34 @@ def preprocess_excel(
     timestamp = now_utc()
 
     try:
+        # Resolve unit identities against every selected source path before
+        # normalizing evidence. A borrowed row may precede the row/sheet that
+        # declares its canonical path. Both passes stream the workbook, keeping
+        # only the small classification cache, and honor the same input bounds.
+        classification_fields = (
+            "major_code", "major_name", "middle_code", "middle_name",
+            "small_code", "small_name", "sub_code", "sub_name",
+        )
+        registered_rows = 0
+        with conn:
+            for worksheet in workbook.worksheets:
+                if sheets and worksheet.title not in sheets:
+                    continue
+                rows = worksheet.iter_rows(values_only=True)
+                header = next(rows, None)
+                if header is None:
+                    continue
+                header_map = build_header_map(header)
+                for row in rows:
+                    normalizer.get_classification_id({
+                        field: get(row, header_map, field) for field in classification_fields
+                    })
+                    registered_rows += 1
+                    if max_rows is not None and registered_rows >= max_rows:
+                        break
+                if max_rows is not None and registered_rows >= max_rows:
+                    break
+
         for worksheet in workbook.worksheets:
             if sheets and worksheet.title not in sheets:
                 continue

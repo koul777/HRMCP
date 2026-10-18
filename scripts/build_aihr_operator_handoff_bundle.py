@@ -210,6 +210,7 @@ def action_artifact_paths(
     transition_gap_json: Path,
     qualification_decision_json: Path,
     provenance_decision_sheet_json: Path,
+    root: Path = PROJECT_ROOT,
 ) -> tuple[str, list[str], str | None, str]:
     transition_gap_csv = transition_gap_json.with_suffix(".csv")
     qualification_csv = qualification_decision_json.with_suffix(".csv")
@@ -266,17 +267,17 @@ def action_artifact_paths(
             ),
         ),
         "qualification:collection_coverage": (
-            portable_path(qualification_csv, root=PROJECT_ROOT) or str(qualification_csv),
+            portable_path(qualification_csv, root=root) or str(qualification_csv),
             [
-                portable_path(qualification_csv, root=PROJECT_ROOT) or str(qualification_csv),
-                portable_path(qualification_md, root=PROJECT_ROOT) or str(qualification_md),
-                portable_path(qualification_decision_json, root=PROJECT_ROOT)
+                portable_path(qualification_csv, root=root) or str(qualification_csv),
+                portable_path(qualification_md, root=root) or str(qualification_md),
+                portable_path(qualification_decision_json, root=root)
                 or str(qualification_decision_json),
                 report_path("qualification_retry_hygiene", stamp, "md"),
                 report_path("qualification_collection_coverage_plan", stamp, "md"),
                 report_path("qualification_collection_coverage_plan", stamp, "csv"),
             ],
-            portable_path(qualification_decision_json, root=PROJECT_ROOT)
+            portable_path(qualification_decision_json, root=root)
             or str(qualification_decision_json),
             (
                 "Use the guarded batch decision packet to choose a pilot window; do not run "
@@ -284,18 +285,18 @@ def action_artifact_paths(
             ),
         ),
         "transition_eval:trusted_scenarios": (
-            portable_path(transition_crosswalk_csv, root=PROJECT_ROOT) or str(transition_crosswalk_csv),
+            portable_path(transition_crosswalk_csv, root=root) or str(transition_crosswalk_csv),
             [
-                portable_path(transition_crosswalk_csv, root=PROJECT_ROOT)
+                portable_path(transition_crosswalk_csv, root=root)
                 or str(transition_crosswalk_csv),
-                portable_path(transition_crosswalk_csv.with_suffix(".md"), root=PROJECT_ROOT)
+                portable_path(transition_crosswalk_csv.with_suffix(".md"), root=root)
                 or str(transition_crosswalk_csv.with_suffix(".md")),
-                portable_path(transition_crosswalk_audit_json, root=PROJECT_ROOT)
+                portable_path(transition_crosswalk_audit_json, root=root)
                 or str(transition_crosswalk_audit_json),
-                portable_path(transition_crosswalk_audit_json.with_suffix(".md"), root=PROJECT_ROOT)
+                portable_path(transition_crosswalk_audit_json.with_suffix(".md"), root=root)
                 or str(transition_crosswalk_audit_json.with_suffix(".md")),
-                portable_path(transition_gap_csv, root=PROJECT_ROOT) or str(transition_gap_csv),
-                portable_path(provenance_decision_csv, root=PROJECT_ROOT)
+                portable_path(transition_gap_csv, root=root) or str(transition_gap_csv),
+                portable_path(provenance_decision_csv, root=root)
                 or str(provenance_decision_csv),
             ],
             report_path("transition_provenance_operator_crosswalk", stamp, "json"),
@@ -306,18 +307,18 @@ def action_artifact_paths(
             ),
         ),
         "human_review:provenance_reconfirmation_required": (
-            portable_path(provenance_decision_csv, root=PROJECT_ROOT) or str(provenance_decision_csv),
+            portable_path(provenance_decision_csv, root=root) or str(provenance_decision_csv),
             [
-                portable_path(transition_crosswalk_csv, root=PROJECT_ROOT)
+                portable_path(transition_crosswalk_csv, root=root)
                 or str(transition_crosswalk_csv),
-                portable_path(provenance_decision_csv, root=PROJECT_ROOT)
+                portable_path(provenance_decision_csv, root=root)
                 or str(provenance_decision_csv),
-                portable_path(provenance_decision_sheet_json.with_suffix(".md"), root=PROJECT_ROOT)
+                portable_path(provenance_decision_sheet_json.with_suffix(".md"), root=root)
                 or str(provenance_decision_sheet_json.with_suffix(".md")),
                 provenance_packet_md,
                 provenance_audit_md,
             ],
-            portable_path(provenance_decision_sheet_json, root=PROJECT_ROOT)
+            portable_path(provenance_decision_sheet_json, root=root)
             or str(provenance_decision_sheet_json),
             (
                 "Use the crosswalk to fill only human-approved provenance rows; decisions "
@@ -408,6 +409,7 @@ def build_next_actions(
             transition_gap_json=transition_gap_json,
             qualification_decision_json=qualification_decision_json,
             provenance_decision_sheet_json=provenance_decision_sheet_json,
+            root=root,
         )
         normalized_artifacts = [
             normalize_path_for_root(path, root=root) or path for path in artifacts if path

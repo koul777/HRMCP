@@ -17,6 +17,7 @@ from ncs_mcp.query_router import (
     normalize_search_context_inputs,
     search_context_request_contract,
 )
+from ncs_mcp.classification_identity import unit_classification_join
 
 from .prefix_index import (
     PREFIX_FTS_REQUIRED_MANIFEST,
@@ -803,9 +804,10 @@ def _ncs_search_unit_term_counts(
         classification_filter, alias="c", normalized=normalized
     )
     params.update(scope_params)
+    classification_join = unit_classification_join(conn)
     row = conn.execute(
         f"SELECT COUNT(*), {', '.join(projections)} FROM competency_units cu "
-        "JOIN classifications c ON c.classification_id = cu.classification_id "
+        f"{classification_join} "
         f"WHERE {scope_clause}",
         params,
     ).fetchone()
@@ -1631,13 +1633,14 @@ def _ncs_resolve_exact_unit_scope(
     unit_column = _ncs_search_column("cu.unit_name_raw", normalized)
     where_sql = f"WHERE {unit_column} = ?" if normalized else ""
     params = (query_value,) if normalized else ()
+    classification_join = unit_classification_join(conn)
     rows = conn.execute(
         "SELECT cu.unit_code, cu.unit_name_raw, "
         "c.classification_id, c.major_code, c.major_name, "
         "c.middle_code, c.middle_name, c.small_code, c.small_name, "
         "c.sub_code, c.sub_name "
         "FROM competency_units cu "
-        "JOIN classifications c ON c.classification_id = cu.classification_id "
+        f"{classification_join} "
         f"{where_sql} "
         "ORDER BY c.major_code, c.middle_code, c.small_code, c.sub_code, "
         "cu.unit_code",
@@ -2413,9 +2416,10 @@ def _ncs_search_token_idf_weights(
         normalized=normalized,
     )
     if scope_clause:
+        classification_join = unit_classification_join(conn)
         from_clause = (
             "competency_units cu "
-            "JOIN classifications c ON c.classification_id = cu.classification_id"
+            f"{classification_join}"
         )
         sql = f"SELECT COUNT(*), {frequency_terms} FROM {from_clause} WHERE {scope_clause}"
         params = {**params, **scope_params}
@@ -3179,7 +3183,11 @@ def _execute_ncs_search_tiers(
     tiers: list[tuple[int, str, dict[str, Any], str, str]],
     base_params: dict[str, Any],
 ) -> list[Any]:
-    """Preserve lexical ranks; only append morphology to an underfilled OR tier."""
+    """Preserve lexical ranks; only append morphology to an underfilled OR tier.
+
+    Each SQL execution fixes match_tier, so it must not sort by that constant:
+    leaf queries can then stop in source-ID order once their limit is reached.
+    """
     original_rows: list[Any] = []
     for match_tier, where_clause, tier_params, score_clause, meaningful_clause in tiers:
         params = dict(tier_params)
@@ -3627,6 +3635,7 @@ def search_ncs(
     search_context: dict[str, Any]
     with _required_runtime_helper("open_db", _OPEN_DB_FACTORY)() as conn:
         _register_ncs_search_udfs(conn)
+        classification_join = unit_classification_join(conn)
         search_context = resolve_ncs_search_context(
             conn,
             context_text=context_text,
@@ -3796,7 +3805,7 @@ def search_ncs(
                        c.duty_order, aliases.alias_search_text,
                        :match_tier AS match_tier
                 FROM competency_units cu
-                JOIN classifications c ON c.classification_id = cu.classification_id
+                {classification_join}
                 LEFT JOIN alias_search aliases ON aliases.unit_code = cu.unit_code
                 WHERE {{where_clause}}{{fallback_filter_clause}}
                 ORDER BY match_tier,
@@ -3912,7 +3921,7 @@ def search_ncs(
                        :match_tier AS match_tier
                 FROM competency_elements ce
                 JOIN competency_units cu ON cu.unit_code = ce.unit_code
-                JOIN classifications c ON c.classification_id = cu.classification_id
+                """ + classification_join + """
                 WHERE {where_clause}{fallback_filter_clause}
                 ORDER BY match_tier, {fallback_order_clause}
                          LENGTH(ce.element_name_raw), ce.element_id
@@ -3970,9 +3979,9 @@ def search_ncs(
                 FROM performance_criteria pc
                 JOIN competency_elements ce ON ce.element_id = pc.element_id
                 JOIN competency_units cu ON cu.unit_code = ce.unit_code
-                JOIN classifications c ON c.classification_id = cu.classification_id
+                """ + classification_join + """
                 WHERE {where_clause}{fallback_filter_clause}
-                ORDER BY match_tier, {fallback_order_clause} pc.criteria_id
+                ORDER BY {fallback_order_clause} pc.criteria_id
                 LIMIT :candidate_limit
                 """,
                 tiers,
@@ -4032,9 +4041,9 @@ def search_ncs(
                 FROM ksa_items ki
                 JOIN competency_elements ce ON ce.element_id = ki.element_id
                 JOIN competency_units cu ON cu.unit_code = ce.unit_code
-                JOIN classifications c ON c.classification_id = cu.classification_id
+                """ + classification_join + """
                 WHERE {where_clause}{fallback_filter_clause}
-                ORDER BY match_tier, {fallback_order_clause} ki.ksa_id
+                ORDER BY {fallback_order_clause} ki.ksa_id
                 LIMIT :candidate_limit
                 """,
                 tiers,

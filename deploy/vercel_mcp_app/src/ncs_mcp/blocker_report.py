@@ -1391,10 +1391,10 @@ def _summary_with_source_paths(
 
 
 def _artifact_date_tokens(value: Any) -> set[str]:
-    if isinstance(value, str):
-        return set(ARTIFACT_DATE_RE.findall(value))
-    if isinstance(value, Path):
-        return set(ARTIFACT_DATE_RE.findall(str(value)))
+    """Read filename or scalar dates, excluding unrelated parent directories."""
+    if isinstance(value, (str, Path)):
+        artifact_name = str(value).replace("\\", "/").rsplit("/", 1)[-1]
+        return set(ARTIFACT_DATE_RE.findall(artifact_name))
     if isinstance(value, dict):
         tokens: set[str] = set()
         for nested in value.values():
@@ -2119,8 +2119,12 @@ def _review_artifact_freshness_summary(
         status = "stale_against_active_date"
     elif any(value == "mixed_artifact_dates" for value in statuses.values()):
         status = "mixed_artifact_dates"
-    elif statuses:
+    elif statuses and all(value == "aligned" for value in statuses.values()):
         status = "aligned"
+    elif statuses and all(value == "no_dates" for value in statuses.values()):
+        status = "no_dates"
+    elif statuses:
+        status = "unknown"
     else:
         status = "no_alignment_metadata"
     return {
