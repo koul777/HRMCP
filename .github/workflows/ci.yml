@@ -83,6 +83,9 @@ jobs:
       - name: Check MCP tool contract
         run: python scripts\export_mcp_tool_contract.py --check --out mcp\ncs-tool-contract.json
 
+      - name: Run classification identity regressions
+        run: python -m pytest -q tests\test_classification_identity.py
+
       - name: Check release text encoding
         run: python scripts\check_text_encoding.py
 
