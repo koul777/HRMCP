@@ -26,6 +26,23 @@ not performance improvement or commit eligibility. Evaluate raw samples and
 per-query regressions separately before claiming a gain. Keep local function,
 local MCP, remote MCP and controlled cold measurements distinct.
 
+Each case names a workload: `search*` calls `search_ncs`, `transition*` calls
+the library `recommend_training_transition` with `save=False` (the server
+wrapper's per-call capacity queue wait would break response parity), and any
+other workload calls `resolve_ncs_query_scope`. Freeze the cases and the
+`ncs_performance_trial_plan_v1` plan before the first timed run, point
+`--candidate-source` at a frozen copy rather than the working `src`, and judge
+the run with `scripts/review_ncs_performance_kpi.py`.
+
+`scripts/measure_ncs_kpi_snapshot.py` records the locally measurable KPI parts
+(K10 census, a K03 structural diagnostic over the gold transition scenarios,
+the G01 `ksa_text_raw` row-hash manifest comparison) and leaves every other
+metric and guardrail `unknown`. It is report-only and opens the DB read-only.
+
+```powershell
+python scripts\measure_ncs_kpi_snapshot.py --out reports\ncs_kpi_snapshot.json --ksa-manifest-out reports\ksa_text_manifest.tsv.gz --previous-ksa-manifest <earlier manifest>
+```
+
 ### Source self-retrieval accuracy
 
 `scripts/audit_ncs_exact_lookup.py` checks official unit names or codes against

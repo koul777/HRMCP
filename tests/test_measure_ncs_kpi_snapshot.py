@@ -1,0 +1,124 @@
+from __future__ import annotations
+
+import importlib.util
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+from ncs_mcp.db import connect, initialize_database, now_utc
+
+SCRIPT = ROOT / "scripts" / "measure_ncs_kpi_snapshot.py"
+spec = importlib.util.spec_from_file_location("measure_ncs_kpi_snapshot", SCRIPT)
+assert spec is not None and spec.loader is not None
+snapshot = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(snapshot)
+
+DEFINITION = json.loads((ROOT / "docs" / "ncs_kpi_guardrails.v1.json").read_text(encoding="utf-8"))
+METRICS = {item["id"]: item for item in DEFINITION["metrics"]}
+
+
+def seed(conn, units: dict[str, str | None]) -> None:
+    """units maps unit_code -> qualification collection status (None = never attempted)."""
+    timestamp = now_utc()
+    for major in sorted({code[:2] for code in units}):
+        conn.execute(
+            """
+            INSERT INTO classifications(major_code, major_name, middle_code, middle_name,
+                                        small_code, small_name, sub_code, sub_name)
+            VALUES (?, 'm', '01', 'm', '01', 's', '01', 's')
+            """,
+            (major,),
+        )
+    for code, status in units.items():
+        classification_id = conn.execute(
+            "SELECT classification_id FROM classifications WHERE major_code = ?", (code[:2],)
+        ).fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO competency_units(unit_code, base_unit_code, unit_version, unit_name_raw, unit_level_raw,
+                                         classification_id, api_definition, api_match_status, created_at, updated_at)
+            VALUES (?, ?, '23v1', ?, '3', ?, '', 'matched', ?, ?)
+            """,
+            (code, code.split("_")[0], code, classification_id, timestamp, timestamp),
+        )
+        if status:
+            conn.execute(
+                "INSERT INTO ncs_qualification_collection_status(unit_code, collection_status, updated_at) VALUES (?, ?, ?)",
+                (code, status, timestamp),
+            )
+    conn.commit()
+
+
+class KpiSnapshotTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.conn = connect(self.root / "ncs.db")
+        initialize_database(self.conn)
+
+    def tearDown(self) -> None:
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def test_ratio_bands_follow_contract(self) -> None:
+        k10 = METRICS["K10"]
+        self.assertEqual(snapshot.ratio_status(0.95, k10), "pass")
+        self.assertEqual(snapshot.ratio_status(0.4838, k10), "warn")
+        self.assertEqual(snapshot.ratio_status(0.05, k10), "fail")
+        self.assertEqual(snapshot.ratio_status(None, k10), "unknown")
+
+    def test_k10_counts_collected_and_empty_but_not_error_or_unattempted(self) -> None:
+        seed(self.conn, {"0101_23v1": "collected", "0102_23v1": "empty", "0103_23v1": "error",
+                         "0201_23v1": None})
+        result = snapshot.measure_k10(self.conn, METRICS["K10"])
+        self.assertEqual((result["numerator"], result["denominator"]), (2, 4))
+        self.assertEqual(result["value"], 0.5)
+        self.assertEqual(result["status"], "warn")
+        self.assertEqual(result["status_counts"], {"collected": 1, "empty": 1, "error": 1, "not_attempted": 1})
+        self.assertEqual(result["attempted_ratio"], 0.75)
+        self.assertEqual(result["per_major"]["02"]["value"], 0.0)
+
+    def test_direct_slot_needs_valid_unique_course_and_goal_text_hit(self) -> None:
+        seen: set[int] = set()
+        valid = {1, 2}
+        self.assertTrue(snapshot.slot_is_direct({"training_course_id": 1, "goal_direct_concept_hits": 2}, valid, seen))
+        self.assertFalse(snapshot.slot_is_direct({"training_course_id": 1, "goal_direct_concept_hits": 2}, valid, seen))
+        self.assertFalse(snapshot.slot_is_direct({"training_course_id": 3, "goal_direct_concept_hits": 2}, valid, seen))
+        self.assertFalse(snapshot.slot_is_direct({"training_course_id": 2, "goal_direct_concept_hits": 0,
+                                                  "goal_token_concept_hits": 5}, valid, seen))
+
+    def test_scenario_bootstrap_is_seeded_and_brackets_mean(self) -> None:
+        ratios = [0.0, 1 / 3, 1.0, 0.0, 2 / 3]
+        first = snapshot.scenario_bootstrap(ratios, resamples=500)
+        self.assertEqual(first, snapshot.scenario_bootstrap(ratios, resamples=500))
+        self.assertLessEqual(first["lower"], sum(ratios) / len(ratios))
+        self.assertGreaterEqual(first["upper"], sum(ratios) / len(ratios))
+        self.assertIsNone(snapshot.scenario_bootstrap([]))
+
+    def test_g01_reports_unknown_without_baseline_then_counts_changes(self) -> None:
+        self.conn.execute("PRAGMA foreign_keys = OFF")  # manifest rows only; no element lineage needed
+        self.conn.execute("INSERT INTO ksa_items(ksa_id, element_id, ksa_type_code, ksa_type_name, ksa_no, ksa_text_raw) "
+                          "VALUES (1, 1, '01', 'knowledge', '1', 'a'), (2, 1, '01', 'knowledge', '2', 'b')")
+        first_path = self.root / "first.tsv.gz"
+        first = snapshot.measure_g01(self.conn, None, first_path)
+        self.assertEqual((first["status"], first["violation_count"], first["row_count"]), ("unknown", None, 2))
+        same = snapshot.measure_g01(self.conn, first_path, None)
+        self.assertEqual((same["status"], same["violation_count"]), ("pass", 0))
+        self.conn.execute("UPDATE ksa_items SET ksa_text_raw = 'changed' WHERE ksa_id = 1")
+        self.conn.execute("DELETE FROM ksa_items WHERE ksa_id = 2")
+        self.conn.execute("INSERT INTO ksa_items(ksa_id, element_id, ksa_type_code, ksa_type_name, ksa_no, ksa_text_raw) "
+                          "VALUES (3, 1, '01', 'knowledge', '3', 'c')")
+        changed = snapshot.measure_g01(self.conn, first_path, None)
+        self.assertEqual((changed["changed"], changed["deleted"], changed["added"]), (1, 1, 1))
+        self.assertEqual((changed["violation_count"], changed["status"]), (2, "fail"))
+
+
+if __name__ == "__main__":
+    unittest.main()

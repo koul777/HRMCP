@@ -13,6 +13,11 @@
 런타임 차단은 이번에 추가하지 않았다. KPI 달성, 계약 검사 통과, 사람 승인, 배포 준비도는
 서로 다른 상태로 보관한다.
 
+2026-10-23 추가: `scripts/measure_ncs_kpi_snapshot.py`가 로컬에서 잴 수 있는 부분만 기록한다.
+K10은 전수 집계, K03은 gold 전환 시나리오 100개의 구조 진단, G01은 `ksa_text_raw` 행 hash
+manifest 비교다. K03은 사전 검증된 후보 3개와 `expected_action` 표시가 없어 `inconclusive`로
+남기고, 나머지 지표와 가드레일은 `unknown`으로 둔다. 런타임 차단은 여전히 없다.
+
 ## 적용 범위와 판단 방식
 
 2026-10-13 [배포 기록](../reports/urgent_2h_20261013/deployment/final_handoff.json)의 공개 표면은
