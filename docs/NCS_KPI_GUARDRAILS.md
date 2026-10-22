@@ -15,7 +15,9 @@
 
 2026-10-23 추가: `scripts/measure_ncs_kpi_snapshot.py`가 로컬에서 잴 수 있는 부분만 기록한다.
 K10은 전수 집계, K03은 gold 전환 시나리오 100개의 구조 진단, G01은 `ksa_text_raw` 행 hash
-manifest 비교다. K03은 사전 검증된 후보 3개와 `expected_action` 표시가 없어 `inconclusive`로
+manifest 비교다. G03은 같은 시나리오가 돌려준 상위 5개 과정에서 없는 과정 ID, 직접 단위 근거
+없는 주추천, 목표 범위 밖 주추천을 센다. G10은 git 추적 파일에 `.env` 비밀값이 들어 있는지
+건수와 경로만 확인하고, 공개 문구의 승인·자격 인정 표현은 검사하지 않는다. K03은 사전 검증된 후보 3개와 `expected_action` 표시가 없어 `inconclusive`로
 남기고, 나머지 지표와 가드레일은 `unknown`으로 둔다. 런타임 차단은 여전히 없다.
 
 ## 적용 범위와 판단 방식

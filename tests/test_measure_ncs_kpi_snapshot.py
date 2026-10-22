@@ -94,6 +94,28 @@ class KpiSnapshotTests(unittest.TestCase):
         self.assertFalse(snapshot.slot_is_direct({"training_course_id": 2, "goal_direct_concept_hits": 0,
                                                   "goal_token_concept_hits": 5}, valid, seen))
 
+    def test_g03_flags_unknown_ids_and_unsupported_primary_slots(self) -> None:
+        slots = [
+            {"training_course_id": 1, "tier": "primary", "direct_unit_evidence": True, "scope_alignment": "direct"},
+            {"training_course_id": 9, "tier": "adjacent", "direct_unit_evidence": False, "scope_alignment": "distant"},
+            {"training_course_id": 2, "tier": "primary", "direct_unit_evidence": False, "scope_alignment": "adjacent"},
+            {"training_course_id": 2, "tier": "supplemental", "direct_unit_evidence": False, "scope_alignment": None},
+        ]
+        self.assertEqual(snapshot.g03_violations(slots, {1, 2}), {
+            "invalid_source_id": 1, "primary_without_direct_unit_evidence": 1, "primary_outside_target_scope": 1})
+        self.assertEqual(snapshot.g03_violations(slots[:1], {1}), {})
+
+    def test_g10_reads_only_secret_like_env_values_and_reports_paths(self) -> None:
+        env = self.root / ".env"
+        env.write_text("NCS_SERVICE_KEY=\"abcdefgh1234\"\n# OTHER_KEY=commented-out-value\nNCS_DB_PATH=data/ncs.db\n"
+                       "SHORT_TOKEN=abc\n", encoding="utf-8")
+        values = snapshot.env_secret_values(env)
+        self.assertEqual(values, ["abcdefgh1234"])
+        clean, leaked = self.root / "clean.py", self.root / "leaked.md"
+        clean.write_text("key = os.environ['NCS_SERVICE_KEY']\n", encoding="utf-8")
+        leaked.write_text("serviceKey=abcdefgh1234\n", encoding="utf-8")
+        self.assertEqual(snapshot.files_containing(values, [clean, leaked, self.root / "missing.txt"]), [str(leaked)])
+
     def test_scenario_bootstrap_is_seeded_and_brackets_mean(self) -> None:
         ratios = [0.0, 1 / 3, 1.0, 0.0, 2 / 3]
         first = snapshot.scenario_bootstrap(ratios, resamples=500)

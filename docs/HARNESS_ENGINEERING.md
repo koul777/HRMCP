@@ -36,7 +36,9 @@ the run with `scripts/review_ncs_performance_kpi.py`.
 
 `scripts/measure_ncs_kpi_snapshot.py` records the locally measurable KPI parts
 (K10 census, a K03 structural diagnostic over the gold transition scenarios,
-the G01 `ksa_text_raw` row-hash manifest comparison) and leaves every other
+G03 checks on the slots those scenarios return, the G01 `ksa_text_raw`
+row-hash manifest comparison, a G10 scan of git-tracked files for `.env`
+secret values that reports counts and paths only) and leaves every other
 metric and guardrail `unknown`. It is report-only and opens the DB read-only.
 
 ```powershell

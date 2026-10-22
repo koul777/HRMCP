@@ -2,8 +2,10 @@
 
 Report-only: opens the DB read-only, calls recommenders with save=False, makes
 no network calls and writes nothing but the requested output files. It covers
-K10 (census), a K03 structural diagnostic on the gold transition scenarios, and
-the G01 source-KSA manifest comparison. Everything else stays unknown here.
+K10 (census), a K03 structural diagnostic on the gold transition scenarios, G03
+checks on the slots those scenarios return, the G01 source-KSA manifest
+comparison, and a G10 scan of git-tracked files for .env secret values (counts
+and paths only). Everything else stays unknown here.
 A pass here is not human approval, release readiness or deployment evidence.
 """
 from __future__ import annotations
@@ -126,20 +128,41 @@ def slot_is_direct(slot: dict[str, Any], valid_ids: set[int], seen: set[int]) ->
 
 
 def scenario_slots(result: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+    from ncs_mcp.training_recommendation import _transition_case_course_evidence
+
+    items = [item for item in (result.get("recommendations") or [])[:limit] if isinstance(item, dict)]
+    evidence = _transition_case_course_evidence(items, limit=limit)
     slots = []
-    for item in (result.get("recommendations") or [])[:limit]:
+    for item, row in zip(items, evidence):
         match = item.get("match") or {}
         course = item.get("training_course") or {}
         slots.append({
             "rank": item.get("rank"),
             "training_course_id": course.get("training_course_id"),
             "tier": (item.get("recommendation_tier") or {}).get("tier"),
+            "scope_alignment": (row.get("course_scope_fit") or {}).get("alignment"),
             "direct_unit_evidence": bool(match.get("direct_unit_evidence")),
             "goal_direct_concept_hits": int(match.get("goal_direct_concept_hits") or 0),
             "goal_token_concept_hits": int(match.get("goal_token_concept_hits") or 0),
             "goal_concept_hits": int(match.get("goal_concept_hits") or 0),
         })
     return slots
+
+
+def g03_violations(slots: list[dict[str, Any]], valid_ids: set[int]) -> Counter[str]:
+    """G03 checks on returned slots: unknown source IDs and primary (core) slots
+    that lack direct target-unit evidence or sit outside the target scope."""
+    found: Counter[str] = Counter()
+    for slot in slots:
+        if slot.get("training_course_id") not in valid_ids:
+            found["invalid_source_id"] += 1
+        if slot.get("tier") != "primary":
+            continue
+        if not slot.get("direct_unit_evidence"):
+            found["primary_without_direct_unit_evidence"] += 1
+        if slot.get("scope_alignment") not in {"direct", "near"}:
+            found["primary_outside_target_scope"] += 1
+    return found
 
 
 def measure_k03(conn: Any, metric: dict[str, Any], *, resamples: int = RESAMPLES) -> dict[str, Any]:
@@ -154,6 +177,8 @@ def measure_k03(conn: Any, metric: dict[str, Any], *, resamples: int = RESAMPLES
     cases: list[dict[str, Any]] = []
     outcome: Counter[str] = Counter()
     slot_kinds: Counter[str] = Counter()
+    g03: Counter[str] = Counter()
+    checked_slots = 0
     for row in scenarios:
         try:
             result = recommend_training_transition(
@@ -163,6 +188,8 @@ def measure_k03(conn: Any, metric: dict[str, Any], *, resamples: int = RESAMPLES
         except Exception as exc:  # counted as zero slots, never removed from the denominator
             result, error = {}, f"exception:{type(exc).__name__}"
         slots = scenario_slots(result, K03_LIMIT)
+        g03.update(g03_violations(slots, valid_ids))
+        checked_slots += len(slots)
         seen: set[int] = set()
         direct = sum(slot_is_direct(slot, valid_ids, seen) for slot in slots[:K03_SLOTS])
         for slot in slots[:K03_SLOTS]:
@@ -196,7 +223,65 @@ def measure_k03(conn: Any, metric: dict[str, Any], *, resamples: int = RESAMPLES
             "clarification and error responses stay in the denominator with zero direct slots",
             "gold scenarios lack preverified candidate availability and expected_action labels",
         ],
+        "g03": {
+            "guardrail_id": "G03", "violation_count": sum(g03.values()),
+            "status": "pass" if not g03 else "fail", "violations_by_kind": dict(sorted(g03.items())),
+            "checked_slots": checked_slots, "scope": f"gold transition fixture, top-{K03_LIMIT} recommendations",
+            "limitations": ["covers returned slots of this fixture only, not every response or surface",
+                            "cross_scope_name_only links are not identified separately here"],
+        },
     }
+
+
+def env_secret_values(env_path: Path) -> list[str]:
+    values = []
+    if not env_path.exists():
+        return values
+    for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        name, sep, value = line.strip().partition("=")
+        value = value.strip().strip("\"'")
+        if sep and not name.startswith("#") and len(value) >= 8 and any(
+                marker in name.upper() for marker in ("KEY", "TOKEN", "SECRET", "PASSWORD")):
+            values.append(value)
+    return values
+
+
+def files_containing(values: list[str], paths: list[Path], max_bytes: int = 5_000_000) -> list[str]:
+    """Return paths whose bytes contain any value; never returns the values."""
+    needles = [value.encode("utf-8") for value in values]
+    hits = []
+    for path in paths:
+        try:
+            if path.stat().st_size > max_bytes:
+                continue
+            data = path.read_bytes()
+        except OSError:
+            continue
+        if any(needle in data for needle in needles):
+            hits.append(str(path))
+    return hits
+
+
+def measure_g10_tracked_secrets() -> dict[str, Any]:
+    values = env_secret_values(ROOT / ".env")
+    report: dict[str, Any] = {"guardrail_id": "G10", "scope": "secret values from .env in git-tracked files under 5 MB",
+                              "secret_values_checked": len(values)}
+    if not values:
+        report.update({"violation_count": None, "status": "unknown", "reason": "No .env secret values to compare."})
+        return report
+    try:
+        listed = subprocess.run(["git", *GIT_FLAGS, "ls-files", "-z"], cwd=ROOT, capture_output=True, check=True,
+                                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0).stdout
+    except (OSError, subprocess.CalledProcessError) as exc:
+        report.update({"violation_count": None, "status": "unknown", "reason": f"git ls-files failed: {type(exc).__name__}"})
+        return report
+    paths = [ROOT / name for name in listed.decode("utf-8", "replace").split("\0") if name]
+    hits = files_containing(values, paths)
+    report.update({"files_checked": len(paths), "violation_count": len(hits), "files": hits,
+                   "status": "pass" if not hits else "fail",
+                   "limitations": ["untracked reports, published artifacts and remote outputs are not scanned",
+                                   "public-claim wording (approval, certification, legal eligibility) is not checked"]})
+    return report
 
 
 def ksa_manifest(conn: Any) -> dict[int, str]:
@@ -268,9 +353,11 @@ def main(argv: list[str] | None = None) -> int:
     conn = connect(args.db, read_only=True)
     try:
         measured = {"K10": measure_k10(conn, metrics["K10"])}
+        guardrails = {"G01": measure_g01(conn, args.previous_ksa_manifest, args.ksa_manifest_out),
+                      "G10": measure_g10_tracked_secrets()}
         if not args.skip_k03:
             measured["K03"] = measure_k03(conn, metrics["K03"])
-        guardrails = {"G01": measure_g01(conn, args.previous_ksa_manifest, args.ksa_manifest_out)}
+            guardrails["G03"] = measured["K03"].pop("g03")
     finally:
         conn.close()
     report["metrics"] = [measured.get(key) or {"metric_id": key, "value": None, "status": "unknown",
