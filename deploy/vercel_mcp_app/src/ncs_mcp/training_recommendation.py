@@ -1342,6 +1342,13 @@ def _task_similarity_transition_profile(
         }
     current_placeholders = ",".join("?" for _ in current_codes)
     target_placeholders = ",".join("?" for _ in target_codes)
+    all_codes = sorted(set(current_codes) | set(target_codes))
+    all_placeholders = ",".join("?" for _ in all_codes)
+    # The table has no unit-code index. Link unit codes are derived from the
+    # source criteria lineage, so restricting source_criteria_id to the scope's
+    # criteria selects the same rows through idx_task_similarity_source instead
+    # of scanning every link in score order. similarity_id DESC reproduces the
+    # tie order of that former reverse score-index scan.
     rows = rows_to_dicts(
         conn.execute(
             f"""
@@ -1351,6 +1358,12 @@ def _task_similarity_transition_profile(
                 source_concept_count, target_concept_count
             FROM task_similarity_links
             WHERE review_status != 'rejected'
+              AND source_criteria_id IN (
+                    SELECT pc.criteria_id
+                    FROM performance_criteria AS pc
+                    JOIN competency_elements AS ce ON ce.element_id = pc.element_id
+                    WHERE ce.unit_code IN ({all_placeholders})
+              )
               AND (
                     (
                         source_unit_code IN ({current_placeholders})
@@ -1361,10 +1374,10 @@ def _task_similarity_transition_profile(
                         AND target_unit_code IN ({current_placeholders})
                     )
               )
-            ORDER BY similarity_score DESC, shared_concept_count DESC
+            ORDER BY similarity_score DESC, shared_concept_count DESC, similarity_id DESC
             LIMIT ?
             """,
-            (*current_codes, *target_codes, *target_codes, *current_codes, limit),
+            (*all_codes, *current_codes, *target_codes, *target_codes, *current_codes, limit),
         ).fetchall()
     )
     max_score = max((float(row.get("similarity_score") or 0.0) for row in rows), default=0.0)

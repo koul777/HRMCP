@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 import tempfile
+import types
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
+from unittest import mock
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/benchmark_ncs_code_ab.py"
 spec = importlib.util.spec_from_file_location("ncs_code_ab_benchmark", SCRIPT)
@@ -33,6 +37,30 @@ class CodeBenchmarkTests(unittest.TestCase):
         self.assertEqual(result["search"]["p50_reduction_percent"], 10)
         self.assertFalse(result["scope"]["all_responses_equal"])
         self.assertEqual(result["scope"]["p50_reduction_percent"], 75)
+
+    def test_workload_mapping_keeps_transition_read_only_and_connection_scoped(self):
+        server = types.SimpleNamespace(search_ncs=object(), resolve_ncs_query_scope=object())
+        events = []
+
+        @contextmanager
+        def open_db():
+            events.append("open")
+            yield "conn"
+            events.append("close")
+
+        def recommend_training_transition(conn, **params):
+            events.append(("call", conn, params))
+            return {"ok": True}
+
+        fake = types.ModuleType("ncs_mcp.training_recommendation")
+        fake.recommend_training_transition = recommend_training_transition
+        self.assertIs(benchmark.workload_function(server, "search", open_db), server.search_ncs)
+        self.assertIs(benchmark.workload_function(server, "scope_edge", open_db), server.resolve_ncs_query_scope)
+        with mock.patch.dict(sys.modules, {"ncs_mcp.training_recommendation": fake}):
+            fn = benchmark.workload_function(server, "transition", open_db)
+            self.assertEqual(fn(current_query="a", target_query="b", save=True), {"ok": True})
+        self.assertEqual(events, ["open", ("call", "conn", {"current_query": "a", "target_query": "b", "save": False}),
+                                  "close"])
 
     def test_source_fingerprint_changes_with_content_and_ignores_bytecode(self):
         with tempfile.TemporaryDirectory() as temporary:

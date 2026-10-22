@@ -63,6 +63,25 @@ def memory_record() -> dict[str, Any]:
         return {"rss_bytes": None, "peak_rss_bytes": None, "peak_source": None}
 
 
+def workload_function(server: Any, workload: str, open_db: Any) -> Any:
+    """Map a case workload to the read-only function it measures.
+
+    The transition workload calls the library recommender directly: the server
+    wrapper adds a per-call capacity queue wait that would break response parity.
+    """
+    if workload.startswith("search"):
+        return server.search_ncs
+    if workload.startswith("transition"):
+        from ncs_mcp.training_recommendation import recommend_training_transition
+
+        def transition(**params: Any) -> dict[str, Any]:
+            with open_db() as conn:
+                return recommend_training_transition(conn, **{**params, "save": False})
+
+        return transition
+    return server.resolve_ncs_query_scope
+
+
 def worker(source: Path, db: Path) -> int:
     sys.path.insert(0, str(source))
     from ncs_mcp import server
@@ -88,7 +107,7 @@ def worker(source: Path, db: Path) -> int:
             return 0
         try:
             case = request["case"]
-            fn = server.search_ncs if case["workload"].startswith("search") else server.resolve_ncs_query_scope
+            fn = workload_function(server, case["workload"], open_db)
             profiler = cProfile.Profile() if request.get("profile") else None
             if profiler:
                 profiler.enable()
