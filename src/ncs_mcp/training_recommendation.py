@@ -180,29 +180,6 @@ def _scope_lookup_key(value: Any) -> str:
     return _SCOPE_LOOKUP_STRIP.sub("", normalized).casefold()
 
 
-def _classification_code_filter(
-    major_code: Any, middle_code: Any, small_code: Any, sub_code: Any
-) -> tuple[str, tuple[Any, ...]]:
-    """WHERE terms for the classification codes that are not None.
-
-    `(? IS NULL OR c.major_code = ?)` keeps SQLite off idx_classifications_codes,
-    so a filtered scope scan still read every unit or element row.
-    """
-    filters = [
-        (column, value)
-        for column, value in (
-            ("major_code", major_code),
-            ("middle_code", middle_code),
-            ("small_code", small_code),
-            ("sub_code", sub_code),
-        )
-        if value is not None
-    ]
-    if not filters:
-        return "1 = 1", ()
-    return " AND ".join(f"c.{column} = ?" for column, _ in filters), tuple(value for _, value in filters)
-
-
 def _with_korean_direction_particle(value: str) -> str:
     """Append the Korean directional particle `로` or `으로`."""
 
@@ -1883,18 +1860,20 @@ def _exact_unit_name_match(
     query_key = _scope_lookup_key(query or "")
     if not query_key:
         return None
-    code_filter, code_params = _classification_code_filter(major_code, middle_code, small_code, sub_code)
     rows = conn.execute(
-        f"""
+        """
         SELECT cu.unit_code, cu.unit_name_raw
         FROM competency_units cu
         JOIN classifications c ON c.classification_id = cu.classification_id
-        WHERE {code_filter}
+        WHERE (? IS NULL OR c.major_code = ?)
+          AND (? IS NULL OR c.middle_code = ?)
+          AND (? IS NULL OR c.small_code = ?)
+          AND (? IS NULL OR c.sub_code = ?)
         ORDER BY
             CASE WHEN c.major_code = '02' THEN 0 ELSE 1 END,
             c.major_code, c.middle_code, c.small_code, c.sub_code, cu.unit_code
         """,
-        code_params,
+        (major_code, major_code, middle_code, middle_code, small_code, small_code, sub_code, sub_code),
     )
     for row in rows:
         if _scope_lookup_key(row["unit_name_raw"] or "") != query_key:
@@ -2348,16 +2327,18 @@ def resolve_ncs_query_scope(
                     **rowd,
                 }
             )
-    unit_code_filter, unit_code_params = _classification_code_filter(major_code, middle_code, small_code, sub_code)
     unit_scan_rows = conn.execute(
-        f"""
+        """
         SELECT cu.unit_code, cu.unit_name_raw, c.major_code
         FROM competency_units cu
         JOIN classifications c ON c.classification_id = cu.classification_id
-        WHERE {unit_code_filter}
+        WHERE (? IS NULL OR c.major_code = ?)
+          AND (? IS NULL OR c.middle_code = ?)
+          AND (? IS NULL OR c.small_code = ?)
+          AND (? IS NULL OR c.sub_code = ?)
         ORDER BY c.major_code, c.middle_code, c.small_code, c.sub_code, cu.unit_code
         """,
-        unit_code_params,
+        (major_code, major_code, middle_code, middle_code, small_code, small_code, sub_code, sub_code),
     ).fetchall()
     unit_matches: list[tuple[str, float, str, str | None]] = []
     for row in unit_scan_rows:
@@ -2442,19 +2423,24 @@ def resolve_ncs_query_scope(
                     **alias_row,
                 }
             )
-    element_code_filter, element_code_params = _classification_code_filter(
-        major_code or None, middle_code or None, small_code or None, sub_code or None
-    )
     element_scan_rows = conn.execute(
-        f"""
+        """
         SELECT ce.element_id, ce.element_name_raw
         FROM competency_elements ce
         JOIN competency_units cu ON cu.unit_code = ce.unit_code
         JOIN classifications c ON c.classification_id = cu.classification_id
-        WHERE {element_code_filter}
+        WHERE (? IS NULL OR c.major_code = ?)
+          AND (? IS NULL OR c.middle_code = ?)
+          AND (? IS NULL OR c.small_code = ?)
+          AND (? IS NULL OR c.sub_code = ?)
         ORDER BY ce.element_id
         """,
-        element_code_params,
+        (
+            major_code or None, major_code or None,
+            middle_code or None, middle_code or None,
+            small_code or None, small_code or None,
+            sub_code or None, sub_code or None,
+        )
     ).fetchall()
     element_scores: dict[int, float] = {}
     for row in element_scan_rows:
