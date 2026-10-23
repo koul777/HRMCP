@@ -171,6 +171,7 @@ def _clean(value: Any) -> str:
 
 
 _SCOPE_LOOKUP_STRIP = re.compile(r"[\W_]+", flags=re.UNICODE)
+_LIKE_SPECIAL_CHARS = re.compile(r"[%_\x00]")
 
 
 def _scope_lookup_key(value: Any) -> str:
@@ -2475,7 +2476,22 @@ def resolve_ncs_query_scope(
     concept_query_key = normalize_concept_key(text)
     concept_patterns = (f"%{concept_query_key}%", f"%{text}%")
     concept_masks = compatible_concept_masks(conn, concept_patterns)
-    if concept_masks is None:
+    if concept_masks is None and not _LIKE_SPECIAL_CHARS.search(text):
+        # Every normalized_key is normalize_concept_key(concept_name), which only
+        # drops whitespace and lowercases. Without LIKE wildcards in the text a
+        # concept_name match therefore implies a normalized_key match, so the
+        # narrow key index alone finds the same rows as the full-table OR scan.
+        concept_sql = """
+        SELECT concept_id, concept_name, concept_type, definition_status, review_status
+        FROM ontology_concepts
+        WHERE concept_id IN (
+            SELECT concept_id FROM ontology_concepts WHERE normalized_key LIKE ?
+        )
+        ORDER BY concept_id
+        LIMIT 2000
+        """
+        concept_params = concept_patterns[:1]
+    elif concept_masks is None:
         concept_sql = """
         SELECT concept_id, concept_name, concept_type, definition_status, review_status
         FROM ontology_concepts
