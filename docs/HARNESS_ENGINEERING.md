@@ -50,7 +50,13 @@ constraint profile and counts fit claims that a matrix row's own evidence does
 not support, or unfit dimensions shown as `ready` or without a review flag.
 Each guardrail reports its scope and limitations; release static proof
 artifacts, qualification batch limits and the public facade are not covered.
-`--skip-plans` skips the planner runs.
+`--skip-plans` skips the planner runs. G02 scans every table with
+`review_status` for `human_reviewed`, `accepted` and `reviewed` rows and counts
+those without a packet-backed `review_audit_log` row (the quality gate's
+transition checks without its scenario-only action name), plus defined or
+trusted concepts with boilerplate definitions. Dashboard one-click decisions,
+whose packet is a dashboard decision id rather than a reports file, are
+reported separately but still counted. The snapshot never changes a status.
 
 ```powershell
 python scripts\measure_ncs_kpi_snapshot.py --out reports\ncs_kpi_snapshot.json --ksa-manifest-out reports\ksa_text_manifest.tsv.gz --previous-ksa-manifest <earlier manifest>
