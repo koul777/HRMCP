@@ -20,6 +20,13 @@ manifest 비교다. G03은 같은 시나리오가 돌려준 상위 5개 과정�
 건수와 경로만 확인하고, 공개 문구의 승인·자격 인정 표현은 검사하지 않는다. K03은 사전 검증된 후보 3개와 `expected_action` 표시가 없어 `inconclusive`로
 남기고, 나머지 지표와 가드레일은 `unknown`으로 둔다. 런타임 차단은 여전히 없다.
 
+같은 날 저녁 추가: 같은 시나리오의 `save=False` 호출과 내부 `plan_ncs_education_path` 호출을 측정한다.
+G04는 SQF·학습모듈 테이블에 접근한 실행과 응답의 legacy 사용 표시를 센다. 참고문서 테이블 접근만
+있으면 `review_required`로 둔다. G08은 쓰기 SQL과 읽기 전용 쓰기 오류를 센다. G05는 계획 응답의
+route·guide·matrix·plan 필수 필드 결손을 하네스 검사 함수로 센다. G06은 고정 제약 1세트에서 행 근거로
+뒷받침되지 않는 fit 표시와, 맞지 않는 차원이 `ready`이거나 검토 플래그 없이 나온 행을 센다. 모두 이
+시나리오 범위의 `pass`이며, 릴리스 static proof, 자격 수집 batch 제한, 공개 facade는 측정하지 않는다.
+
 ## 적용 범위와 판단 방식
 
 2026-10-13 [배포 기록](../reports/urgent_2h_20261013/deployment/final_handoff.json)의 공개 표면은

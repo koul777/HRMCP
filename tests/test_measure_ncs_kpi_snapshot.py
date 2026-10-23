@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sqlite3
 import sys
 import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -140,6 +142,67 @@ class KpiSnapshotTests(unittest.TestCase):
         changed = snapshot.measure_g01(self.conn, first_path, None)
         self.assertEqual((changed["changed"], changed["deleted"], changed["added"]), (1, 1, 1))
         self.assertEqual((changed["violation_count"], changed["status"]), (2, "fail"))
+
+    def test_statement_audit_classifies_legacy_framework_and_write_sql(self) -> None:
+        audit = snapshot.StatementAudit(self.conn)
+        self.assertIn("ncs_learning_modules", audit.legacy_tables)
+        self.assertTrue(any(name.startswith("sqf_") for name in audit.legacy_tables))
+        self.assertTrue(all(name.startswith("ncs_reference_") for name in audit.framework_tables))
+        for sql in ("SELECT * FROM ncs_training_courses WHERE train_goal LIKE '%sqf%'",
+                    "SELECT * FROM ncs_learning_modules", "SELECT * FROM ncs_reference_chunks",
+                    "CREATE TEMP TABLE temp_rank_candidate_concepts(concept_id INTEGER PRIMARY KEY)",
+                    "INSERT OR IGNORE INTO temp_rank_candidate_concepts(concept_id) VALUES (1)",
+                    "  insert into training_recommendations(query) values ('x')"):
+            audit(sql)
+        self.assertEqual(audit.counts, {"statements": 6, "legacy": 1, "framework": 1, "temp_writes": 2, "writes": 1})
+
+    def test_serving_guardrails_hold_framework_access_for_review(self) -> None:
+        audit = snapshot.StatementAudit(self.conn)
+        clean = snapshot.serving_guardrails(audit, Counter())
+        self.assertEqual((clean["G04"]["status"], clean["G04"]["violation_count"]), ("pass", 0))
+        self.assertEqual((clean["G08"]["status"], clean["G08"]["violation_count"]), ("pass", 0))
+        framework = snapshot.serving_guardrails(audit, Counter(plans_touching_framework_tables=2))
+        self.assertEqual((framework["G04"]["status"], framework["G04"]["violation_count"]), ("review_required", 0))
+        bad = snapshot.serving_guardrails(audit, Counter(scenarios_declaring_legacy_use=1, readonly_write_errors=1,
+                                                         plans_with_writes=1))
+        self.assertEqual((bad["G04"]["status"], bad["G04"]["violation_count"]), ("fail", 1))
+        self.assertEqual((bad["G08"]["status"], bad["G08"]["violation_count"]), ("fail", 2))
+        self.assertEqual(snapshot.serving_guardrails(None, Counter())["G08"]["status"], "unknown")
+        self.assertNotIn("plan_ncs_education_path", snapshot.serving_guardrails(audit, Counter(), False)["G04"]["scope"])
+
+    def test_g06_accepts_consistent_rows_and_flags_unsupported_fit_or_ready(self) -> None:
+        from ncs_mcp.training_recommendation import (
+            _delivery_constraint_fit_summary, _facility_constraint_fit, _method_constraint_fit, _time_constraint_fit)
+
+        def row(course: dict, review: dict) -> dict:
+            method = _method_constraint_fit(course, ["집체훈련"])
+            time = _time_constraint_fit(course, 24)
+            facility = _facility_constraint_fit(course, ["강의실"])
+            summary = _delivery_constraint_fit_summary(method_fit=method, time_fit=time, facility_fit=facility)
+            return {"course_fit": course, "facility_constraint_fit": facility, "human_review": review,
+                    "delivery_operation": {"method_constraint_fit": method, "time_constraint_fit": time,
+                                           "constraint_fit": summary}}
+
+        fit = row({"hours": 16, "methods": ["집체훈련"], "facilities": ["강의실"]}, {"severity": "ready", "flags": []})
+        self.assertEqual(snapshot.g06_row_violations(fit), [])
+        over = row({"hours": 40, "methods": ["집체훈련"], "facilities": []},
+                   {"severity": "needs_review", "flags": ["delivery:time_over", "delivery:facility_unknown"]})
+        self.assertEqual(snapshot.g06_row_violations(over), [])
+        over["human_review"] = {"severity": "ready", "flags": ["delivery:time_over"]}
+        self.assertEqual(snapshot.g06_row_violations(over),
+                         ["unfit_dimension_marked_ready", "missing_review_flag:facility_unknown"])
+        fit["facility_constraint_fit"] = {**fit["facility_constraint_fit"], "missing": ["실습실"]}
+        fit["delivery_operation"]["time_constraint_fit"]["actual_hours"] = 30.0
+        self.assertEqual(snapshot.g06_row_violations(fit), ["time_fit_unsupported", "facility_fit_unsupported"])
+
+    def test_readonly_write_errors_are_named_and_plan_gaps_use_harness_validators(self) -> None:
+        self.assertEqual(snapshot.exception_code(sqlite3.OperationalError("attempt to write a readonly database")),
+                         "exception:readonly_write")
+        self.assertEqual(snapshot.exception_code(ValueError("x")), "exception:ValueError")
+        harness = snapshot.load_harness()
+        gaps = snapshot.plan_contract_gaps(harness, {"ok": True, "training_system_matrix": []})
+        self.assertIn("training_system_matrix.nonempty_list_of_rows", gaps["matrix"])
+        self.assertTrue(gaps["plan"] and gaps["guide_trace"] and gaps["query_route"])
 
 
 if __name__ == "__main__":

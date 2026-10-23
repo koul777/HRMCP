@@ -5,7 +5,11 @@ no network calls and writes nothing but the requested output files. It covers
 K10 (census), a K03 structural diagnostic on the gold transition scenarios, G03
 checks on the slots those scenarios return, the G01 source-KSA manifest
 comparison, and a G10 scan of git-tracked files for .env secret values (counts
-and paths only). Everything else stays unknown here.
+and paths only). On the same scenarios it traces the serving SQL for G04
+(SQF/learning-module table access) and G08 (writes from save=False calls), and
+runs the internal education planner for the G05 response contract and, with
+one fixed delivery constraint profile, for the G06 fit checks.
+Everything else stays unknown here.
 A pass here is not human approval, release readiness or deployment evidence.
 """
 from __future__ import annotations
@@ -16,12 +20,15 @@ import hashlib
 import json
 import math
 import random
+import re
+import sqlite3
 import subprocess
 import sys
 from collections import Counter
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -37,6 +44,40 @@ GIT_FLAGS = ["-c", "filter.lfs.clean=cat", "-c", "filter.lfs.smudge=cat",
              "-c", "filter.lfs.process=", "-c", "filter.lfs.required=false"]
 LFS_EXCLUDES = [":(exclude)data/processed/*.db", ":(exclude)data/processed/*.db-*", ":(exclude)data/raw/*.xlsx",
                 ":(exclude)data/raw/*.xls", ":(exclude)data/ocr/tessdata/*.traineddata"]
+LEGACY_TABLE_MARKERS = ("sqf", "learning_module")
+FRAMEWORK_TABLE_PREFIX = "ncs_reference_"
+WRITE_STATEMENT = re.compile(r"^\s*(INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER)\b", re.IGNORECASE)
+TEMP_TARGET = re.compile(r"\bTEMP(ORARY)?\b|\btemp_\w+", re.IGNORECASE)
+
+
+class StatementAudit:
+    """SQLite trace callback that classifies serving SQL without keeping it.
+
+    Legacy tables are SQF and learning-module tables; framework tables hold the
+    imported reference documents (the HRD guide among them). Temp-table writes
+    stay separate from writes to the database file.
+    """
+
+    def __init__(self, conn: Any) -> None:
+        names = [row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')")]
+        self.legacy_tables = sorted(name for name in names if any(m in name.lower() for m in LEGACY_TABLE_MARKERS))
+        self.framework_tables = sorted(name for name in names if name.lower().startswith(FRAMEWORK_TABLE_PREFIX))
+        self._legacy = self._pattern(self.legacy_tables)
+        self._framework = self._pattern(self.framework_tables)
+        self.counts: Counter[str] = Counter()
+
+    @staticmethod
+    def _pattern(names: list[str]) -> re.Pattern[str] | None:
+        return re.compile(r"\b(?:" + "|".join(map(re.escape, names)) + r")\b", re.IGNORECASE) if names else None
+
+    def __call__(self, sql: str) -> None:
+        self.counts["statements"] += 1
+        if self._legacy and self._legacy.search(sql):
+            self.counts["legacy"] += 1
+        if self._framework and self._framework.search(sql):
+            self.counts["framework"] += 1
+        if WRITE_STATEMENT.match(sql):
+            self.counts["temp_writes" if TEMP_TARGET.search(sql) else "writes"] += 1
 
 
 def sha_bytes(data: bytes) -> str:
@@ -165,12 +206,29 @@ def g03_violations(slots: list[dict[str, Any]], valid_ids: set[int]) -> Counter[
     return found
 
 
-def measure_k03(conn: Any, metric: dict[str, Any], *, resamples: int = RESAMPLES) -> dict[str, Any]:
-    from ncs_mcp.training_recommendation import recommend_training_transition
-
-    scenarios = conn.execute(
+def gold_scenarios(conn: Any) -> list[Any]:
+    return conn.execute(
         "SELECT * FROM training_transition_gold_scenarios WHERE review_status != 'rejected' ORDER BY scenario_id"
     ).fetchall()
+
+
+def exception_code(exc: Exception) -> str:
+    # A save=False call that tries to write hits the read-only connection.
+    if isinstance(exc, sqlite3.OperationalError) and "readonly" in str(exc).lower():
+        return "exception:readonly_write"
+    return f"exception:{type(exc).__name__}"
+
+
+def legacy_use_declared(result: dict[str, Any]) -> bool:
+    audit = result.get("audit") if isinstance(result.get("audit"), dict) else {}
+    return bool(audit.get("sqf_used") or audit.get("learning_modules_used"))
+
+
+def measure_k03(conn: Any, metric: dict[str, Any], *, resamples: int = RESAMPLES,
+                audit: StatementAudit | None = None) -> dict[str, Any]:
+    from ncs_mcp.training_recommendation import recommend_training_transition
+
+    scenarios = gold_scenarios(conn)
     valid_ids = {int(row[0]) for row in conn.execute("SELECT training_course_id FROM ncs_training_courses")}
     fixture = [{key: row[key] for key in ("scenario_id", "current_query", "target_query", "major_code",
                                           "review_status")} for row in scenarios]
@@ -178,15 +236,26 @@ def measure_k03(conn: Any, metric: dict[str, Any], *, resamples: int = RESAMPLES
     outcome: Counter[str] = Counter()
     slot_kinds: Counter[str] = Counter()
     g03: Counter[str] = Counter()
+    serving: Counter[str] = Counter()
     checked_slots = 0
+    if audit is not None:
+        conn.set_trace_callback(audit)
     for row in scenarios:
+        before = Counter(audit.counts) if audit is not None else Counter()
         try:
             result = recommend_training_transition(
                 conn, current_query=row["current_query"], target_query=row["target_query"],
                 major_code=row["major_code"], limit=K03_LIMIT, save=False)
             error = None if result.get("ok") else (result.get("error") or {}).get("code", "not_ok")
         except Exception as exc:  # counted as zero slots, never removed from the denominator
-            result, error = {}, f"exception:{type(exc).__name__}"
+            result, error = {}, exception_code(exc)
+        if audit is not None:
+            delta = audit.counts - before
+            serving["scenarios_touching_legacy_tables"] += bool(delta["legacy"])
+            serving["scenarios_touching_framework_tables"] += bool(delta["framework"])
+            serving["scenarios_with_writes"] += bool(delta["writes"])
+        serving["scenarios_declaring_legacy_use"] += legacy_use_declared(result)
+        serving["readonly_write_errors"] += error == "exception:readonly_write"
         slots = scenario_slots(result, K03_LIMIT)
         g03.update(g03_violations(slots, valid_ids))
         checked_slots += len(slots)
@@ -200,6 +269,8 @@ def measure_k03(conn: Any, metric: dict[str, Any], *, resamples: int = RESAMPLES
         outcome["ok" if error is None else error] += 1
         cases.append({"scenario_id": row["scenario_id"], "major_code": row["major_code"], "error": error,
                       "direct_slots": direct, "ratio": direct / K03_SLOTS, "slots": slots})
+    if audit is not None:
+        conn.set_trace_callback(None)
     ratios = [case["ratio"] for case in cases]
     value = sum(ratios) / len(ratios) if ratios else None
     majors: dict[str, list[float]] = {}
@@ -230,7 +301,238 @@ def measure_k03(conn: Any, metric: dict[str, Any], *, resamples: int = RESAMPLES
             "limitations": ["covers returned slots of this fixture only, not every response or surface",
                             "cross_scope_name_only links are not identified separately here"],
         },
+        "serving": dict(serving),
     }
+
+
+def load_harness() -> Any:
+    """The AI-HR plan validators live in the harness; load it like the accuracy audit does."""
+    import importlib.util
+
+    if "ncs_harness" in sys.modules:
+        return sys.modules["ncs_harness"]
+    if str(ROOT / "scripts") not in sys.path:
+        sys.path.insert(0, str(ROOT / "scripts"))  # the harness imports sibling scripts
+    spec = importlib.util.spec_from_file_location("ncs_harness", ROOT / "scripts" / "ncs_harness.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["ncs_harness"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def plan_contract_gaps(harness: Any, plan: dict[str, Any]) -> dict[str, list[str]]:
+    matrix = plan.get("training_system_matrix")
+    gaps = {
+        "matrix": harness._missing_aihr_matrix_fields(matrix if isinstance(matrix, list) else []),
+        "plan": harness._missing_aihr_plan_fields(plan),
+        "guide_trace": harness._missing_aihr_guide_trace_fields(plan),
+        "query_route": harness._missing_aihr_query_route_fields(plan),
+    }
+    if not (isinstance(matrix, list) and matrix and all(isinstance(row, dict) for row in matrix)):
+        gaps["matrix"].append("training_system_matrix.nonempty_list_of_rows")
+    return gaps
+
+
+@contextmanager
+def read_only_db(db_path: Path, audit: StatementAudit | None) -> Iterator[Any]:
+    from ncs_mcp.db import connect
+
+    conn = connect(db_path, read_only=True)
+    if audit is not None:
+        conn.set_trace_callback(audit)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def run_plans(db_path: Path, scenarios: list[Any], audit: StatementAudit | None, serving: Counter[str],
+              constraints: dict[str, Any] | None = None) -> Iterator[tuple[Any, dict[str, Any], str | None]]:
+    """Call the internal planner tool for each scenario on a traced read-only DB."""
+    from ncs_mcp import server
+
+    original = server.open_recommendation_db
+    server.open_recommendation_db = lambda: read_only_db(db_path, audit)
+    try:
+        for row in scenarios:
+            before = Counter(audit.counts) if audit is not None else Counter()
+            try:
+                plan = server.plan_ncs_education_path(
+                    current_query=row["current_query"], target_query=row["target_query"],
+                    major_code=row["major_code"], limit=K03_LIMIT, **(constraints or {}))
+                error = None if plan.get("ok") else (plan.get("error") or {}).get("code", "not_ok")
+            except Exception as exc:
+                plan, error = {}, exception_code(exc)
+            if audit is not None:
+                delta = audit.counts - before
+                serving["plans_touching_legacy_tables"] += bool(delta["legacy"])
+                serving["plans_touching_framework_tables"] += bool(delta["framework"])
+                serving["plans_with_writes"] += bool(delta["writes"])
+            serving["plans_declaring_legacy_use"] += legacy_use_declared(plan)
+            serving["readonly_write_errors"] += error == "exception:readonly_write"
+            yield row, plan, error
+    finally:
+        server.open_recommendation_db = original
+
+
+def measure_g05_plans(db_path: Path, scenarios: list[Any], audit: StatementAudit | None = None,
+                      harness: Any | None = None) -> dict[str, Any]:
+    """Run the internal planner tool on the fixture and count missing contract fields.
+
+    Only ok plans are checked for fields. A missing route contract is a gap even
+    when the planner refuses; clarification and other refusals are counted, not
+    treated as gaps or as plan successes.
+    """
+    harness = harness or load_harness()
+    outcome: Counter[str] = Counter()
+    gap_fields: Counter[str] = Counter()
+    serving: Counter[str] = Counter()
+    plans_with_gaps = []
+    for row, plan, error in run_plans(db_path, scenarios, audit, serving):
+        outcome["ok" if error is None else error] += 1
+        if error == "missing_query_route_contract":
+            gaps = {"query_route": list(plan.get("missing_query_route_fields") or ["query_route"])}
+        elif error is None:
+            gaps = plan_contract_gaps(harness, plan)
+        else:
+            continue
+        if any(gaps.values()):
+            plans_with_gaps.append({"scenario_id": row["scenario_id"], "gaps": gaps})
+            for kind, fields in gaps.items():
+                gap_fields.update(f"{kind}:{field}" for field in fields)
+    violation_count = sum(gap_fields.values())
+    checked = outcome["ok"] + outcome["missing_query_route_contract"]
+    return {
+        "guardrail_id": "G05", "scope": "internal plan_ncs_education_path on the gold transition fixture",
+        "violation_count": violation_count if checked else None,
+        "status": ("pass" if not violation_count else "fail") if checked else "unknown",
+        "plans_checked": checked, "outcome_counts": dict(sorted(outcome.items())),
+        "plans_with_gaps": plans_with_gaps, "gap_field_counts": dict(sorted(gap_fields.items())),
+        "serving": dict(serving),
+        "limitations": ["release and dashboard static proof artifacts are not audited here",
+                        "the public facade (planner disabled on the public surface) is not called",
+                        "refusals other than a missing route contract are counted, not inspected"],
+    }
+
+
+def _number(value: Any) -> float | None:
+    try:
+        return None if value is None or isinstance(value, bool) else float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def g06_row_violations(row: dict[str, Any]) -> list[str]:
+    """Fit claims a matrix row's own evidence does not support, and unfit rows shown as ready.
+
+    unknown, partial, mismatch and over are not violations by themselves; they
+    become one when the row still reads as ready or the summary still says fit.
+    """
+    delivery = row.get("delivery_operation") if isinstance(row.get("delivery_operation"), dict) else {}
+    course = row.get("course_fit") if isinstance(row.get("course_fit"), dict) else {}
+    method = delivery.get("method_constraint_fit") or {}
+    time = delivery.get("time_constraint_fit") or {}
+    facility = row.get("facility_constraint_fit") or delivery.get("facility_constraint_fit") or {}
+    found = []
+    if method.get("status") == "fit" and (method.get("missing_method_groups") or not method.get("matched_method_groups")
+                                          or not course.get("methods")):
+        found.append("method_fit_unsupported")
+    actual, limit = _number(time.get("actual_hours")), _number(time.get("preferred_max_hours"))
+    if time.get("status") == "fit" and (actual is None or limit is None or actual > limit
+                                        or _number(course.get("hours")) != actual):
+        found.append("time_fit_unsupported")
+    if facility.get("status") == "fit" and (facility.get("missing") or not facility.get("matched")
+                                            or not course.get("facilities")):
+        found.append("facility_fit_unsupported")
+    requested = {name: str(fit.get("status") or "unknown") for name, fit in
+                 (("method", method), ("time", time), ("facility", facility))
+                 if fit.get("status") not in (None, "", "not_requested")}
+    unfit = {name: status for name, status in requested.items() if status != "fit"}
+    if (delivery.get("constraint_fit") or {}).get("status") == "fit" and unfit:
+        found.append("summary_fit_with_unfit_dimension")
+    review = row.get("human_review") if isinstance(row.get("human_review"), dict) else {}
+    flags = set(review.get("flags") or [])
+    if unfit and review.get("severity") == "ready":
+        found.append("unfit_dimension_marked_ready")
+    found.extend(f"missing_review_flag:{name}_{status}" for name, status in sorted(unfit.items())
+                 if f"delivery:{name}_{status}" not in flags)
+    return found
+
+
+G06_CONSTRAINTS = {"preferred_max_hours": 24, "preferred_methods": ["집체훈련"], "preferred_facilities": ["강의실"]}
+
+
+def measure_g06_plans(db_path: Path, scenarios: list[Any], audit: StatementAudit | None = None,
+                      constraints: dict[str, Any] | None = None) -> dict[str, Any]:
+    constraints = constraints or G06_CONSTRAINTS
+    outcome: Counter[str] = Counter()
+    violations: Counter[str] = Counter()
+    summary_status: Counter[str] = Counter()
+    serving: Counter[str] = Counter()
+    rows_checked = 0
+    for _, plan, error in run_plans(db_path, scenarios, audit, serving, constraints):
+        outcome["ok" if error is None else error] += 1
+        matrix = plan.get("training_system_matrix") if error is None else None
+        for row in matrix if isinstance(matrix, list) else []:
+            if not isinstance(row, dict):
+                continue
+            rows_checked += 1
+            violations.update(g06_row_violations(row))
+            summary_status[str(((row.get("delivery_operation") or {}).get("constraint_fit") or {}).get("status"))] += 1
+    violation_count = sum(violations.values())
+    return {
+        "guardrail_id": "G06", "scope": "internal plan_ncs_education_path on the gold transition fixture "
+                                        "with one fixed delivery constraint profile",
+        "constraints": constraints,
+        "violation_count": violation_count if rows_checked else None,
+        "status": ("pass" if not violation_count else "fail") if rows_checked else "unknown",
+        "rows_checked": rows_checked, "outcome_counts": dict(sorted(outcome.items())),
+        "constraint_fit_status_counts": dict(sorted(summary_status.items())),
+        "violations_by_kind": dict(sorted(violations.items())),
+        "serving": dict(serving),
+        "limitations": ["one constraint profile; level is not a requested constraint in this fixture",
+                        "unknown-evidence rows are checked only when the fixture produces them "
+                        "(see constraint_fit_status_counts)",
+                        "annual operation plan feasibility wording is not inspected"],
+    }
+
+
+def serving_guardrails(audit: StatementAudit | None, serving: Counter[str],
+                       planner_ran: bool = True) -> dict[str, dict[str, Any]]:
+    """G04 and G08 from the traced save=False recommender and planner calls."""
+    tools = "recommend_training_transition and plan_ncs_education_path" if planner_ran else "recommend_training_transition"
+    scope = f"save=False {tools} on the gold transition fixture"
+    if audit is None:
+        reason = "SQL trace not collected."
+        return {key: {"guardrail_id": key, "violation_count": None, "status": "unknown", "reason": reason}
+                for key in ("G04", "G08")}
+    legacy = (serving["scenarios_touching_legacy_tables"] + serving["plans_touching_legacy_tables"]
+              + serving["scenarios_declaring_legacy_use"] + serving["plans_declaring_legacy_use"])
+    framework = serving["scenarios_touching_framework_tables"] + serving["plans_touching_framework_tables"]
+    writes = serving["scenarios_with_writes"] + serving["plans_with_writes"] + serving["readonly_write_errors"]
+    g04 = {
+        "guardrail_id": "G04", "scope": scope, "violation_count": legacy,
+        # Framework tables may back the guide trace; access alone cannot show
+        # guide examples being used as source facts or scores, so it is held for review.
+        "status": "fail" if legacy else "review_required" if framework else "pass",
+        "legacy_tables": len(audit.legacy_tables), "framework_tables": len(audit.framework_tables),
+        "statements_checked": audit.counts["statements"],
+        "legacy_table_statements": audit.counts["legacy"], "framework_table_statements": audit.counts["framework"],
+        "runs_touching_framework_tables": framework,
+        "counts": {key: value for key, value in sorted(serving.items()) if "legacy" in key or "framework" in key},
+        "limitations": ["Builder link generation and stored scores are not audited",
+                        "guide example text copied into non-framework tables would not be detected"],
+    }
+    g08 = {
+        "guardrail_id": "G08", "scope": scope, "violation_count": writes,
+        "status": "fail" if writes else "pass",
+        "write_statements": audit.counts["writes"], "temp_table_writes": audit.counts["temp_writes"],
+        "readonly_write_errors": serving["readonly_write_errors"],
+        "limitations": ["qualification collection cooldown, retry, batch and preflight limits are not audited here",
+                        "overlapping broad writers outside this process are not detected"],
+    }
+    return {"G04": g04, "G08": g08}
 
 
 def env_secret_values(env_path: Path) -> list[str]:
@@ -332,6 +634,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ksa-manifest-out", type=Path)
     parser.add_argument("--previous-ksa-manifest", type=Path)
     parser.add_argument("--skip-k03", action="store_true", help="Skip the gold-scenario recommender run")
+    parser.add_argument("--skip-plans", action="store_true", help="Skip the gold-scenario planner run (G05)")
     parser.add_argument("--skip-db-hash", action="store_true", help="Record size and mtime only")
     args = parser.parse_args(argv)
     if args.out.resolve() == args.db.resolve():
@@ -356,8 +659,16 @@ def main(argv: list[str] | None = None) -> int:
         guardrails = {"G01": measure_g01(conn, args.previous_ksa_manifest, args.ksa_manifest_out),
                       "G10": measure_g10_tracked_secrets()}
         if not args.skip_k03:
-            measured["K03"] = measure_k03(conn, metrics["K03"])
+            audit = StatementAudit(conn)
+            measured["K03"] = measure_k03(conn, metrics["K03"], audit=audit)
             guardrails["G03"] = measured["K03"].pop("g03")
+            serving = Counter(measured["K03"].pop("serving"))
+            if not args.skip_plans:
+                guardrails["G05"] = measure_g05_plans(args.db, gold_scenarios(conn), audit)
+                guardrails["G06"] = measure_g06_plans(args.db, gold_scenarios(conn), audit)
+                for key in ("G05", "G06"):
+                    serving.update(guardrails[key].pop("serving"))
+            guardrails.update(serving_guardrails(audit, serving, planner_ran=not args.skip_plans))
     finally:
         conn.close()
     report["metrics"] = [measured.get(key) or {"metric_id": key, "value": None, "status": "unknown",

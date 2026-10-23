@@ -40,6 +40,17 @@ G03 checks on the slots those scenarios return, the G01 `ksa_text_raw`
 row-hash manifest comparison, a G10 scan of git-tracked files for `.env`
 secret values that reports counts and paths only) and leaves every other
 metric and guardrail `unknown`. It is report-only and opens the DB read-only.
+On the same scenarios it traces the serving SQL: G04 counts runs that touch
+SQF or learning-module tables or declare legacy use (framework-reference table
+access alone is `review_required`), and G08 counts write statements and
+read-only write errors from `save=False` calls. It also calls the internal
+`plan_ncs_education_path` tool: G05 counts missing route, guide, matrix and
+plan fields with the harness validators, and G06 replays one fixed delivery
+constraint profile and counts fit claims that a matrix row's own evidence does
+not support, or unfit dimensions shown as `ready` or without a review flag.
+Each guardrail reports its scope and limitations; release static proof
+artifacts, qualification batch limits and the public facade are not covered.
+`--skip-plans` skips the planner runs.
 
 ```powershell
 python scripts\measure_ncs_kpi_snapshot.py --out reports\ncs_kpi_snapshot.json --ksa-manifest-out reports\ksa_text_manifest.tsv.gz --previous-ksa-manifest <earlier manifest>
