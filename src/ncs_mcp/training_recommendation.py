@@ -627,7 +627,9 @@ def _concept_quality_issue_penalty_map(
                 FROM quality_issues
                 WHERE target_type IN ('concept', 'ontology_concept')
                   AND target_id IN ({placeholders})
-                  AND issue_type IN ('short_ksa', 'duplicate_text')
+                  -- Unary + keeps the planner on idx_quality_target; idx_quality_type
+                  -- would walk every KSA duplicate/short row (about 231K) per batch.
+                  AND +issue_type IN ('short_ksa', 'duplicate_text')
                   AND resolved_at IS NULL
                 """,
                 batch,
