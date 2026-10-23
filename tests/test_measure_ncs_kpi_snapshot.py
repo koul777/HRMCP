@@ -297,6 +297,20 @@ class KpiSnapshotTests(unittest.TestCase):
                           identity["latest_builder_release"]["production_deployment_id"]), ("v3", "dpl_v3"))
         self.assertEqual(snapshot.evaluation_identity(self.root / "missing")["latest_builder_release"], None)
 
+    def test_public_claim_heuristic_keeps_wrapped_disclaimers_and_flags_affirmations(self) -> None:
+        (self.root / "README.md").write_text(
+            "결과는 참고 자료이며, 공식 NCS 정의·자격 인정·채용·법적\n판단이 아닙니다.\n\n"
+            "이 과정을 마치면 자격을 인정받습니다. 추천은 교육 안내입니다.\n", encoding="utf-8")
+        (self.root / "mcp").mkdir()
+        (self.root / "mcp" / "ncs-tool-contract.json").write_text(json.dumps({"tools": [
+            {"name": "ncs_search", "description": "Officially approved NCS lookup."},
+            {"name": "ncs_training", "description": "Not an official approval of any course."}]}), encoding="utf-8")
+        report = snapshot.public_claim_candidates(self.root)
+        self.assertEqual(report["sources_checked"], 3)
+        self.assertEqual([item["source"] for item in report["candidates"]],
+                         ["README.md", "mcp/ncs-tool-contract.json:ncs_search"])
+        self.assertEqual(report["candidates"][0]["sentence"], "이 과정을 마치면 자격을 인정받습니다.")
+
     def test_synthetic_packet_prefixes_match_the_dashboard(self) -> None:
         dashboard = (ROOT / "scripts" / "ncs_dashboard.py").read_text(encoding="utf-8")
         block = dashboard.split("SYNTHETIC_REVIEW_PACKET_PREFIXES = (", 1)[1].split(")", 1)[0]

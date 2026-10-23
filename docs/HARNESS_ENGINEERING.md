@@ -64,7 +64,11 @@ record (version, source commit, deployment id, acceptance profile), all read
 from local files without querying the remote deployment.
 G09 covers only source identity: every `deploy/vercel_mcp_app` runtime copy
 (the whole package, not just top-level modules) and API entrypoint must match
-`src/` and `api/` byte for byte.
+`src/` and `api/` byte for byte. G10 also lists `public_claim_candidates`:
+sentences in `README.md` and the public tool contract that name official
+approval, qualification recognition or legal eligibility with no negation.
+It is a keyword heuristic, so candidates set the status to `review_required`
+instead of adding violations.
 
 ```powershell
 python scripts\measure_ncs_kpi_snapshot.py --out reports\ncs_kpi_snapshot.json --ksa-manifest-out reports\ksa_text_manifest.tsv.gz --previous-ksa-manifest <earlier manifest>

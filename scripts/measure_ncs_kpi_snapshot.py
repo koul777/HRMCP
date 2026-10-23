@@ -738,6 +738,39 @@ def measure_g09_source_identity(root: Path = ROOT) -> dict[str, Any]:
     }
 
 
+RISKY_CLAIM = re.compile(
+    r"공식\s*(?:승인|인정|인증)|자격\s*(?:을|이)?\s*(?:인정|부여|취득\s*보장)|법적\s*(?:적격|효력|자격)|적격\s*판정|채용\s*판정"
+    r"|official(?:ly)?\s+(?:approv|certif|recogni)|legal(?:ly)?\s+eligib", re.IGNORECASE)
+CLAIM_NEGATION = re.compile(r"아니|아닙|아닌|아님|않|없|금지|차단|경고|주의|불가|\bnot\b|\bno\b|never|without", re.IGNORECASE)
+
+
+def sentences(text: str) -> list[str]:
+    """Sentences with soft line wraps joined, so a disclaimer's negation stays in its sentence."""
+    found = []
+    for paragraph in re.split(r"\n\s*\n", text):
+        joined = " ".join(line.strip() for line in paragraph.splitlines())
+        found.extend(part.strip() for part in re.split(r"(?<=[.!?。])\s+", joined) if part.strip())
+    return found
+
+
+def public_claim_candidates(root: Path = ROOT) -> dict[str, Any]:
+    """G10 wording heuristic: sentences naming approval, qualification recognition or legal
+    eligibility without any negation, in the README and the public tool contract."""
+    texts = []
+    readme = root / "README.md"
+    if readme.is_file():
+        texts.append(("README.md", readme.read_text(encoding="utf-8")))
+    contract = root / "mcp" / "ncs-tool-contract.json"
+    if contract.is_file():
+        for tool in json.loads(contract.read_text(encoding="utf-8")).get("tools") or []:
+            texts.append((f"mcp/ncs-tool-contract.json:{tool.get('name')}",
+                          "\n\n".join(str(value) for value in tool.values() if isinstance(value, str))))
+    candidates = [{"source": source, "sentence": sentence[:240]} for source, text in texts
+                  for sentence in sentences(text) if RISKY_CLAIM.search(sentence) and not CLAIM_NEGATION.search(sentence)]
+    return {"sources_checked": len(texts), "candidate_count": len(candidates), "candidates": candidates,
+            "method": "keyword heuristic; paraphrased claims are missed and a hit still needs a human read"}
+
+
 def env_secret_values(env_path: Path) -> list[str]:
     values = []
     if not env_path.exists():
@@ -785,7 +818,7 @@ def measure_g10_tracked_secrets() -> dict[str, Any]:
     report.update({"files_checked": len(paths), "violation_count": len(hits), "files": hits,
                    "status": "pass" if not hits else "fail",
                    "limitations": ["untracked reports, published artifacts and remote outputs are not scanned",
-                                   "public-claim wording (approval, certification, legal eligibility) is not checked"]})
+                                   "public-claim wording is checked only by the keyword heuristic in public_claim_candidates"]})
     return report
 
 
@@ -863,6 +896,10 @@ def main(argv: list[str] | None = None) -> int:
         guardrails = {"G01": measure_g01(conn, args.previous_ksa_manifest, args.ksa_manifest_out),
                       "G02": measure_g02(conn), "G09": measure_g09_source_identity(),
                       "G10": measure_g10_tracked_secrets()}
+        claims = public_claim_candidates()
+        guardrails["G10"]["public_claim_candidates"] = claims
+        if guardrails["G10"]["status"] == "pass" and claims["candidate_count"]:
+            guardrails["G10"]["status"] = "review_required"
         if not args.skip_k03:
             audit = StatementAudit(conn)
             measured["K03"] = measure_k03(conn, metrics["K03"], audit=audit)
