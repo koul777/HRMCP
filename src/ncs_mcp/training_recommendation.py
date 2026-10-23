@@ -3227,6 +3227,14 @@ def _course_payloads_by_id(
     return payloads
 
 
+TRAINING_LINK_TABLES = (
+    "ncs_training_course_unit_links",
+    "ncs_training_course_element_links",
+    "ncs_training_course_concept_links",
+    "training_goal_concept_links",
+)
+
+
 def _candidate_training_course_rows(
     conn: sqlite3.Connection,
     *,
@@ -3234,46 +3242,99 @@ def _candidate_training_course_rows(
     target_concept_ids: set[int],
     support_course_names: set[str],
 ) -> list[sqlite3.Row]:
-    unit_json = json.dumps(sorted(code for code in scope_unit_codes if code))
-    concept_json = json.dumps(sorted(int(cid) for cid in target_concept_ids if cid))
-    name_json = json.dumps(sorted(name for name in support_course_names if name))
+    unit_codes = sorted(code for code in scope_unit_codes if code)
+    concept_ids = sorted(int(cid) for cid in target_concept_ids if cid)
+    course_names = sorted(name for name in support_course_names if name)
+    placeholders = ",".join("?" for _ in TRAINING_LINK_TABLES)
+    physical_tables = conn.execute(
+        f"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ({placeholders})",
+        TRAINING_LINK_TABLES,
+    ).fetchone()[0]
+    if physical_tables != len(TRAINING_LINK_TABLES):
+        # Compact serving snapshots expose these links as views over coded
+        # tables; keep the per-course probe there until it is measured.
+        return conn.execute(
+            """
+            SELECT DISTINCT tc.*
+            FROM ncs_training_courses tc
+            WHERE tc.ncs_cl_cd IN (SELECT value FROM json_each(?))
+               OR tc.compe_unit_name IN (SELECT value FROM json_each(?))
+               OR EXISTS (
+                    SELECT 1
+                    FROM ncs_training_course_unit_links l
+                    WHERE l.training_course_id = tc.training_course_id
+                      AND l.review_status != 'rejected'
+                      AND l.unit_code IN (SELECT value FROM json_each(?))
+               )
+               OR EXISTS (
+                    SELECT 1
+                    FROM ncs_training_course_element_links l
+                    WHERE l.training_course_id = tc.training_course_id
+                      AND l.review_status != 'rejected'
+                      AND l.unit_code IN (SELECT value FROM json_each(?))
+               )
+               OR EXISTS (
+                    SELECT 1
+                    FROM ncs_training_course_concept_links l
+                    WHERE l.training_course_id = tc.training_course_id
+                      AND l.review_status != 'rejected'
+                      AND l.unit_code IN (SELECT value FROM json_each(?))
+               )
+               OR EXISTS (
+                    SELECT 1
+                    FROM training_goal_concept_links l
+                    WHERE l.training_course_id = tc.training_course_id
+                      AND l.review_status != 'rejected'
+                      AND l.concept_id IN (SELECT value FROM json_each(?))
+               )
+            ORDER BY tc.training_course_id
+            """,
+            (
+                json.dumps(unit_codes), json.dumps(course_names), json.dumps(unit_codes),
+                json.dumps(unit_codes), json.dumps(unit_codes), json.dumps(concept_ids),
+            ),
+        ).fetchall()
+    # On physical tables each branch is answered from its own index and
+    # unioned, instead of probing four link tables for every course. Empty
+    # inputs add no branch: an IN over an empty set matches nothing.
+    branches: list[tuple[str, list[Any]]] = []
+    if unit_codes:
+        unit_json = json.dumps(unit_codes)
+        branches.append((
+            "SELECT training_course_id FROM ncs_training_courses WHERE ncs_cl_cd IN (SELECT value FROM json_each(?))",
+            [unit_json],
+        ))
+        for table in (
+            "ncs_training_course_unit_links",
+            "ncs_training_course_element_links",
+            "ncs_training_course_concept_links",
+        ):
+            branches.append((
+                f"SELECT training_course_id FROM {table} "
+                "WHERE review_status != 'rejected' AND unit_code IN (SELECT value FROM json_each(?))",
+                [unit_json],
+            ))
+    if course_names:
+        branches.append((
+            "SELECT training_course_id FROM ncs_training_courses WHERE compe_unit_name IN (SELECT value FROM json_each(?))",
+            [json.dumps(course_names)],
+        ))
+    if concept_ids:
+        branches.append((
+            "SELECT training_course_id FROM training_goal_concept_links "
+            "WHERE review_status != 'rejected' AND concept_id IN (SELECT value FROM json_each(?))",
+            [json.dumps(concept_ids)],
+        ))
+    if not branches:
+        return []
     return conn.execute(
-        """
-        SELECT DISTINCT tc.*
+        f"""
+        SELECT tc.*
         FROM ncs_training_courses tc
-        WHERE tc.ncs_cl_cd IN (SELECT value FROM json_each(?))
-           OR tc.compe_unit_name IN (SELECT value FROM json_each(?))
-           OR EXISTS (
-                SELECT 1
-                FROM ncs_training_course_unit_links l
-                WHERE l.training_course_id = tc.training_course_id
-                  AND l.review_status != 'rejected'
-                  AND l.unit_code IN (SELECT value FROM json_each(?))
-           )
-           OR EXISTS (
-                SELECT 1
-                FROM ncs_training_course_element_links l
-                WHERE l.training_course_id = tc.training_course_id
-                  AND l.review_status != 'rejected'
-                  AND l.unit_code IN (SELECT value FROM json_each(?))
-           )
-           OR EXISTS (
-                SELECT 1
-                FROM ncs_training_course_concept_links l
-                WHERE l.training_course_id = tc.training_course_id
-                  AND l.review_status != 'rejected'
-                  AND l.unit_code IN (SELECT value FROM json_each(?))
-           )
-           OR EXISTS (
-                SELECT 1
-                FROM training_goal_concept_links l
-                WHERE l.training_course_id = tc.training_course_id
-                  AND l.review_status != 'rejected'
-                  AND l.concept_id IN (SELECT value FROM json_each(?))
-           )
+        WHERE tc.training_course_id IN ({" UNION ".join(sql for sql, _ in branches)})
         ORDER BY tc.training_course_id
         """,
-        (unit_json, name_json, unit_json, unit_json, unit_json, concept_json),
+        [param for _, params in branches for param in params],
     ).fetchall()
 
 
