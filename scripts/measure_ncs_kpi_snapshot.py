@@ -6,7 +6,8 @@ K10 (census), a K03 structural diagnostic on the gold transition scenarios, G03
 checks on the slots those scenarios return, the G01 source-KSA manifest
 comparison, and a G10 scan of git-tracked files for .env secret values (counts
 and paths only). G02 checks trusted review statuses against packet-backed
-audit rows. On the same scenarios it traces the serving SQL for G04
+audit rows, and G09 compares the deploy runtime copies with the canonical
+source. On the same scenarios it traces the serving SQL for G04
 (SQF/learning-module table access) and G08 (writes from save=False calls), and
 runs the internal education planner for the G05 response contract and, with
 one fixed delivery constraint profile, for the G06 fit checks.
@@ -377,6 +378,20 @@ def run_plans(db_path: Path, scenarios: list[Any], audit: StatementAudit | None,
         server.open_recommendation_db = original
 
 
+def static_proof_gaps(harness: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Release/dashboard static proof artifacts the dashboard verification requires."""
+    artifacts = []
+    for name, path in sorted(harness.default_aihr_dashboard_static_artifacts().items()):
+        snapshot = harness._static_artifact_snapshot(name, path)
+        artifacts.append({"name": name, "path": str(path), "exists": bool(snapshot.get("exists")),
+                          "non_empty": bool(snapshot.get("non_empty")),
+                          "role_contract_ok": snapshot.get("role_contract_ok") is True})
+    gaps = [item for item in artifacts if not (item["exists"] and item["non_empty"] and item["role_contract_ok"])]
+    readiness = next((item["path"] for item in artifacts if item["name"] == "readiness_json"), None)
+    return gaps, {"artifacts_checked": len(artifacts), "gap_names": [item["name"] for item in gaps],
+                  "readiness_json": readiness}
+
+
 def measure_g05_plans(db_path: Path, scenarios: list[Any], audit: StatementAudit | None = None,
                       harness: Any | None = None) -> dict[str, Any]:
     """Run the internal planner tool on the fixture and count missing contract fields.
@@ -402,16 +417,20 @@ def measure_g05_plans(db_path: Path, scenarios: list[Any], audit: StatementAudit
             plans_with_gaps.append({"scenario_id": row["scenario_id"], "gaps": gaps})
             for kind, fields in gaps.items():
                 gap_fields.update(f"{kind}:{field}" for field in fields)
-    violation_count = sum(gap_fields.values())
+    static_gaps, static_proof = static_proof_gaps(harness)
+    violation_count = sum(gap_fields.values()) + len(static_gaps)
     checked = outcome["ok"] + outcome["missing_query_route_contract"]
     return {
-        "guardrail_id": "G05", "scope": "internal plan_ncs_education_path on the gold transition fixture",
+        "guardrail_id": "G05", "scope": "internal plan_ncs_education_path on the gold transition fixture; "
+                                        "dashboard static proof artifacts",
         "violation_count": violation_count if checked else None,
         "status": ("pass" if not violation_count else "fail") if checked else "unknown",
         "plans_checked": checked, "outcome_counts": dict(sorted(outcome.items())),
         "plans_with_gaps": plans_with_gaps, "gap_field_counts": dict(sorted(gap_fields.items())),
+        "static_proof": static_proof,
         "serving": dict(serving),
-        "limitations": ["release and dashboard static proof artifacts are not audited here",
+        "limitations": ["static proof freshness against the current code and DB is not checked; "
+                        "see static_proof.readiness_json for the stamp in use",
                         "the public facade (planner disabled on the public surface) is not called",
                         "refusals other than a missing route contract are counted, not inspected"],
     }
@@ -650,6 +669,37 @@ def measure_g02(conn: Any) -> dict[str, Any]:
     }
 
 
+DEPLOY_API_ENTRYPOINTS = ("bootstrap_runtime.py", "bootstrap_state.py", "health.py", "index.py", "mcp.py", "ready.py")
+
+
+def measure_g09_source_identity(root: Path = ROOT) -> dict[str, Any]:
+    """Source/deploy identity part of G09: deploy copies that differ from the canonical files.
+
+    Mirrors tests/test_vercel_deploy_source_sync.py, but walks the whole deployed
+    package (the test reads top-level modules only) and reports counts and paths.
+    """
+    deploy_root = root / "deploy" / "vercel_mcp_app"
+    pairs = [(path, root / "src" / path.relative_to(deploy_root / "src"))
+             for path in sorted((deploy_root / "src" / "ncs_mcp").rglob("*.py")) if "__pycache__" not in path.parts]
+    pairs += [(deploy_root / "api" / name, root / "api" / name) for name in DEPLOY_API_ENTRYPOINTS]
+    stale, missing = [], []
+    for deployed, canonical in pairs:
+        if not deployed.is_file() or not canonical.is_file():
+            missing.append(deployed.relative_to(root).as_posix())
+        elif deployed.read_bytes() != canonical.read_bytes():
+            stale.append(deployed.relative_to(root).as_posix())
+    violation_count = len(stale) + len(missing)
+    return {
+        "guardrail_id": "G09", "scope": "working-tree identity of deploy/vercel_mcp_app runtime copies and API "
+                                        "entrypoints against src/ and api/",
+        "violation_count": violation_count if pairs else None,
+        "status": ("pass" if not violation_count else "fail") if pairs else "unknown",
+        "files_checked": len(pairs), "stale_copies": stale, "missing_files": missing,
+        "limitations": ["refresh, package, deploy or baseline actions outside Builder are not audited",
+                        "the remote deployment and its snapshot identity are not compared"],
+    }
+
+
 def env_secret_values(env_path: Path) -> list[str]:
     values = []
     if not env_path.exists():
@@ -772,7 +822,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         measured = {"K10": measure_k10(conn, metrics["K10"])}
         guardrails = {"G01": measure_g01(conn, args.previous_ksa_manifest, args.ksa_manifest_out),
-                      "G02": measure_g02(conn), "G10": measure_g10_tracked_secrets()}
+                      "G02": measure_g02(conn), "G09": measure_g09_source_identity(),
+                      "G10": measure_g10_tracked_secrets()}
         if not args.skip_k03:
             audit = StatementAudit(conn)
             measured["K03"] = measure_k03(conn, metrics["K03"], audit=audit)

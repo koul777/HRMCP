@@ -238,6 +238,46 @@ class KpiSnapshotTests(unittest.TestCase):
         self.assertEqual(report["promoted_boilerplate_definitions"], 1)
         self.assertEqual((report["violation_count"], report["status"]), (3, "fail"))
 
+    def test_static_proof_gaps_count_missing_empty_and_bad_role_artifacts(self) -> None:
+        snapshots = {"readiness_json": {"exists": True, "non_empty": True, "role_contract_ok": True},
+                     "demo_json": {"exists": True, "non_empty": False, "role_contract_ok": True},
+                     "queue_run_json": {"exists": False, "non_empty": False, "role_contract_ok": False},
+                     "demo_html": {"exists": True, "non_empty": True, "role_contract_ok": None}}
+
+        class Harness:
+            @staticmethod
+            def default_aihr_dashboard_static_artifacts():
+                return {name: self.root / f"{name}.json" for name in snapshots}
+
+            @staticmethod
+            def _static_artifact_snapshot(name, path):
+                return snapshots[name]
+
+        gaps, summary = snapshot.static_proof_gaps(Harness())
+        self.assertEqual([item["name"] for item in gaps], ["demo_html", "demo_json", "queue_run_json"])
+        self.assertEqual(summary["artifacts_checked"], 4)
+        self.assertEqual(summary["readiness_json"], str(self.root / "readiness_json.json"))
+
+    def test_g09_reports_stale_and_missing_deploy_copies(self) -> None:
+        def write(relative: str, text: str) -> None:
+            path = self.root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+
+        for name in ("db.py", "search/core.py", "server.py"):
+            write(f"src/ncs_mcp/{name}", name)
+        write("deploy/vercel_mcp_app/src/ncs_mcp/db.py", "db.py")
+        write("deploy/vercel_mcp_app/src/ncs_mcp/search/core.py", "old")
+        write("deploy/vercel_mcp_app/src/ncs_mcp/only_in_deploy.py", "x")
+        for name in snapshot.DEPLOY_API_ENTRYPOINTS:
+            write(f"api/{name}", name)
+            write(f"deploy/vercel_mcp_app/api/{name}", name)
+        report = snapshot.measure_g09_source_identity(self.root)
+        self.assertEqual(report["files_checked"], 3 + len(snapshot.DEPLOY_API_ENTRYPOINTS))
+        self.assertEqual(report["stale_copies"], ["deploy/vercel_mcp_app/src/ncs_mcp/search/core.py"])
+        self.assertEqual(report["missing_files"], ["deploy/vercel_mcp_app/src/ncs_mcp/only_in_deploy.py"])
+        self.assertEqual((report["violation_count"], report["status"]), (2, "fail"))
+
     def test_synthetic_packet_prefixes_match_the_dashboard(self) -> None:
         dashboard = (ROOT / "scripts" / "ncs_dashboard.py").read_text(encoding="utf-8")
         block = dashboard.split("SYNTHETIC_REVIEW_PACKET_PREFIXES = (", 1)[1].split(")", 1)[0]
