@@ -25,6 +25,7 @@ if str(SCRIPTS) not in sys.path:
 
 from ksa_label_codex_judge import evaluate_candidate
 
+from ncs_mcp.review_safety import review_packet_sha256
 from ncs_mcp.db import (
     KSA_DEFINITION_BOILERPLATE_PREFIXES,
     _term_definition_text_for_concept,
@@ -7443,13 +7444,51 @@ class TrainingRecommendationTests(unittest.TestCase):
                 """,
                 (now_utc(), fixture["unit_code"]),
             )
-            trusted_result = recommend_training_for_task(
+            # A trusted status string without a packet-backed audit row is not trusted evidence.
+            status_only_result = recommend_training_for_task(
                 conn,
                 criteria_id=int(fixture["criteria_id"]),
                 query="workforce",
                 limit=1,
                 save=False,
             )
+            status_only_item = status_only_result["recommendations"][0]
+            self.assertEqual(status_only_item["score_components"]["career_path_score"], 0.0)
+            self.assertEqual(status_only_result["recommendation_summary"]["trusted_career_path_rows_used"], 0)
+            self.assertEqual(status_only_item["career_path_evidence"], [])
+
+            packet = Path(tmp) / "career_path_decision_audit.json"
+            packet.write_text("{}", encoding="utf-8")
+            career_path_id = conn.execute(
+                "SELECT career_path_id FROM ncs_career_paths WHERE matched_unit_code = ?",
+                (fixture["unit_code"],),
+            ).fetchone()[0]
+            conn.execute(
+                """
+                INSERT INTO review_audit_log(
+                    entity_type, entity_id, action, new_status, reviewer_id, source_decision_packet,
+                    source_artifact_hash, rationale, evidence_refs_json, created_at
+                ) VALUES ('ncs_career_path', ?, 'packet_backed_human_review', 'human_reviewed', 'reviewer',
+                          'reports/career_path_decision_audit.json', ?, 'checked', ?, ?)
+                """,
+                (
+                    str(career_path_id),
+                    "sha256:" + review_packet_sha256(packet),
+                    json.dumps([f"career_path_id:{career_path_id}"]),
+                    now_utc(),
+                ),
+            )
+            with patch(
+                "ncs_mcp.review_safety.resolve_repo_reports_artifact",
+                side_effect=lambda ref, **_: packet if ref == "reports/career_path_decision_audit.json" else None,
+            ):
+                trusted_result = recommend_training_for_task(
+                    conn,
+                    criteria_id=int(fixture["criteria_id"]),
+                    query="workforce",
+                    limit=1,
+                    save=False,
+                )
             trusted_item = trusted_result["recommendations"][0]
             conn.close()
 
@@ -7556,14 +7595,32 @@ class TrainingRecommendationTests(unittest.TestCase):
                 """,
                 (fixture["unit_code"], timestamp, timestamp),
             )
-
-            result = recommend_training_for_task(
-                conn,
-                criteria_id=int(fixture["criteria_id"]),
-                query="workforce",
-                limit=1,
-                save=False,
+            trusted_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            packet = Path(tmp) / "career_path_decision_audit.json"
+            packet.write_text("{}", encoding="utf-8")
+            conn.execute(
+                """
+                INSERT INTO review_audit_log(
+                    entity_type, entity_id, action, new_status, reviewer_id, source_decision_packet,
+                    source_artifact_hash, rationale, evidence_refs_json, created_at
+                ) VALUES ('ncs_career_path', ?, 'packet_backed_human_review', 'human_reviewed', 'reviewer',
+                          'reports/career_path_decision_audit.json', ?, 'checked', ?, ?)
+                """,
+                (str(trusted_id), "sha256:" + review_packet_sha256(packet),
+                 json.dumps([f"career_path_id:{trusted_id}"]), timestamp),
             )
+
+            with patch(
+                "ncs_mcp.review_safety.resolve_repo_reports_artifact",
+                side_effect=lambda ref, **_: packet if ref == "reports/career_path_decision_audit.json" else None,
+            ):
+                result = recommend_training_for_task(
+                    conn,
+                    criteria_id=int(fixture["criteria_id"]),
+                    query="workforce",
+                    limit=1,
+                    save=False,
+                )
             conn.close()
 
             self.assertTrue(result["ok"])
@@ -7684,15 +7741,36 @@ class TrainingRecommendationTests(unittest.TestCase):
                 """,
                 (fixture["unit_code"], job_base_competency_id, job_base_factor_id, timestamp, timestamp, timestamp),
             )
-
-            result = recommend_training_for_task(
-                conn,
-                criteria_id=int(fixture["criteria_id"]),
-                query="workforce",
-                preferred_max_hours=20,
-                preferred_methods=["Practice"],
-                limit=3,
+            career_path_id = conn.execute(
+                "SELECT career_path_id FROM ncs_career_paths WHERE matched_unit_code = ?",
+                (fixture["unit_code"],),
+            ).fetchone()[0]
+            packet = Path(tmp) / "career_path_decision_audit.json"
+            packet.write_text("{}", encoding="utf-8")
+            conn.execute(
+                """
+                INSERT INTO review_audit_log(
+                    entity_type, entity_id, action, new_status, reviewer_id, source_decision_packet,
+                    source_artifact_hash, rationale, evidence_refs_json, created_at
+                ) VALUES ('ncs_career_path', ?, 'packet_backed_human_review', 'human_reviewed', 'reviewer',
+                          'reports/career_path_decision_audit.json', ?, 'checked', ?, ?)
+                """,
+                (str(career_path_id), "sha256:" + review_packet_sha256(packet),
+                 json.dumps([f"career_path_id:{career_path_id}"]), timestamp),
             )
+
+            with patch(
+                "ncs_mcp.review_safety.resolve_repo_reports_artifact",
+                side_effect=lambda ref, **_: packet if ref == "reports/career_path_decision_audit.json" else None,
+            ):
+                result = recommend_training_for_task(
+                    conn,
+                    criteria_id=int(fixture["criteria_id"]),
+                    query="workforce",
+                    preferred_max_hours=20,
+                    preferred_methods=["Practice"],
+                    limit=3,
+                )
             evidence_count = conn.execute(
                 """
                 SELECT COUNT(*)

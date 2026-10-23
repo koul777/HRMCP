@@ -608,30 +608,10 @@ SYNTHETIC_PACKET_PREFIXES = ("ksa_review_dashboard_one_click_v1:", "ksa_definiti
 
 
 def packet_blockers(audit: Any, status: str) -> list[str]:
-    """Packet-backed provenance checks of the quality gate, without its scenario-only action name."""
-    from ncs_mcp.quality_gates import (
-        AUTOMATED_REVIEWER_IDS, _evidence_refs_json_is_packet_backing_list, _resolve_review_packet_artifact)
-    from ncs_mcp.review_safety import review_packet_sha256
+    """Packet-backed provenance checks shared with the recommender (review_safety)."""
+    from ncs_mcp.review_safety import packet_backing_blockers
 
-    blockers = []
-    if str(audit["new_status"] or "").strip() != status:
-        blockers.append("new_status_matches_row")
-    reviewer = str(audit["reviewer_id"] or "").strip()
-    if not reviewer or reviewer.lower() in AUTOMATED_REVIEWER_IDS:
-        blockers.append("human_reviewer_id")
-    packet = str(audit["source_decision_packet"] or "").strip()
-    packet_path = _resolve_review_packet_artifact(packet) if packet else None
-    if packet_path is None:
-        blockers.append("source_decision_packet_resolves_to_reports_artifact")
-    digest = str(audit["source_artifact_hash"] or "").strip().lower()
-    if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest) or (
-            packet_path is not None and digest != "sha256:" + review_packet_sha256(packet_path)):
-        blockers.append("source_artifact_hash_matches_reports_artifact")
-    if not str(audit["rationale"] or "").strip():
-        blockers.append("rationale")
-    if not _evidence_refs_json_is_packet_backing_list(audit["evidence_refs_json"]):
-        blockers.append("evidence_refs_json_valid")
-    return blockers
+    return packet_backing_blockers(audit, status)
 
 
 def measure_g02(conn: Any) -> dict[str, Any]:

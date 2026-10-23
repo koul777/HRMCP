@@ -54,7 +54,7 @@ from ncs_mcp.hrd_guide_reference import (
 )
 from ncs_mcp.job_base_api import job_base_profile_for_units
 from ncs_mcp.qualification_api import qualification_profile_for_units
-from ncs_mcp.review_safety import REVIEW_PACKET_EXTENSIONS, is_portable_reports_packet_ref
+from ncs_mcp.review_safety import REVIEW_PACKET_EXTENSIONS, is_portable_reports_packet_ref, packet_backed_entity_ids
 
 
 TRUSTED_TRANSITION_REVIEW_STATUSES = ("human_reviewed", "reviewed", "accepted")
@@ -224,6 +224,26 @@ def _trusted_career_paths(paths: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for item in paths
         if _clean(item.get("review_status")) in TRUSTED_CAREER_PATH_REVIEW_STATUSES
     ]
+
+
+def _packet_backed_career_paths(
+    conn: sqlite3.Connection,
+    unit_codes: set[str],
+    *,
+    limit: int = 300,
+) -> list[dict[str, Any]]:
+    """Career paths trusted as evidence: a trusted status backed by a decision packet.
+
+    A trusted status string alone does not count (guardrail G02); rows marked
+    human_reviewed without a packet-backed review_audit_log row stay untrusted.
+    """
+    paths = career_paths_for_units(conn, unit_codes, limit=limit, review_statuses=TRUSTED_CAREER_PATH_REVIEW_STATUSES)
+    backed = packet_backed_entity_ids(
+        conn,
+        "ncs_career_path",
+        {str(item.get("career_path_id")): _clean(item.get("review_status")) for item in paths},
+    )
+    return [item for item in paths if str(item.get("career_path_id")) in backed]
 
 
 def _review_status_counts(items: list[dict[str, Any]]) -> dict[str, int]:
@@ -4391,12 +4411,7 @@ def recommend_training_for_task(
     source_concept_ids = {_concept_key(item) for item in source_concepts}
     gap_concept_ids = {_concept_key(item) for item in gap_concepts}
     scope_career_paths = career_paths_for_units(conn, scope_unit_codes, limit=300)
-    trusted_scope_career_paths = career_paths_for_units(
-        conn,
-        scope_unit_codes,
-        limit=300,
-        review_statuses=TRUSTED_CAREER_PATH_REVIEW_STATUSES,
-    )
+    trusted_scope_career_paths = _packet_backed_career_paths(conn, scope_unit_codes, limit=300)
     career_path_unit_codes = {
         _clean(item.get("matched_unit_code"))
         for item in trusted_scope_career_paths
@@ -9328,18 +9343,8 @@ def recommend_training_transition(
         return recommendation
     current_career_paths = career_paths_for_units(conn, set(current_scope["unit_codes"]), limit=300)
     target_career_paths = career_paths_for_units(conn, set(target_scope["unit_codes"]), limit=300)
-    current_trusted_career_paths = career_paths_for_units(
-        conn,
-        set(current_scope["unit_codes"]),
-        limit=300,
-        review_statuses=TRUSTED_CAREER_PATH_REVIEW_STATUSES,
-    )
-    target_trusted_career_paths = career_paths_for_units(
-        conn,
-        set(target_scope["unit_codes"]),
-        limit=300,
-        review_statuses=TRUSTED_CAREER_PATH_REVIEW_STATUSES,
-    )
+    current_trusted_career_paths = _packet_backed_career_paths(conn, set(current_scope["unit_codes"]), limit=300)
+    target_trusted_career_paths = _packet_backed_career_paths(conn, set(target_scope["unit_codes"]), limit=300)
     transition_summary = {
         "current_query": current_query,
         "target_query": target_query,

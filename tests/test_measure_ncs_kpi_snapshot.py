@@ -226,8 +226,8 @@ class KpiSnapshotTests(unittest.TestCase):
         self.conn.execute(audit_sql, ("ontology_concept_label_candidate", "7", "reviewer",
                                       "ksa_review_dashboard_one_click_v1:label:7:approve", "sha256:" + "0" * 64,
                                       "one_click_label_approve", '["label_id:7"]', now))
-        with mock.patch("ncs_mcp.quality_gates._resolve_review_packet_artifact",
-                        side_effect=lambda ref: packet if ref == "reports/decision_audit.json" else None):
+        with mock.patch("ncs_mcp.review_safety.resolve_repo_reports_artifact",
+                        side_effect=lambda ref, **_: packet if ref == "reports/decision_audit.json" else None):
             report = snapshot.measure_g02(self.conn)
         self.assertEqual(report["packet_backed_rows"], 1)
         self.assertEqual(report["unbacked_trusted_rows_by_table"],

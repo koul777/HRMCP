@@ -17,6 +17,7 @@ from ncs_mcp.job_base_api import job_base_summary
 from ncs_mcp.qualification_api import qualification_retry_hygiene_report, qualification_summary
 from ncs_mcp.refinement import refinement_stats
 from ncs_mcp.review_safety import (
+    AUTOMATED_REVIEWER_IDS,
     REVIEW_PACKET_EXTENSIONS,
     evidence_refs_json_is_nonempty_string_list,
     resolve_repo_reports_artifact,
@@ -48,7 +49,6 @@ ONTOLOGY_DEFINITION_BOILERPLATE_PATTERNS_BY_TYPE["attitude"] += (
 )
 HUMAN_TRUSTED_LABEL_REVIEW_STATUSES = ("human_reviewed", "accepted", "reviewed")
 TRUSTED_LABEL_REVIEW_STATUSES = HUMAN_TRUSTED_LABEL_REVIEW_STATUSES
-AUTOMATED_REVIEWER_IDS = ("dashboard", "mcp", "automation", "automated_eval_gate", "system")
 TRUSTED_REVIEW_PACKET_EXTENSIONS = REVIEW_PACKET_EXTENSIONS
 TRUSTED_TRANSITION_REVIEW_AUDIT_ACTION = "packet_backed_human_review"
 ALWAYS_SHOW_DETAIL_GATE_NAMES = {

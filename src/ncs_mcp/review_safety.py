@@ -4,10 +4,11 @@ import hashlib
 import json
 import re
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 
 REVIEW_PACKET_EXTENSIONS = (".json", ".jsonl", ".csv", ".md")
+AUTOMATED_REVIEWER_IDS = ("dashboard", "mcp", "automation", "automated_eval_gate", "system")
 FORBIDDEN_AUTOMATIC_STATUS_TERMS = (
     "human_reviewed",
     "accepted",
@@ -194,6 +195,60 @@ def review_packet_sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def packet_backing_blockers(audit: Any, status: str) -> list[str]:
+    """Why a review_audit_log row does not back `status` with a human decision packet.
+
+    The packet must resolve to a reports artifact whose sha256 matches, with a
+    human reviewer, rationale and evidence refs on the same row.
+    """
+    blockers = []
+    if str(audit["new_status"] or "").strip() != status:
+        blockers.append("new_status_matches_row")
+    reviewer = str(audit["reviewer_id"] or "").strip()
+    if not reviewer or reviewer.lower() in AUTOMATED_REVIEWER_IDS:
+        blockers.append("human_reviewer_id")
+    packet = str(audit["source_decision_packet"] or "").strip()
+    packet_path = resolve_repo_reports_artifact(packet, extensions=REVIEW_PACKET_EXTENSIONS) if packet else None
+    if packet_path is None:
+        blockers.append("source_decision_packet_resolves_to_reports_artifact")
+    digest = str(audit["source_artifact_hash"] or "").strip().lower()
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest) or (
+        packet_path is not None and digest != "sha256:" + review_packet_sha256(packet_path)
+    ):
+        blockers.append("source_artifact_hash_matches_reports_artifact")
+    if not str(audit["rationale"] or "").strip():
+        blockers.append("rationale")
+    if not evidence_refs_json_is_nonempty_string_list(audit["evidence_refs_json"]):
+        blockers.append("evidence_refs_json_valid")
+    return blockers
+
+
+def packet_backed_entity_ids(conn: Any, entity_type: str, statuses: dict[str, str]) -> set[str]:
+    """Entity ids whose current status has a packet-backed review_audit_log row.
+
+    `statuses` maps entity_id to the entity's current review status. Without an
+    audit table (compact serving snapshots) nothing is packet-backed.
+    """
+    if not statuses or conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'review_audit_log'"
+    ).fetchone() is None:
+        return set()
+    rows = conn.execute(
+        """
+        SELECT entity_id, new_status, reviewer_id, source_decision_packet, source_artifact_hash,
+               rationale, evidence_refs_json
+        FROM review_audit_log
+        WHERE entity_type = ? AND entity_id IN (SELECT value FROM json_each(?))
+        """,
+        (entity_type, json.dumps(sorted(statuses))),
+    ).fetchall()
+    return {
+        str(row["entity_id"])
+        for row in rows
+        if not packet_backing_blockers(row, statuses[str(row["entity_id"])])
+    }
 
 
 def evidence_refs_json_is_nonempty_string_list(value: str | None) -> bool:
