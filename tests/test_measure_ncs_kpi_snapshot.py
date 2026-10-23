@@ -195,6 +195,55 @@ class KpiSnapshotTests(unittest.TestCase):
         fit["delivery_operation"]["time_constraint_fit"]["actual_hours"] = 30.0
         self.assertEqual(snapshot.g06_row_violations(fit), ["time_fit_unsupported", "facility_fit_unsupported"])
 
+    def test_g02_separates_packet_backed_dashboard_and_unbacked_trusted_rows(self) -> None:
+        from unittest import mock
+
+        now = now_utc()
+        self.conn.execute("PRAGMA foreign_keys = OFF")
+        for alias_id, status in ((9001, "human_reviewed"), (9002, "human_reviewed"), (9003, "candidate")):
+            self.conn.execute("INSERT INTO ncs_query_aliases(alias_id, alias_text, normalized_query, review_status, "
+                              "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                              (alias_id, f"a{alias_id}", f"q{alias_id}", status, now, now))
+        self.conn.execute("INSERT INTO ontology_concept_label_candidates(label_id, concept_id, concept_type, source_text, "
+                          "label_text, normalized_label_key, source_method, review_status, created_at, updated_at) "
+                          "VALUES (7, 1, 'knowledge', 's', 'l', 'l', 'm', 'human_reviewed', ?, ?)", (now, now))
+        self.conn.execute("INSERT INTO learning_module_unit_links(learn_module_seq, unit_code, link_method, review_status, "
+                          "created_at, updated_at) VALUES (1, '0101_23v1', 'm', 'reviewed', ?, ?)", (now, now))
+        self.conn.execute("INSERT INTO ontology_concepts(concept_name, normalized_key, concept_type, definition, "
+                          "definition_status, relation_status, review_status, created_at, updated_at) VALUES "
+                          "('인력 계획', '인력계획', 'knowledge', ?, 'defined', 'unlinked', 'raw', ?, ?)",
+                          ("인력 계획: 업무 판단과 문제 해결에 필요한 관련 원리, 기준, 절차, 사례에 대한 지식.", now, now))
+        packet = self.root / "decision_audit.json"
+        packet.write_text("{}", encoding="utf-8")
+        from ncs_mcp.review_safety import review_packet_sha256
+        digest = "sha256:" + review_packet_sha256(packet)
+        audit_sql = ("INSERT INTO review_audit_log(entity_type, entity_id, action, new_status, reviewer_id, "
+                     "source_decision_packet, source_artifact_hash, rationale, evidence_refs_json, created_at) "
+                     "VALUES (?, ?, 'approve', 'human_reviewed', ?, ?, ?, ?, ?, ?)")
+        self.conn.execute(audit_sql, ("ncs_query_alias", "9001", "reviewer", "reports/decision_audit.json", digest,
+                                      "checked", '["alias_id:9001"]', now))
+        self.conn.execute(audit_sql, ("ncs_query_alias", "9002", "codex_report_review", None, None, None, None, now))
+        self.conn.execute(audit_sql, ("ontology_concept_label_candidate", "7", "reviewer",
+                                      "ksa_review_dashboard_one_click_v1:label:7:approve", "sha256:" + "0" * 64,
+                                      "one_click_label_approve", '["label_id:7"]', now))
+        with mock.patch("ncs_mcp.quality_gates._resolve_review_packet_artifact",
+                        side_effect=lambda ref: packet if ref == "reports/decision_audit.json" else None):
+            report = snapshot.measure_g02(self.conn)
+        self.assertEqual(report["packet_backed_rows"], 1)
+        self.assertEqual(report["unbacked_trusted_rows_by_table"],
+                         {"ncs_query_aliases": 1, "ontology_concept_label_candidates": 1})
+        self.assertEqual(report["unbacked_by_reason"],
+                         {"dashboard_decision_without_packet_file": 1, "missing_packet_fields": 1})
+        self.assertEqual(report["legacy_trusted_rows_not_counted"], {"learning_module_unit_links": 1})
+        self.assertEqual(report["promoted_boilerplate_definitions"], 1)
+        self.assertEqual((report["violation_count"], report["status"]), (3, "fail"))
+
+    def test_synthetic_packet_prefixes_match_the_dashboard(self) -> None:
+        dashboard = (ROOT / "scripts" / "ncs_dashboard.py").read_text(encoding="utf-8")
+        block = dashboard.split("SYNTHETIC_REVIEW_PACKET_PREFIXES = (", 1)[1].split(")", 1)[0]
+        self.assertEqual(tuple(item.strip().strip('"') for item in block.split(",") if item.strip()),
+                         snapshot.SYNTHETIC_PACKET_PREFIXES)
+
     def test_readonly_write_errors_are_named_and_plan_gaps_use_harness_validators(self) -> None:
         self.assertEqual(snapshot.exception_code(sqlite3.OperationalError("attempt to write a readonly database")),
                          "exception:readonly_write")

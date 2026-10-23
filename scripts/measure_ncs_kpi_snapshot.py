@@ -5,7 +5,8 @@ no network calls and writes nothing but the requested output files. It covers
 K10 (census), a K03 structural diagnostic on the gold transition scenarios, G03
 checks on the slots those scenarios return, the G01 source-KSA manifest
 comparison, and a G10 scan of git-tracked files for .env secret values (counts
-and paths only). On the same scenarios it traces the serving SQL for G04
+and paths only). G02 checks trusted review statuses against packet-backed
+audit rows. On the same scenarios it traces the serving SQL for G04
 (SQF/learning-module table access) and G08 (writes from save=False calls), and
 runs the internal education planner for the G05 response contract and, with
 one fixed delivery constraint profile, for the G06 fit checks.
@@ -535,6 +536,120 @@ def serving_guardrails(audit: StatementAudit | None, serving: Counter[str],
     return {"G04": g04, "G08": g08}
 
 
+TRUSTED_REVIEW_STATUSES = ("human_reviewed", "accepted", "reviewed")
+# review_audit_log entity_type and id column for tables that carry review_status.
+# Learning-module tables are legacy and not read by the active recommender (G04).
+G02_AUDIT_ENTITIES = {
+    "training_transition_gold_scenarios": ("training_transition_gold_scenario", "scenario_id"),
+    "ncs_career_paths": ("ncs_career_path", "career_path_id"),
+    "ncs_query_aliases": ("ncs_query_alias", "alias_id"),
+    "ontology_concept_label_candidates": ("ontology_concept_label_candidate", "label_id"),
+    "ontology_concepts": ("ontology_concept", "concept_id"),
+}
+# Same as ncs_dashboard.SYNTHETIC_REVIEW_PACKET_PREFIXES: dashboard decision ids, not packet files.
+SYNTHETIC_PACKET_PREFIXES = ("ksa_review_dashboard_one_click_v1:", "ksa_definition_dashboard_review_v1:")
+
+
+def packet_blockers(audit: Any, status: str) -> list[str]:
+    """Packet-backed provenance checks of the quality gate, without its scenario-only action name."""
+    from ncs_mcp.quality_gates import (
+        AUTOMATED_REVIEWER_IDS, _evidence_refs_json_is_packet_backing_list, _resolve_review_packet_artifact)
+    from ncs_mcp.review_safety import review_packet_sha256
+
+    blockers = []
+    if str(audit["new_status"] or "").strip() != status:
+        blockers.append("new_status_matches_row")
+    reviewer = str(audit["reviewer_id"] or "").strip()
+    if not reviewer or reviewer.lower() in AUTOMATED_REVIEWER_IDS:
+        blockers.append("human_reviewer_id")
+    packet = str(audit["source_decision_packet"] or "").strip()
+    packet_path = _resolve_review_packet_artifact(packet) if packet else None
+    if packet_path is None:
+        blockers.append("source_decision_packet_resolves_to_reports_artifact")
+    digest = str(audit["source_artifact_hash"] or "").strip().lower()
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest) or (
+            packet_path is not None and digest != "sha256:" + review_packet_sha256(packet_path)):
+        blockers.append("source_artifact_hash_matches_reports_artifact")
+    if not str(audit["rationale"] or "").strip():
+        blockers.append("rationale")
+    if not _evidence_refs_json_is_packet_backing_list(audit["evidence_refs_json"]):
+        blockers.append("evidence_refs_json_valid")
+    return blockers
+
+
+def measure_g02(conn: Any) -> dict[str, Any]:
+    """Trusted review statuses without a packet-backed audit row, and promoted boilerplate definitions."""
+    from ncs_mcp.db import _is_ksa_definition_boilerplate
+
+    tables = [row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")]
+    placeholders = ",".join("?" for _ in TRUSTED_REVIEW_STATUSES)
+    trusted_by_table: dict[str, int] = {}
+    unbacked: Counter[str] = Counter()
+    legacy_unbacked: Counter[str] = Counter()
+    blocker_counts: Counter[str] = Counter()
+    unbacked_reason: Counter[str] = Counter()
+    packet_backed = 0
+    for table in tables:
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if "review_status" not in columns:
+            continue
+        count = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE review_status IN ({placeholders})",
+                             TRUSTED_REVIEW_STATUSES).fetchone()[0]
+        if not count:
+            continue
+        trusted_by_table[table] = count
+        if any(marker in table for marker in LEGACY_TABLE_MARKERS):
+            legacy_unbacked[table] += count
+            continue
+        if table not in G02_AUDIT_ENTITIES:
+            unbacked[table] += count
+            blocker_counts["no_audit_entity_mapping"] += count
+            continue
+        entity_type, id_column = G02_AUDIT_ENTITIES[table]
+        audits: dict[str, list[Any]] = {}
+        for audit in conn.execute("SELECT * FROM review_audit_log WHERE entity_type = ? ORDER BY id", (entity_type,)):
+            audits.setdefault(str(audit["entity_id"]), []).append(audit)
+        for row in conn.execute(f"SELECT {id_column} AS row_id, review_status FROM {table} "
+                                f"WHERE review_status IN ({placeholders})", TRUSTED_REVIEW_STATUSES):
+            rows = audits.get(str(row["row_id"]), [])
+            candidates = [packet_blockers(audit, row["review_status"]) for audit in rows]
+            if any(not blockers for blockers in candidates):
+                packet_backed += 1
+                continue
+            unbacked[table] += 1
+            best = min(candidates, key=len) if candidates else ["review_audit_log"]
+            blocker_counts.update(best)
+            synthetic = best == ["source_decision_packet_resolves_to_reports_artifact"] and any(
+                str(audit["source_decision_packet"] or "").strip().lower().startswith(SYNTHETIC_PACKET_PREFIXES)
+                for audit in rows)
+            unbacked_reason["dashboard_decision_without_packet_file" if synthetic else "missing_packet_fields"] += 1
+    promoted = 0
+    for concept in conn.execute("SELECT concept_type, concept_name, definition FROM ontology_concepts "
+                                f"WHERE definition_status = 'defined' OR review_status IN ({placeholders})",
+                                TRUSTED_REVIEW_STATUSES):
+        promoted += bool(_is_ksa_definition_boilerplate(concept["concept_type"] or "", concept["concept_name"] or "",
+                                                        concept["definition"] or ""))
+    violation_count = sum(unbacked.values()) + promoted
+    return {
+        "guardrail_id": "G02", "scope": "trusted review statuses in every table with review_status; "
+                                        "defined or trusted ontology concept definitions",
+        "violation_count": violation_count, "status": "pass" if not violation_count else "fail",
+        "trusted_rows_by_table": trusted_by_table, "packet_backed_rows": packet_backed,
+        "unbacked_trusted_rows_by_table": dict(sorted(unbacked.items())),
+        "unbacked_blocker_counts": dict(sorted(blocker_counts.items())),
+        # Human reviewer, hash, rationale and evidence present; only the packet is
+        # a dashboard decision id. Whether that counts as a decision packet is a
+        # human policy call, so it stays counted under the contract wording.
+        "unbacked_by_reason": dict(sorted(unbacked_reason.items())),
+        "legacy_trusted_rows_not_counted": dict(sorted(legacy_unbacked.items())),
+        "promoted_boilerplate_definitions": promoted,
+        "on_violation": "exclude the rows from trusted KPI evidence and queue re-confirmation; no automatic status change",
+        "limitations": ["audit action names differ by table and are not checked",
+                        "legacy learning-module tables are listed but not counted; the active recommender does not read them",
+                        "claims in reports or responses (for example llm_reviewed called verified) are not scanned"],
+    }
+
+
 def env_secret_values(env_path: Path) -> list[str]:
     values = []
     if not env_path.exists():
@@ -657,7 +772,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         measured = {"K10": measure_k10(conn, metrics["K10"])}
         guardrails = {"G01": measure_g01(conn, args.previous_ksa_manifest, args.ksa_manifest_out),
-                      "G10": measure_g10_tracked_secrets()}
+                      "G02": measure_g02(conn), "G10": measure_g10_tracked_secrets()}
         if not args.skip_k03:
             audit = StatementAudit(conn)
             measured["K03"] = measure_k03(conn, metrics["K03"], audit=audit)
