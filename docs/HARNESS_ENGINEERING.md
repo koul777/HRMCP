@@ -58,6 +58,10 @@ transition checks without its scenario-only action name), plus defined or
 trusted concepts with boilerplate definitions. Dashboard one-click decisions,
 whose packet is a dashboard decision id rather than a reports file, are
 reported separately but still counted. The snapshot never changes a status.
+The report header pins `evaluation_identity`: the public tool contract hash,
+its active and inactive advanced tools, and the newest deployed Builder release
+record (version, source commit, deployment id, acceptance profile), all read
+from local files without querying the remote deployment.
 G09 covers only source identity: every `deploy/vercel_mcp_app` runtime copy
 (the whole package, not just top-level modules) and API entrypoint must match
 `src/` and `api/` byte for byte.

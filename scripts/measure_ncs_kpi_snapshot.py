@@ -129,6 +129,44 @@ def git_identity() -> dict[str, Any]:
         return {"code_commit": None, "working_tree_patch_sha256": None, "error": type(exc).__name__}
 
 
+def evaluation_identity(root: Path = ROOT) -> dict[str, Any]:
+    """Surface and deployment identity the contract asks each evaluation cycle to pin.
+
+    Read from local files only: the public MCP tool contract and the newest
+    deployed Builder release record. The remote deployment is not queried.
+    """
+    identity: dict[str, Any] = {"public_contract": None, "latest_builder_release": None,
+                                "source": "local records; the remote deployment is not queried"}
+    contract_path = root / "mcp" / "ncs-tool-contract.json"
+    if contract_path.is_file():
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        identity["public_contract"] = {
+            "path": contract_path.relative_to(root).as_posix(), "sha256": sha_file(contract_path),
+            "mode": (contract.get("surface") or {}).get("mode"),
+            "active_tools": sorted(tool.get("name") for tool in contract.get("tools") or []),
+            "advanced_tools_not_active": sorted(contract.get("advanced_tools_available") or []),
+        }
+    releases = []
+    for path in (root / ".state" / "ncs-data-builder" / "versions").glob("*/release.json"):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if record.get("status") == "deployed":
+            releases.append((str(record.get("updated_at") or ""), path, record))
+    if releases:
+        updated_at, path, record = max(releases, key=lambda item: item[0])
+        production = record.get("production_after_promotion")
+        identity["latest_builder_release"] = {
+            "record": path.relative_to(root).as_posix(), "version": record.get("version"), "updated_at": updated_at,
+            "source_commit": record.get("source_commit"),
+            "production_deployment_id": production.get("deployment_id") if isinstance(production, dict) else None,
+            "remote_acceptance_profile": record.get("remote_acceptance_profile"),
+            "snapshot_reused_unchanged": record.get("snapshot_reused_unchanged"),
+        }
+    return identity
+
+
 def measure_k10(conn: Any, metric: dict[str, Any]) -> dict[str, Any]:
     rows = conn.execute(
         """
@@ -814,6 +852,7 @@ def main(argv: list[str] | None = None) -> int:
         "schema": SCHEMA, "definition_version": definition.get("version"), "observed_at": started,
         "report_only": True, "db_writes": False, "network_calls": False, "status_update_allowed": False,
         "approval_claim": False, "surface": "local_full_db_function", **git_identity(),
+        "evaluation_identity": evaluation_identity(),
         "database": {"path": str(args.db), "bytes": db_stat.st_size,
                      "mtime": datetime.fromtimestamp(db_stat.st_mtime, UTC).isoformat(),
                      "sha256": None if args.skip_db_hash else sha_file(args.db)},

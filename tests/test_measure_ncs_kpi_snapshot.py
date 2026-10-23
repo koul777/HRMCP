@@ -278,6 +278,25 @@ class KpiSnapshotTests(unittest.TestCase):
         self.assertEqual(report["missing_files"], ["deploy/vercel_mcp_app/src/ncs_mcp/only_in_deploy.py"])
         self.assertEqual((report["violation_count"], report["status"]), (2, "fail"))
 
+    def test_evaluation_identity_reads_contract_and_newest_deployed_release(self) -> None:
+        (self.root / "mcp").mkdir()
+        (self.root / "mcp" / "ncs-tool-contract.json").write_text(json.dumps({
+            "surface": {"mode": "public"}, "tools": [{"name": "ncs_search"}, {"name": "ncs_analysis"}],
+            "advanced_tools_available": ["plan_ncs_education_path"]}), encoding="utf-8")
+        for version, status, updated in (("v1", "deployed", "2026-10-11"), ("v2", "failed", "2026-10-13"),
+                                          ("v3", "deployed", "2026-10-12")):
+            folder = self.root / ".state" / "ncs-data-builder" / "versions" / version
+            folder.mkdir(parents=True)
+            (folder / "release.json").write_text(json.dumps({
+                "status": status, "version": version, "updated_at": updated, "source_commit": f"c-{version}",
+                "production_after_promotion": {"deployment_id": f"dpl_{version}"}}), encoding="utf-8")
+        identity = snapshot.evaluation_identity(self.root)
+        self.assertEqual(identity["public_contract"]["active_tools"], ["ncs_analysis", "ncs_search"])
+        self.assertEqual(identity["public_contract"]["advanced_tools_not_active"], ["plan_ncs_education_path"])
+        self.assertEqual((identity["latest_builder_release"]["version"],
+                          identity["latest_builder_release"]["production_deployment_id"]), ("v3", "dpl_v3"))
+        self.assertEqual(snapshot.evaluation_identity(self.root / "missing")["latest_builder_release"], None)
+
     def test_synthetic_packet_prefixes_match_the_dashboard(self) -> None:
         dashboard = (ROOT / "scripts" / "ncs_dashboard.py").read_text(encoding="utf-8")
         block = dashboard.split("SYNTHETIC_REVIEW_PACKET_PREFIXES = (", 1)[1].split(")", 1)[0]
