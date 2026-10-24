@@ -595,28 +595,43 @@ def serving_guardrails(audit: StatementAudit | None, serving: Counter[str],
 
 TRUSTED_REVIEW_STATUSES = ("human_reviewed", "accepted", "reviewed")
 # review_audit_log entity_type and id column for tables that carry review_status.
+# The middle five are written by the dashboard's save_manual_preprocess.
 # Learning-module tables are legacy and not read by the active recommender (G04).
 G02_AUDIT_ENTITIES = {
     "training_transition_gold_scenarios": ("training_transition_gold_scenario", "scenario_id"),
     "ncs_career_paths": ("ncs_career_path", "career_path_id"),
     "ncs_query_aliases": ("ncs_query_alias", "alias_id"),
     "ontology_concept_label_candidates": ("ontology_concept_label_candidate", "label_id"),
+    "classifications": ("classification", "classification_id"),
+    "competency_units": ("competency_unit", "unit_code"),
+    "competency_elements": ("competency_element", "element_id"),
+    "performance_criteria": ("performance_criteria", "criteria_id"),
+    "ksa_items": ("ksa_item", "ksa_id"),
     "ontology_concepts": ("ontology_concept", "concept_id"),
 }
 # Same as ncs_dashboard.SYNTHETIC_REVIEW_PACKET_PREFIXES: dashboard decision ids, not packet files.
 SYNTHETIC_PACKET_PREFIXES = ("ksa_review_dashboard_one_click_v1:", "ksa_definition_dashboard_review_v1:")
 
 
-def packet_blockers(audit: Any, status: str) -> list[str]:
-    """Packet-backed provenance checks shared with the recommender (review_safety)."""
-    from ncs_mcp.review_safety import packet_backing_blockers
+def g02_entity_keys(conn: Any, table: str, rows: list[Any]) -> dict[str, list[tuple[str, str]]]:
+    """Audit (entity_type, entity_id) pairs for each trusted row of a mapped table.
 
-    return packet_backing_blockers(audit, status)
+    The dashboard's KSA edit updates ontology_concepts but audits the edit as
+    ksa_item by ksa_id, so a concept also looks at its linked KSA items.
+    """
+    entity_type, _ = G02_AUDIT_ENTITIES[table]
+    keys = {str(row["row_id"]): [(entity_type, str(row["row_id"]))] for row in rows}
+    if table == "ontology_concepts" and keys:
+        for link in conn.execute("SELECT concept_id, ksa_id FROM ksa_concept_links "
+                                 "WHERE concept_id IN (SELECT value FROM json_each(?))", (json.dumps(sorted(keys)),)):
+            keys[str(link["concept_id"])].append(("ksa_item", str(link["ksa_id"])))
+    return keys
 
 
 def measure_g02(conn: Any) -> dict[str, Any]:
-    """Trusted review statuses without a packet-backed audit row, and promoted boilerplate definitions."""
+    """Trusted review statuses whose latest audit row is not packet-backed, and promoted boilerplate definitions."""
     from ncs_mcp.db import _is_ksa_definition_boilerplate
+    from ncs_mcp.review_safety import latest_audit_provenance
 
     tables = [row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")]
     placeholders = ",".join("?" for _ in TRUSTED_REVIEW_STATUSES)
@@ -641,31 +656,29 @@ def measure_g02(conn: Any) -> dict[str, Any]:
         if table not in G02_AUDIT_ENTITIES:
             unbacked[table] += count
             blocker_counts["no_audit_entity_mapping"] += count
+            unbacked_reason["missing_packet_fields"] += count
             continue
-        entity_type, id_column = G02_AUDIT_ENTITIES[table]
-        audits: dict[str, list[Any]] = {}
-        for audit in conn.execute("SELECT * FROM review_audit_log WHERE entity_type = ? ORDER BY id", (entity_type,)):
-            audits.setdefault(str(audit["entity_id"]), []).append(audit)
-        for row in conn.execute(f"SELECT {id_column} AS row_id, review_status FROM {table} "
-                                f"WHERE review_status IN ({placeholders})", TRUSTED_REVIEW_STATUSES):
-            rows = audits.get(str(row["row_id"]), [])
-            candidates = [packet_blockers(audit, row["review_status"]) for audit in rows]
-            if any(not blockers for blockers in candidates):
+        _, id_column = G02_AUDIT_ENTITIES[table]
+        rows = conn.execute(f"SELECT {id_column} AS row_id, review_status FROM {table} "
+                            f"WHERE review_status IN ({placeholders})", TRUSTED_REVIEW_STATUSES).fetchall()
+        provenance = latest_audit_provenance(conn, {str(row["row_id"]): str(row["review_status"]) for row in rows},
+                                             g02_entity_keys(conn, table, rows))
+        for blockers, audit in provenance.values():
+            if not blockers:
                 packet_backed += 1
                 continue
             unbacked[table] += 1
-            best = min(candidates, key=len) if candidates else ["review_audit_log"]
-            blocker_counts.update(best)
-            synthetic = best == ["source_decision_packet_resolves_to_reports_artifact"] and any(
-                str(audit["source_decision_packet"] or "").strip().lower().startswith(SYNTHETIC_PACKET_PREFIXES)
-                for audit in rows)
+            blocker_counts.update(blockers)
+            synthetic = blockers == ["source_decision_packet_resolves_to_reports_artifact"] and str(
+                audit["source_decision_packet"] or "").strip().lower().startswith(SYNTHETIC_PACKET_PREFIXES)
             unbacked_reason["dashboard_decision_without_packet_file" if synthetic else "missing_packet_fields"] += 1
     promoted = 0
     for concept in conn.execute("SELECT concept_type, concept_name, definition FROM ontology_concepts "
                                 f"WHERE definition_status = 'defined' OR review_status IN ({placeholders})",
                                 TRUSTED_REVIEW_STATUSES):
-        promoted += bool(_is_ksa_definition_boilerplate(concept["concept_type"] or "", concept["concept_name"] or "",
-                                                        concept["definition"] or ""))
+        definition = (concept["definition"] or "").strip()  # an empty definition promotes nothing
+        promoted += bool(definition) and _is_ksa_definition_boilerplate(concept["concept_type"] or "",
+                                                                        concept["concept_name"] or "", definition)
     violation_count = sum(unbacked.values()) + promoted
     return {
         "guardrail_id": "G02", "scope": "trusted review statuses in every table with review_status; "
@@ -681,7 +694,7 @@ def measure_g02(conn: Any) -> dict[str, Any]:
         "legacy_trusted_rows_not_counted": dict(sorted(legacy_unbacked.items())),
         "promoted_boilerplate_definitions": promoted,
         "on_violation": "exclude the rows from trusted KPI evidence and queue re-confirmation; no automatic status change",
-        "limitations": ["audit action names differ by table and are not checked",
+        "limitations": ["only the latest audit row of a row counts; audit action names are not checked",
                         "legacy learning-module tables are listed but not counted; the active recommender does not read them",
                         "claims in reports or responses (for example llm_reviewed called verified) are not scanned"],
     }

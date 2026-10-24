@@ -237,13 +237,29 @@ def _packet_backed_career_paths(
     A trusted status string alone does not count (guardrail G02); rows marked
     human_reviewed without a packet-backed review_audit_log row stay untrusted.
     """
-    paths = career_paths_for_units(conn, unit_codes, limit=limit, review_statuses=TRUSTED_CAREER_PATH_REVIEW_STATUSES)
-    backed = packet_backed_entity_ids(
+    if not unit_codes:
+        return []
+    # Check provenance before the LIMIT so status-only rows cannot crowd out backed ones.
+    statuses = {
+        str(row["career_path_id"]): _clean(row["review_status"])
+        for row in conn.execute(
+            """
+            SELECT career_path_id, review_status
+            FROM ncs_career_paths
+            WHERE matched_unit_code IN (SELECT value FROM json_each(?))
+              AND review_status IN (SELECT value FROM json_each(?))
+            """,
+            (json.dumps(sorted(unit_codes)), json.dumps(sorted(TRUSTED_CAREER_PATH_REVIEW_STATUSES))),
+        )
+    }
+    backed = packet_backed_entity_ids(conn, "ncs_career_path", statuses)
+    return career_paths_for_units(
         conn,
-        "ncs_career_path",
-        {str(item.get("career_path_id")): _clean(item.get("review_status")) for item in paths},
+        unit_codes,
+        limit=limit,
+        review_statuses=TRUSTED_CAREER_PATH_REVIEW_STATUSES,
+        career_path_ids={int(item) for item in backed},
     )
-    return [item for item in paths if str(item.get("career_path_id")) in backed]
 
 
 def _review_status_counts(items: list[dict[str, Any]]) -> dict[str, int]:

@@ -311,6 +311,41 @@ class KpiSnapshotTests(unittest.TestCase):
                          ["README.md", "mcp/ncs-tool-contract.json:ncs_search"])
         self.assertEqual(report["candidates"][0]["sentence"], "이 과정을 마치면 자격을 인정받습니다.")
 
+    def test_g02_maps_dashboard_manual_edits_and_survives_a_missing_audit_table(self) -> None:
+        from unittest import mock
+
+        now = now_utc()
+        self.conn.execute("PRAGMA foreign_keys = OFF")
+        self.conn.execute("INSERT INTO classifications(classification_id, major_code, major_name, middle_code, "
+                          "middle_name, small_code, small_name, sub_code, sub_name, review_status) "
+                          "VALUES (501, '99', 'M', '01', 'M', '01', 'S', '01', 'Sub', 'human_reviewed')")
+        self.conn.execute("INSERT INTO ontology_concepts(concept_id, concept_name, normalized_key, concept_type, "
+                          "definition_status, relation_status, review_status, created_at, updated_at) VALUES "
+                          "(601, 'edited concept', 'editedconcept', 'knowledge', 'missing', 'unlinked', "
+                          "'human_reviewed', ?, ?)", (now, now))
+        self.conn.execute("INSERT INTO ksa_concept_links(ksa_id, concept_id, created_at) VALUES (701, 601, ?)", (now,))
+        packet = self.root / "decision_audit.json"
+        packet.write_text("{}", encoding="utf-8")
+        from ncs_mcp.review_safety import review_packet_sha256
+        digest = "sha256:" + review_packet_sha256(packet)
+        for entity_type, entity_id in (("classification", "501"), ("ksa_item", "701")):
+            self.conn.execute(
+                "INSERT INTO review_audit_log(entity_type, entity_id, action, new_status, reviewer_id, "
+                "source_decision_packet, source_artifact_hash, rationale, evidence_refs_json, created_at) "
+                "VALUES (?, ?, 'save_manual_preprocess', 'human_reviewed', 'reviewer', "
+                "'reports/decision_audit.json', ?, 'checked', ?, ?)",
+                (entity_type, entity_id, digest, json.dumps([f"{entity_type}:{entity_id}"]), now))
+        with mock.patch("ncs_mcp.review_safety.resolve_repo_reports_artifact",
+                        side_effect=lambda ref, **_: packet if ref == "reports/decision_audit.json" else None):
+            report = snapshot.measure_g02(self.conn)
+        self.assertEqual((report["packet_backed_rows"], report["violation_count"], report["status"]), (2, 0, "pass"))
+        self.assertEqual(report["trusted_rows_by_table"], {"classifications": 1, "ontology_concepts": 1})
+
+        self.conn.execute("DROP TABLE review_audit_log")
+        missing = snapshot.measure_g02(self.conn)
+        self.assertEqual((missing["violation_count"], missing["unbacked_blocker_counts"]),
+                         (2, {"review_audit_log": 2}))
+
     def test_synthetic_packet_prefixes_match_the_dashboard(self) -> None:
         dashboard = (ROOT / "scripts" / "ncs_dashboard.py").read_text(encoding="utf-8")
         block = dashboard.split("SYNTHETIC_REVIEW_PACKET_PREFIXES = (", 1)[1].split(")", 1)[0]

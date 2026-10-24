@@ -369,14 +369,18 @@ def career_paths_for_units(
     *,
     limit: int = 100,
     review_statuses: set[str] | None = None,
+    career_path_ids: set[int] | None = None,
 ) -> list[dict[str, Any]]:
-    if not unit_codes:
+    if not unit_codes or career_path_ids is not None and not career_path_ids:
         return []
     status_clause = ""
     params: list[Any] = [json.dumps(sorted(unit_codes))]
     if review_statuses:
         status_clause = "AND review_status IN (SELECT value FROM json_each(?))"
         params.append(json.dumps(sorted(review_statuses)))
+    if career_path_ids is not None:
+        status_clause += " AND career_path_id IN (SELECT value FROM json_each(?))"
+        params.append(json.dumps(sorted(int(item) for item in career_path_ids)))
     params.append(clamp_limit(limit, default=100, maximum=500))
     rows = conn.execute(
         f"""

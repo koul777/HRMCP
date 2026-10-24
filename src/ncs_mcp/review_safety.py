@@ -197,6 +197,35 @@ def review_packet_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+AUDIT_PROVENANCE_COLUMNS = (
+    "id",
+    "entity_type",
+    "entity_id",
+    "new_status",
+    "reviewer_id",
+    "source_decision_packet",
+    "source_artifact_hash",
+    "rationale",
+    "evidence_refs_json",
+)
+# Job and tool ids (for example codex_report_review_20260619) are not people.
+_AUTOMATED_REVIEWER_PREFIX = re.compile(r"(?:codex|claude|agent|automation|automated|system|mcp|dashboard)(?:$|[_\-:.])")
+_PACKET_SHA256_CACHE: dict[tuple[str, int, int], str] = {}
+
+
+def is_automated_reviewer(reviewer_id: object) -> bool:
+    reviewer = str(reviewer_id or "").strip().lower()
+    return not reviewer or reviewer in AUTOMATED_REVIEWER_IDS or bool(_AUTOMATED_REVIEWER_PREFIX.match(reviewer))
+
+
+def _packet_sha256(path: Path) -> str:
+    stat = path.stat()
+    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    if key not in _PACKET_SHA256_CACHE:
+        _PACKET_SHA256_CACHE[key] = review_packet_sha256(path)
+    return _PACKET_SHA256_CACHE[key]
+
+
 def packet_backing_blockers(audit: Any, status: str) -> list[str]:
     """Why a review_audit_log row does not back `status` with a human decision packet.
 
@@ -206,8 +235,7 @@ def packet_backing_blockers(audit: Any, status: str) -> list[str]:
     blockers = []
     if str(audit["new_status"] or "").strip() != status:
         blockers.append("new_status_matches_row")
-    reviewer = str(audit["reviewer_id"] or "").strip()
-    if not reviewer or reviewer.lower() in AUTOMATED_REVIEWER_IDS:
+    if is_automated_reviewer(audit["reviewer_id"]):
         blockers.append("human_reviewer_id")
     packet = str(audit["source_decision_packet"] or "").strip()
     packet_path = resolve_repo_reports_artifact(packet, extensions=REVIEW_PACKET_EXTENSIONS) if packet else None
@@ -215,7 +243,7 @@ def packet_backing_blockers(audit: Any, status: str) -> list[str]:
         blockers.append("source_decision_packet_resolves_to_reports_artifact")
     digest = str(audit["source_artifact_hash"] or "").strip().lower()
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest) or (
-        packet_path is not None and digest != "sha256:" + review_packet_sha256(packet_path)
+        packet_path is not None and digest != "sha256:" + _packet_sha256(packet_path)
     ):
         blockers.append("source_artifact_hash_matches_reports_artifact")
     if not str(audit["rationale"] or "").strip():
@@ -225,30 +253,65 @@ def packet_backing_blockers(audit: Any, status: str) -> list[str]:
     return blockers
 
 
+def latest_audit_provenance(
+    conn: Any,
+    statuses: dict[str, str],
+    entity_keys: dict[str, list[tuple[str, str]]],
+) -> dict[str, tuple[list[str], Any]]:
+    """Blockers of each row's most recent audit row, and that audit row.
+
+    `statuses` maps a row key to its current review status; `entity_keys` maps
+    the same key to the (entity_type, entity_id) pairs whose audit rows describe
+    it. Only the latest of those audit rows counts: a later automated change
+    must not ride on an earlier packet. Rows without an audit table, its
+    provenance columns or any audit row get a blocker instead of an error.
+    """
+    if not statuses:
+        return {}
+    has_table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'review_audit_log'"
+    ).fetchone() is not None
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(review_audit_log)")} if has_table else set()
+    if not has_table or not set(AUDIT_PROVENANCE_COLUMNS) <= columns:
+        blocker = "review_audit_log" if not has_table else "review_audit_log_columns"
+        return {key: ([blocker], None) for key in statuses}
+    owners: dict[tuple[str, str], list[str]] = {}
+    for key, pairs in entity_keys.items():
+        for entity_type, entity_id in pairs:
+            owners.setdefault((entity_type, str(entity_id)), []).append(key)
+    latest: dict[str, Any] = {}
+    for entity_type in sorted({entity_type for entity_type, _ in owners}):
+        ids = sorted(entity_id for owner_type, entity_id in owners if owner_type == entity_type)
+        for audit in conn.execute(
+            f"""
+            SELECT {", ".join(AUDIT_PROVENANCE_COLUMNS)}
+            FROM review_audit_log
+            WHERE entity_type = ? AND entity_id IN (SELECT value FROM json_each(?))
+            ORDER BY id
+            """,
+            (entity_type, json.dumps(ids)),
+        ):
+            for key in owners[(entity_type, str(audit["entity_id"]))]:
+                if key not in latest or int(audit["id"]) > int(latest[key]["id"]):
+                    latest[key] = audit
+    return {
+        key: (packet_backing_blockers(latest[key], status), latest[key]) if key in latest else (["review_audit_log"], None)
+        for key, status in statuses.items()
+    }
+
+
 def packet_backed_entity_ids(conn: Any, entity_type: str, statuses: dict[str, str]) -> set[str]:
-    """Entity ids whose current status has a packet-backed review_audit_log row.
+    """Entity ids whose latest review_audit_log row backs the current status with a packet.
 
     `statuses` maps entity_id to the entity's current review status. Without an
     audit table (compact serving snapshots) nothing is packet-backed.
     """
-    if not statuses or conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'review_audit_log'"
-    ).fetchone() is None:
-        return set()
-    rows = conn.execute(
-        """
-        SELECT entity_id, new_status, reviewer_id, source_decision_packet, source_artifact_hash,
-               rationale, evidence_refs_json
-        FROM review_audit_log
-        WHERE entity_type = ? AND entity_id IN (SELECT value FROM json_each(?))
-        """,
-        (entity_type, json.dumps(sorted(statuses))),
-    ).fetchall()
-    return {
-        str(row["entity_id"])
-        for row in rows
-        if not packet_backing_blockers(row, statuses[str(row["entity_id"])])
-    }
+    provenance = latest_audit_provenance(
+        conn,
+        statuses,
+        {entity_id: [(entity_type, entity_id)] for entity_id in statuses},
+    )
+    return {entity_id for entity_id, (blockers, _) in provenance.items() if not blockers}
 
 
 def evidence_refs_json_is_nonempty_string_list(value: str | None) -> bool:
