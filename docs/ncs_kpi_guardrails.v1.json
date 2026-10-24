@@ -436,6 +436,58 @@
         "src/ncs_mcp/quality_gates.py",
         "AGENTS.md"
       ]
+    },
+    {
+      "id": "K11",
+      "name": "소형 모델 도구 체이닝 통과율",
+      "unit": "ratio",
+      "scope": "frozen chaining case file (one unit per major by fixed seed, ambiguous unit names excluded, two templates); public release-profile tools exactly as an MCP client receives them; one named local model",
+      "formula": "passed cases / frozen cases; elements template passes when the final answer contains at least half of the element names, classification template when it contains the major and sub classification names",
+      "sample": {
+        "frozen_case_file_required": true,
+        "per_major_required": true,
+        "minimum_cases": 40,
+        "recorded": [
+          "cases_sha256",
+          "model",
+          "ollama_version",
+          "tool_definitions_sha256",
+          "temperature_0",
+          "seed",
+          "max_turns"
+        ]
+      },
+      "target": {
+        "operator": ">=",
+        "value": null,
+        "status": "set_by_human_after_first_baseline"
+      },
+      "warning": null,
+      "action": {
+        "response": "report false_no_data cases; no small-model compatibility claim while below the human-set target"
+      },
+      "comparison": {
+        "method": "paired cases on the same case file and model; exact McNemar two-sided alpha 0.05",
+        "not_significant": "inconclusive"
+      },
+      "supporting_outputs": [
+        "false_no_data_rate (failed cases answering that the data does not exist / all cases)",
+        "mean_tool_calls",
+        "tool_call_sequences",
+        "wilson_95_interval"
+      ],
+      "owner": "MCP 표면",
+      "cadence": "per_release_candidate_and_after_tool_surface_changes",
+      "measurement_status": "baseline_pending",
+      "added": {
+        "date": "2026-10-24",
+        "approved_by": "user instruction in session",
+        "reason": "data that exists must not be reported as missing by weaker tool-calling models"
+      },
+      "evidence_sources": [
+        "scripts/eval_small_model_tool_chaining.py",
+        "scripts/mcp_surface_gate.py"
+      ]
     }
   ],
   "guardrails": [

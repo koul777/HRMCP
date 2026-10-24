@@ -1376,3 +1376,29 @@ candidate. Candidate and sidecar link checks and the operation lease are verifie
 before opening for writes and before committing. Source KSA and human review states
 are preserved. Run `python -m pytest -q tests/test_classification_identity.py` in
 addition to unittest discovery because that file includes pytest functions.
+
+## Public MCP surface gate and small-model chaining (2026-10-24)
+
+`python scripts/mcp_surface_gate.py --out <report.json>` checks the public tool
+surface in code and exits 1 on any failure. It reads the live `tools/list` of the
+`advanced_disabled_contract` profile and checks: tool count (1 to 12), tool name
+format, description length (30 to 600 chars), total definition size (9,000 chars,
+about 4,000 estimated tokens), schema shapes that weak tool-calling clients
+mishandle (only nullable `anyOf`, no `$ref`/`oneOf`/`allOf`, free-form objects only
+for allowlisted parameters), that routes and next-step hints name registered tools
+with accepted parameters, that `ncs_execute_tool` cannot reach operator or legacy
+tools, and that public tools never read a `save`-style flag. Parameter descriptions
+are measured as a warning only. `tests/test_mcp_surface_gate.py` runs the gate, so
+unittest discovery fails when the surface breaks it. Changing a threshold constant
+is a contract change: record the date and reason here.
+
+Public tools with markdown renderers add a `### 다음 단계` section (and a
+`next_actions` list) with at most three follow-up calls, for example search hits to
+`ncs_unit_detail`. A filtered or unfiltered `NOT_FOUND` from `ncs_search` adds a
+note that an empty result is not proof the data is missing and points to
+`ncs_discover_tools`; other errors get no hints.
+
+`scripts/eval_small_model_tool_chaining.py` measures K11 in
+`docs/NCS_KPI_GUARDRAILS.md` with a local Ollama model: `build-cases` freezes the
+case file, `run` lets the model call the public tools through the MCP path and
+scores the final answers. Run it alone; the model needs about 3 GB of memory.
