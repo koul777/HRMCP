@@ -512,13 +512,144 @@ def _returned_total_line(total_count: int | None, returned_count: int | None = N
     return f"{int(total_count)}건 중 {int(returned_count)}건 표시"
 
 
-def _append_markdown_footer(lines: list[str], audit: dict[str, Any] | None) -> str:
+def _markdown_footer_lines(audit: dict[str, Any] | None) -> list[str]:
     generated_at = audit.get("generated_at") if isinstance(audit, dict) else None
-    lines.append("")
+    lines = [""]
     if generated_at:
         lines.append(f"audit.generated_at: `{generated_at}`")
     lines.append(PUBLIC_SOURCE_FOOTER)
+    return lines
+
+
+def _append_markdown_footer(lines: list[str], audit: dict[str, Any] | None) -> str:
+    lines.extend(_markdown_footer_lines(audit))
     return "\n".join(line for line in lines if line is not None)
+
+
+MAX_PUBLIC_NEXT_ACTIONS = 3
+
+
+def _next_action(tool: str, purpose: str, **arguments: Any) -> dict[str, Any]:
+    return {"tool": tool, "arguments": arguments, "purpose": purpose}
+
+
+def _search_result_unit_codes(rows: Any) -> list[str]:
+    codes: list[str] = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        path = row.get("path") if isinstance(row.get("path"), dict) else {}
+        code = row.get("id") if row.get("type") == "unit" else path.get("unit_code")
+        if isinstance(code, str) and code and code not in codes:
+            codes.append(code)
+    return codes
+
+
+def _search_retry_scope(arguments: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    """The hard scope of a search, so a suggested retry cannot widen it."""
+    scope: dict[str, Any] = {}
+    effective_filter = result.get("classification_filter") or arguments.get("classification_filter")
+    if isinstance(effective_filter, dict) and effective_filter:
+        scope["classification_filter"] = effective_filter
+    for key in ("job_scope", "context_text"):
+        value = arguments.get(key)
+        if isinstance(value, str) and value.strip():
+            scope[key] = value
+    return scope
+
+
+def _public_next_actions(
+    tool_name: str,
+    arguments: dict[str, Any],
+    result: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Suggest up to three follow-up calls so weaker tool-calling models keep chaining.
+
+    Every suggestion names a public tool and only parameters that tool accepts
+    (checked by scripts/mcp_surface_gate.py).
+    """
+    error = result.get("error") if isinstance(result.get("error"), dict) else {}
+    ok = result.get("ok", True) is not False and not error
+    actions: list[dict[str, Any]] = []
+    if tool_name == "ncs_search":
+        query = _clean_markdown_text(arguments.get("query"))
+        if ok:
+            codes = _search_result_unit_codes(result.get("results"))
+            actions = [
+                _next_action("ncs_unit_detail", "능력단위요소·수행준거·KSA 확인", unit_code=code)
+                for code in codes[:2]
+            ]
+            if codes:
+                actions.append(
+                    _next_action("recommend_training_for_task", "이 능력단위 과업에 맞는 훈련과정 후보 확인", unit_code=codes[0])
+                )
+        elif str(error.get("code") or "").upper() == "NOT_FOUND" and query:
+            # A retry must stay inside the caller's hard scope; never suggest an unscoped route.
+            scope = _search_retry_scope(arguments, result)
+            purpose = "같은 분류 범위에서 도구와 질의 다시 확인" if scope else "질의에 맞는 도구와 분류 범위 다시 확인"
+            actions = [_next_action("ncs_discover_tools", purpose, intent=query, **scope)]
+    elif tool_name == "ncs_unit_detail" and ok:
+        unit_code = arguments.get("unit_code")
+        include = set(arguments.get("include") or ["elements", "criteria", "ksa"])
+        if isinstance(unit_code, str) and unit_code:
+            if not {"training", "qualification"} <= include:
+                actions.append(
+                    _next_action(
+                        "ncs_unit_detail",
+                        "연결된 훈련과정·자격 확인",
+                        unit_code=unit_code,
+                        include=["training", "qualification"],
+                    )
+                )
+            actions.append(_next_action("recommend_training_for_task", "과업 근거 기반 훈련과정 추천", unit_code=unit_code))
+            actions.append(_next_action("ncs_analysis", "경력개발경로 확인", mode="career_path", unit_code=unit_code))
+    elif tool_name == "ncs_training" and ok and arguments.get("training_course_id") is None:
+        for row in result.get("training_courses") or []:
+            course = row.get("training_course") if isinstance(row, dict) else None
+            course_id = course.get("training_course_id") if isinstance(course, dict) else None
+            if course_id is not None:
+                actions.append(
+                    _next_action("ncs_training", "과정 상세와 연결 능력단위 확인", training_course_id=course_id)
+                )
+                break
+    elif tool_name == "ncs_analysis" and ok:
+        unit_code = arguments.get("unit_code")
+        if isinstance(unit_code, str) and unit_code:
+            actions.append(_next_action("ncs_unit_detail", "능력단위요소·수행준거·KSA 확인", unit_code=unit_code))
+    return actions[:MAX_PUBLIC_NEXT_ACTIONS]
+
+
+def _next_actions_markdown(result: dict[str, Any], renderer: str | None) -> list[str]:
+    actions = result.get("next_actions")
+    if not isinstance(actions, list) or not actions:
+        return []
+    lines = ["### 다음 단계"]
+    if result.get("ok") is False and renderer == "ncs_search":
+        scoped = any("classification_filter" in (action.get("arguments") or {}) or "job_scope" in (action.get("arguments") or {})
+                     for action in actions)
+        if scoped:
+            lines.append("이 분류 범위 안에서 결과가 없습니다. 같은 범위에서 핵심어를 바꿔 다시 찾고, "
+                         "범위 밖에서 찾은 결과를 이 범위의 근거로 쓰지 마세요.")
+        else:
+            lines.append("결과 없음이 자료가 없다는 뜻은 아닙니다. 핵심어를 줄이거나 다른 표현으로 다시 검색하세요.")
+    for action in actions:
+        arguments = ", ".join(
+            f"{key}={json.dumps(value, ensure_ascii=False)}"
+            for key, value in (action.get("arguments") or {}).items()
+        )
+        lines.append(f"- `{action.get('tool')}`({arguments}): {action.get('purpose')}")
+    return lines
+
+
+def _with_next_steps(markdown: str | None, result: dict[str, Any], renderer: str | None) -> str | None:
+    section = _next_actions_markdown(result, renderer)
+    if not markdown or not section:
+        return markdown
+    footer = "\n".join(_markdown_footer_lines(result.get("audit")))
+    body = "\n".join(section)
+    if markdown.endswith(footer):
+        return f"{markdown[: -len(footer)]}\n{body}\n{footer}"
+    return f"{markdown}\n\n{body}"
 
 
 _PUBLIC_MARKDOWN_RENDERERS: dict[
@@ -1156,6 +1287,14 @@ def _render_tool_response_markdown(
     *,
     renderer: str | None = None,
 ) -> str | None:
+    return _with_next_steps(_render_tool_body_markdown(result, renderer=renderer), result, renderer)
+
+
+def _render_tool_body_markdown(
+    result: dict[str, Any],
+    *,
+    renderer: str | None = None,
+) -> str | None:
     existing = _content_text_from_payload(result)
     if existing:
         return _append_markdown_footer([existing], result.get("audit"))
@@ -1298,11 +1437,17 @@ def error_response(code: str, **fields: Any) -> dict[str, Any]:
 def guard_public_tool(func):
     """Convert unexpected public-tool failures into sanitized MCP errors."""
 
+    signature = inspect.signature(func)
+
     @wraps(func)
     def guarded(*args, **kwargs):
         try:
             response = func(*args, **kwargs)
             if isinstance(response, dict):
+                arguments = signature.bind_partial(*args, **kwargs).arguments
+                next_actions = _public_next_actions(func.__name__, arguments, response)
+                if next_actions:
+                    response = RenderedToolPayload({**response, "next_actions": next_actions})
                 return tool_response(
                     response,
                     include_data_alias="data" in response,

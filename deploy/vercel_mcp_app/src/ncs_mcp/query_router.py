@@ -713,6 +713,16 @@ def route_ncs_query(
         }
     )
     route_contract["route_fingerprint"] = route_fingerprint
+    # The fingerprinted contract keeps every pipeline tool, because discovery and
+    # meta execution route with different tool sets. The chain shown to clients
+    # drops follow-up tools this surface cannot call, so a model is not sent to
+    # a disabled tool.
+    unavailable_chain_tools = (
+        []
+        if available_tool_names is None
+        else [tool_name for tool_name in allowed_tools[1:] if tool_name not in available_tool_names]
+    )
+    expected_tool_chain = [tool_name for tool_name in allowed_tools if tool_name not in unavailable_chain_tools]
 
     return {
         "schema": ROUTE_CONTRACT_SCHEMA,
@@ -728,7 +738,8 @@ def route_ncs_query(
         "confidence": _route_confidence(score),
         "matched_signals": matched_signals,
         "pipeline": pipeline,
-        "expected_tool_chain": allowed_tools,
+        "expected_tool_chain": expected_tool_chain,
+        "unavailable_chain_tools": unavailable_chain_tools,
         "risk_flags": risk_flags,
         "guard_flags": guard_flags,
         "route_contract": route_contract,
